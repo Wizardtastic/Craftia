@@ -201,6 +201,19 @@ impl ChunkBuffers {
 enum PendingDestroy {
     ChunkValue(PassBuffers),
     Staging(GpuBuffer),
+    /// Per-batch upload command buffer + its associated fence.
+    /// Allocated from `command_pool` + a fresh `vk::Fence`, submitted
+    /// once with `fence`, freed in `drain_pending_destructions` after
+    /// `wait_for_fences(fence)` returns signaled. The cmd buffer rule
+    /// (`VUID-vkFreeCommandBuffers-pCommandBuffers-00047` — "must not
+    /// be in pending state") is stricter than the buffer rule
+    /// (`vkDestroyBuffer` tolerates FIFO/FRAMES_IN_FLIGHT geographic
+    /// heuristics), so we cannot rely on the heap-ordering hint that
+    /// the ChunkValue/Staging defers use — we must observe the fence.
+    CommandBuffer {
+        cmd: vk::CommandBuffer,
+        fence: vk::Fence,
+    },
 }
 
 struct Frame {
@@ -211,6 +224,14 @@ struct Frame {
     camera_ubo: GpuBuffer,
     shadow_ubo: GpuBuffer,
     descriptor_set: vk::DescriptorSet,
+    /// Tile remap UBO + descriptor set (set 1, binding 0 of the chunk
+    /// pipeline layout). Currently holds an identity mapping (`map[i] = i`)
+    /// — animated tile rotation hasn't shipped — but it must exist because
+    /// `shaders/chunk.frag` declares `layout(set = 1, binding = 0) uniform
+    /// TileRemap { uint map[256]; } tile_remap;` and the validation layer
+    /// blocks pipeline creation without it.
+    tile_remap_ubo: GpuBuffer,
+    tile_remap_descriptor_set: vk::DescriptorSet,
 }
 
 /// Per-chunk occlusion query tracking.
@@ -236,6 +257,42 @@ struct OcclusionFrameData {
 const OCCLUSION_INVISIBLE_THRESHOLD: u32 = 2;
 /// Maximum occlusion queries per frame-in-flight.
 const MAX_OCCLUSION_QUERIES: u32 = 16384;
+
+/// Tiny 1×1×6 cubemap used as a placeholder when no
+/// `assets/textures/panorama/*.png` files are present.
+///
+/// Layout mirrors `Panorama` but is single-pass: no staging, no upload,
+/// just an image + view + sampler so the panorama descriptor set always
+/// has a valid binding. Owned by [`Renderer`] (not constructed inline in
+/// `Renderer::new`) so [`Renderer::drop`] can free the underlying
+/// `gpu_allocator` allocation — pre-refactor these four resources lived in
+/// `let` locals inside the `else` branch and silently leaked at shutdown
+/// (the `panorama_placeholder` allocation accumulated each launch).
+struct PanoramaPlaceholder {
+    image: vk::Image,
+    view: vk::ImageView,
+    sampler: vk::Sampler,
+    allocation: Option<gpu_allocator::vulkan::Allocation>,
+}
+
+impl PanoramaPlaceholder {
+    /// Free Vulkan handles + the underlying allocation. Call from the
+    /// renderer [`Drop`] once `device_wait_idle` has confirmed the GPU is
+    /// past any frame that might have sampled the placeholder.
+    fn destroy(&mut self, device: &ash::Device, alloc: &Alloc) {
+        unsafe {
+            device.destroy_sampler(self.sampler, None);
+            device.destroy_image_view(self.view, None);
+            device.destroy_image(self.image, None);
+        }
+        self.image = vk::Image::null();
+        self.view = vk::ImageView::null();
+        self.sampler = vk::Sampler::null();
+        if let Some(a) = self.allocation.take() {
+            alloc.free(a);
+        }
+    }
+}
 
 #[allow(dead_code)]
 pub struct Renderer {
@@ -275,6 +332,12 @@ pub struct Renderer {
     descriptor_pool: vk::DescriptorPool,
     #[allow(dead_code)]
     descriptor_set_layout: vk::DescriptorSetLayout,
+    /// Set-1 descriptor set layout for the chunk material pipeline
+    /// (`tile_remap` UBO consumed by `shaders/chunk.frag`). Held on the
+    /// renderer for `recreate_chunk_pipelines` + tile_remap descriptor set
+    /// allocation. See `pipeline::create_tile_remap_descriptor_set_layout`.
+    #[allow(dead_code)]
+    tile_remap_set_layout: vk::DescriptorSetLayout,
 
     command_pool: vk::CommandPool,
     // Cached shader SPIR-V blobs. Populated at startup from build.rs-compiled
@@ -343,6 +406,12 @@ pub struct Renderer {
     panorama_descriptor_pool: vk::DescriptorPool,
     panorama_descriptor_set: vk::DescriptorSet,
     panorama: crate::panorama::Panorama,
+    /// `Some` when the user has no `assets/textures/panorama/*.png`
+    /// files: holds the placeholder cubemap so Drop can release the
+    /// underlying image + view + sampler + allocation. `None` when a
+    /// real panorama was loaded this launch (everything lives on
+    /// `panorama` instead).
+    panorama_placeholder: Option<PanoramaPlaceholder>,
     panorama_vert_spirv: Vec<u8>,
     panorama_frag_spirv: Vec<u8>,
 
@@ -601,7 +670,20 @@ impl Renderer {
 
         // --- descriptor set layout + pool + fog UBO ---
         let descriptor_set_layout = pipeline::create_descriptor_set_layout(&device)?;
-        let descriptor_pool = pipeline::create_descriptor_pool(&device, FRAMES_IN_FLIGHT)?;
+        let tile_remap_set_layout =
+            pipeline::create_tile_remap_descriptor_set_layout(&device)?;
+        // `max_sets = FRAMES_IN_FLIGHT * 2`: each frame in flight now has
+        // TWO descriptor sets — the chunk material set (binding 0..8) and
+        // the new tile_remap set (set 1 binding 0). Both are allocated from
+        // the same pool.
+        let descriptor_pool =
+            pipeline::create_descriptor_pool(&device, FRAMES_IN_FLIGHT * 2)?;
+        let tile_remap_descriptor_sets = pipeline::allocate_descriptor_sets(
+            &device,
+            descriptor_pool,
+            tile_remap_set_layout,
+            FRAMES_IN_FLIGHT,
+        )?;
         let mut fog_ubo = GpuBuffer::host_visible(
             &device,
             &alloc,
@@ -727,7 +809,11 @@ impl Renderer {
             depth_format,
             vk::SampleCountFlags::TYPE_1,
         )?;
-        let pipeline_layout = pipeline::create_pipeline_layout(&device, descriptor_set_layout)?;
+        let pipeline_layout = pipeline::create_pipeline_layout(
+            &device,
+            descriptor_set_layout,
+            tile_remap_set_layout,
+        )?;
         let pipeline = pipeline::create_graphics_pipeline(
             &device,
             render_pass,
@@ -971,6 +1057,10 @@ impl Renderer {
         }
 
         // --- per-frame resources ---
+        // Allocate FRAMES_IN_FLIGHT chunk material descriptor sets (one per
+        // frame-in-flight, each set covers bindings 0..8 of the chunk
+        // material pipeline layout). The companion tile_remap sets live
+        // separately in `tile_remap_descriptor_sets`.
         let descriptor_sets = pipeline::allocate_descriptor_sets(
             &device,
             descriptor_pool,
@@ -1097,7 +1187,9 @@ impl Renderer {
             })
             .collect::<Result<Vec<_>>>()?;
         let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        for &descriptor_set in descriptor_sets.iter().take(FRAMES_IN_FLIGHT) {
+        for (idx_within_fif, &descriptor_set) in
+            descriptor_sets.iter().take(FRAMES_IN_FLIGHT).enumerate()
+        {
             let cmd = {
                 let alloc_info = vk::CommandBufferAllocateInfo::default()
                     .command_pool(command_pool)
@@ -1150,6 +1242,30 @@ impl Renderer {
                 scene_depth_sampler,
                 reflection_ubo.buffer,
             );
+            // Tile-remap UBO: 256 u32 entries (= 1024 B). Currently an
+            // identity map so the chunk shader's `tile_remap.map[frag_tile]`
+            // returns the canonical tile index; future animated-tile logic
+            // updates this in place.
+            let mut tile_remap_ubo = GpuBuffer::host_visible(
+                &device,
+                &alloc,
+                std::mem::size_of::<pipeline::TileRemapUbo>() as vk::DeviceSize,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                "tile_remap_ubo",
+            )?;
+            {
+                let mut map = [0u32; 256];
+                for (i, slot) in map.iter_mut().enumerate() {
+                    *slot = i as u32;
+                }
+                let remap = pipeline::TileRemapUbo { map };
+                tile_remap_ubo.upload(bytemuck::bytes_of(&remap))?;
+            }
+            pipeline::update_tile_remap_descriptor_set(
+                &device,
+                tile_remap_descriptor_sets[idx_within_fif],
+                tile_remap_ubo.buffer,
+            );
             frames.push(Frame {
                 cmd,
                 in_flight_fence,
@@ -1158,6 +1274,8 @@ impl Renderer {
                 camera_ubo,
                 shadow_ubo,
                 descriptor_set,
+                tile_remap_ubo,
+                tile_remap_descriptor_set: tile_remap_descriptor_sets[idx_within_fif],
             });
         }
 
@@ -1283,12 +1401,18 @@ impl Renderer {
         let panorama = crate::panorama::Panorama::load(&device, &alloc, command_pool, graphics_queue, panorama_dir);
 
         // Create a 1x1 placeholder cubemap if panorama didn't load (so the
-        // descriptor set always has a valid image view bound).
+        // descriptor set always has a valid image view bound). The
+        // placeholder is owned by the renderer (not a `let` local) so
+        // [`Renderer::drop`] can release the four underlying Vulkan
+        // resources + `gpu_allocator` allocation; pre-refactor these
+        // silently leaked at shutdown.
         let panorama_view_for_binding;
         let panorama_sampler_for_binding;
+        let panorama_placeholder: Option<PanoramaPlaceholder>;
         if panorama.loaded {
             panorama_view_for_binding = panorama.view;
             panorama_sampler_for_binding = panorama.sampler;
+            panorama_placeholder = None;
         } else {
             // Create a tiny 1x1x6 cubemap as placeholder.
             let placeholder_create = vk::ImageCreateInfo::default()
@@ -1332,7 +1456,7 @@ impl Renderer {
                     base_mip_level: 0, level_count: 1,
                     base_array_layer: 0, layer_count: 6,
                 });
-            panorama_view_for_binding = unsafe { device.create_image_view(&view_info, None) }
+            let placeholder_view = unsafe { device.create_image_view(&view_info, None) }
                 .map_err(|e| anyhow!("panorama placeholder view: {e:?}"))?;
             let sampler_info = vk::SamplerCreateInfo::default()
                 .mag_filter(vk::Filter::LINEAR)
@@ -1340,8 +1464,16 @@ impl Renderer {
                 .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-            panorama_sampler_for_binding = unsafe { device.create_sampler(&sampler_info, None) }
+            let placeholder_sampler = unsafe { device.create_sampler(&sampler_info, None) }
                 .map_err(|e| anyhow!("panorama placeholder sampler: {e:?}"))?;
+            panorama_view_for_binding = placeholder_view;
+            panorama_sampler_for_binding = placeholder_sampler;
+            panorama_placeholder = Some(PanoramaPlaceholder {
+                image: placeholder_img,
+                view: placeholder_view,
+                sampler: placeholder_sampler,
+                allocation: Some(placeholder_alloc),
+            });
         }
 
         // Write the panorama descriptor set.
@@ -1408,6 +1540,11 @@ impl Renderer {
                 .query_count(MAX_OCCLUSION_QUERIES);
             let pool = unsafe { device.create_query_pool(&pool_info, None) }
                 .map_err(|e| anyhow!("create occlusion query_pool: {e:?}"))?;
+            // Initial reset: puts all queries in "unavailable" state, satisfying
+            // VUID-vkCmdBeginQuery-None-00807 ("query not reset") for the first
+            // frame. Per-frame resets in record_chunk_passes keep it valid
+            // thereafter.
+            unsafe { device.reset_query_pool(pool, 0, MAX_OCCLUSION_QUERIES) };
             occlusion_frames_vec.push(OcclusionFrameData {
                 query_pool: pool,
                 used_queries: Vec::new(),
@@ -1522,6 +1659,15 @@ impl Renderer {
             .query_count(GPU_TIMESTAMP_COUNT * FRAMES_IN_FLIGHT as u32);
         let query_pool = unsafe { device.create_query_pool(&query_pool_info, None) }
             .map_err(|e| anyhow!("create_query_pool: {e:?}"))?;
+        // Initial reset for the timestamp pool — required before the first
+        // vkGetQueryPoolResults call (VUID-vkGetQueryPoolResults-None-09401).
+        unsafe {
+            device.reset_query_pool(
+                query_pool,
+                0,
+                GPU_TIMESTAMP_COUNT * FRAMES_IN_FLIGHT as u32,
+            )
+        };
 
         // Capture config fields referenced *after* the `config,` shorthand
         // in the struct literal below moves `config` into Self.
@@ -1575,6 +1721,7 @@ impl Renderer {
             wireframe_enabled: false,
             descriptor_pool,
             descriptor_set_layout,
+            tile_remap_set_layout,
             command_pool,
             atlas,
             chunk_vert_spirv, chunk_frag_spirv,
@@ -1608,6 +1755,7 @@ impl Renderer {
             panorama_descriptor_pool,
             panorama_descriptor_set,
             panorama,
+            panorama_placeholder,
             panorama_vert_spirv,
             panorama_frag_spirv,
             entity_pipeline,
@@ -2222,6 +2370,14 @@ impl Renderer {
                 Ok(b) => b,
                 Err(e) => {
                     log::error!("staging alloc failed: {e}");
+                    // End the recording into EXECUTABLE state before freeing
+                    // — `vkFreeCommandBuffers` requires the cmd's state to be
+                    // INITIAL or EXECUTABLE, and validation reports "in use"
+                    // (VUID-vkFreeCommandBuffers-pCommandBuffers-00047) for
+                    // primary cmds still in RECORDING after `begin_command_buffer`.
+                    // An un-endable cmd is reset to INITIAL via pool reset.
+                    let _ = unsafe { device.end_command_buffer(cmd) };
+                    unsafe { device.free_command_buffers(pool, &[cmd]); }
                     continue;
                 }
             };
@@ -2229,6 +2385,8 @@ impl Renderer {
             if let Err(e) = staging.upload(&u.vertices) {
                 log::error!("staging vertex upload: {e}");
                 staging.destroy(device, alloc);
+                let _ = unsafe { device.end_command_buffer(cmd) };
+                unsafe { device.free_command_buffers(pool, &[cmd]); }
                 continue;
             }
             // Copy indices after vertices in the staging buffer.
@@ -2238,6 +2396,8 @@ impl Renderer {
                     Err(e) => {
                         log::error!("staging map: {e}");
                         staging.destroy(device, alloc);
+                        let _ = unsafe { device.end_command_buffer(cmd) };
+                        unsafe { device.free_command_buffers(pool, &[cmd]); }
                         continue;
                     }
                 };
@@ -2255,6 +2415,8 @@ impl Renderer {
                 Err(e) => {
                     log::error!("vbo alloc: {e}");
                     staging.destroy(device, alloc);
+                    let _ = unsafe { device.end_command_buffer(cmd) };
+                    unsafe { device.free_command_buffers(pool, &[cmd]); }
                     continue;
                 }
             };
@@ -2270,6 +2432,8 @@ impl Renderer {
                     log::error!("ibo alloc: {e}");
                     staging.destroy(device, alloc);
                     vbo.destroy(device, alloc);
+                    let _ = unsafe { device.end_command_buffer(cmd) };
+                    unsafe { device.free_command_buffers(pool, &[cmd]); }
                     continue;
                 }
             };
@@ -2318,15 +2482,58 @@ impl Renderer {
                 log::error!("end_command_buffer (upload) failed: {e:?}");
                 return;
             }
-            let command_buffers = [cmd];
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-            if let Err(e) = device.queue_submit(queue, &[submit_info], vk::Fence::null()) {
-                log::error!("upload queue_submit failed: {e}");
-                return;
-            }
-            device.free_command_buffers(pool, &[cmd]);
         }
         let submit_frame = self.frame_counter;
+        // Defer cmd buffer reclamation to the existing
+        // `drain_pending_destructions` path (the same one used for
+        // staging + chunk VBO reclaim below). The earlier
+        // `queue_wait_idle` + `free_command_buffers` pair was trying
+        // to satisfy VUID-vkFreeCommandBuffers-pCommandBuffers-00047
+        // ("cmd in use") AND avoid the STATUS_ACCESS_VIOLATION segfault
+        // we saw after `spawn ready`, but it DEADLOCKED the engine:
+        // `vkQueueWaitIdle` blocks the main thread, which is the same
+        // thread that pumps winit window events. With the main thread
+        // stalled, the swapchain `image_available` semaphore never gets
+        // a present-paired signal (the OS won't present without the
+        // event loop advancing), so the queue never drains, so the
+        // wait never returns — TDR / force-close after ~2 s.
+        //
+        // The fix is to submit with a DEDICATED per-batch fence, push
+        // both the cmd and the fence to `pending_destruction`, and let
+        // the next frame's drain `wait_for_fences` on it. That avoids
+        // both the deadlock (no main-thread wait) AND the spec
+        // violation (we only `vkFreeCommandBuffers` after the fence
+        // has signalled, satisfying the "not pending" requirement).
+        let command_buffers = [cmd];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        let batch_fence = unsafe {
+            match device.create_fence(&vk::FenceCreateInfo::default(), None) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::error!("upload create_fence failed: {e:?}");
+                    // Submission failure path: we're about to return
+                    // without recording, so free the cmd buffer
+                    // immediately (no fence was ever registered).
+                    device.free_command_buffers(pool, &[cmd]);
+                    return;
+                }
+            }
+        };
+        if let Err(e) = unsafe { device.queue_submit(queue, &[submit_info], batch_fence) } {
+            log::error!("upload queue_submit failed: {e}");
+            unsafe {
+                device.destroy_fence(batch_fence, None);
+                device.free_command_buffers(pool, &[cmd]);
+            }
+            return;
+        }
+        self.pending_destruction.push((
+            submit_frame,
+            PendingDestroy::CommandBuffer {
+                cmd,
+                fence: batch_fence,
+            },
+        ));
 
         // Insert into the chunk map. Each chunk can have both an opaque and a
         // transparent pass â€” store them in the same ChunkBuffers entry rather
@@ -2559,6 +2766,36 @@ impl Renderer {
                     PendingDestroy::Staging(b) => {
                         b.destroy_in_place(device, alloc);
                     }
+                    PendingDestroy::CommandBuffer { cmd, fence } => {
+                        // Wait for the upload's dedicated fence. This
+                        // is what guarantees the cmd is no longer in
+                        // the "pending" state (VUID 00047 — required
+                        // for `vkFreeCommandBuffers`). The wait is on
+                        // the caller's main thread, but on a normal
+                        // frame the GPU has had ~16 ms (one frame
+                        // period) to complete the upload, so this
+                        // returns immediately. Only stalls on heavy
+                        // backed-up GPU — and even then, only inside
+                        // the `drain_pending_destructions` pre-amble
+                        // (one entry per chunk, batched), not at the
+                        // top of every frame.
+                        unsafe {
+                            // `retain_mut`'s closure borrows the
+                            // fields as `&mut`, so deref into the
+                            // handles before passing to Vulkan FFI.
+                            let cmd_handle = *cmd;
+                            let fence_handle = *fence;
+                            if let Err(e) =
+                                device.wait_for_fences(&[fence_handle], true, u64::MAX)
+                            {
+                                log::warn!(
+                                    "pending destroy: wait_for_fences(upload) failed: {e:?}"
+                                );
+                            }
+                            device.free_command_buffers(self.command_pool, &[cmd_handle]);
+                            device.destroy_fence(fence_handle, None);
+                        }
+                    }
                 }
                 false
             } else {
@@ -2592,7 +2829,7 @@ impl Renderer {
         let frame_idx = self.frame_counter % FRAMES_IN_FLIGHT;
         // Copy out the per-frame handles (all `Copy`) so we don't hold an
         // immutable borrow of `self.frames` across the mutable UBO update below.
-        let (cmd, in_flight_fence, image_available, render_finished, descriptor_set) = {
+        let (cmd, in_flight_fence, image_available, render_finished, descriptor_set, tile_remap_descriptor_set) = {
             let f = &self.frames[frame_idx];
             (
                 f.cmd,
@@ -2600,6 +2837,7 @@ impl Renderer {
                 f.image_available,
                 f.render_finished,
                 f.descriptor_set,
+                f.tile_remap_descriptor_set,
             )
         };
 
@@ -2616,14 +2854,33 @@ impl Renderer {
         // On the first 1-2 frames the queries haven't been written yet, so we
         // tolerate VK_NOT_READY and just skip the update.
         {
-            let prev_offset = (frame_idx as u32) * GPU_TIMESTAMP_COUNT;
-            let mut timestamps = [0u64; GPU_TIMESTAMP_COUNT as usize];
+            // Read frame N-1's GPU timestamps (i.e. the slot that was
+            // **just written** by the previous frame's cmd buffer). The
+            // pattern is: `frame_idx` is the slot THIS frame will write;
+            // the previous frame's data is at `(frame_idx + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT`.
+            // Reading from this frame's own slot would trip the
+            // `get_query_pool_results(WAIT)` infinite wait, because the GPU
+            // hasn't written those queries yet. (Match the
+            // `readback_occlusion_results` pattern at line 3384.)
+            //
+            // Skip the readback on the very first frame: there is no prior
+            // frame whose timestamps to read, and querying uninitialised
+            // pool slots trips VUID-vkGetQueryPoolResults-None-09401 even
+            // when the pool was host-reset at startup.
+            let prev_offset = (((frame_idx + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT) as u32) * GPU_TIMESTAMP_COUNT;
+            if frame_idx > 0 {
+                let mut timestamps = [0u64; GPU_TIMESTAMP_COUNT as usize];
+            // WAIT flag: blocks the CPU until the GPU has finished processing
+            // the previous frame's cmd_reset_query_pool + timestamps. Without
+            // it, frame N's readback can race the GPU and trip
+            // VUID-vkGetQueryPoolResults-None-09401 ("query not reset") on
+            // the first query of the batch.
             let read_ok = unsafe {
                 self.device.get_query_pool_results(
                     self.query_pool,
                     prev_offset,
                     &mut timestamps,
-                    vk::QueryResultFlags::TYPE_64,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
                 )
             };
             if let Ok(()) = read_ok {
@@ -2640,6 +2897,7 @@ impl Renderer {
                 };
             }
             // On error (queries not yet available), keep previous timings.
+            }
         }
 
         // Acquire the next swapchain image. NOT_READY / OUT_OF_DATE / SUBOPTIMAL
@@ -2671,7 +2929,13 @@ impl Renderer {
         let device = &self.device;
 
         // Record command buffer (cmd was copied out above).
-        let query_offset = (frame_idx as u32) * GPU_TIMESTAMP_COUNT;
+        // Wrap query_offset by the pool size so long-running sessions
+        // (frame_counter > FRAMES_IN_FLIGHT) don't write past the pool
+        // capacity. The pool is sized for `FRAMES_IN_FLIGHT` slots; older
+        // timestamps get overwritten by the wrap, which is fine for a
+        // running frame profiler.
+        let query_pool_size = GPU_TIMESTAMP_COUNT * FRAMES_IN_FLIGHT as u32;
+        let query_offset = ((frame_idx as u32) * GPU_TIMESTAMP_COUNT) % query_pool_size;
         unsafe {
             device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
             device.begin_command_buffer(
@@ -2694,7 +2958,7 @@ impl Renderer {
         // â”€â”€ Shadow pass: render chunk depth from the light's perspective â”€â”€
         self.record_shadow_pass(device, cmd, Some(query_offset + 1));
 
-        self.record_main_pass_setup(device, cmd, image_index, descriptor_set);
+        self.record_main_pass_setup(device, cmd, image_index, descriptor_set, tile_remap_descriptor_set);
 
         // Sky or panorama pass: draw background before chunks.
         if show_panorama && self.panorama.loaded {
@@ -2818,6 +3082,7 @@ impl Renderer {
             &vp_cols,
             game_time,
             descriptor_set,
+            tile_remap_descriptor_set,
             camera.pos,
         );
 
@@ -2833,20 +3098,23 @@ impl Renderer {
 
         // â”€â”€ Post-processing pass: sample offscreen â†’ swapchain â”€â”€
 
-        // SSAO depth barrier: transition depth buffer for sampling in post pass.
-        if self.ssao_params[3] > 0.5 {
-            if let Some(ref depth_img) = self.depth {
-                crate::texture::transition_image_layout(
-                    device,
-                    cmd,
-                    depth_img.image,
-                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    vk::ImageAspectFlags::DEPTH,
-                    1,
-                    1,
-                );
-            }
+        // Cluster B fix: depth -> SHADER_READ_ONLY transition before the
+        // post pass. The post pass binds `depth_tex` at set 0 binding 1
+        // unconditionally (the binding exists for SSAO + depth-of-field +
+        // any future consumer, so it must always be in a shader-readable
+        // layout). Previously this barrier was gated on
+        // `ssao_params[3] > 0.5`, which skipped the transition when SSAO
+        // was disabled and tripped VUID-00344 on the post pass's
+        // `vkCmdDraw` ("doesn't match the previous known layout
+        // DEPTH_STENCIL_ATTACHMENT_OPTIMAL").
+        if let Some(ref depth_img) = self.depth {
+            crate::texture::transition_image_layout(
+                device, cmd, depth_img.image,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageAspectFlags::DEPTH,
+                1, 1,
+            );
         }
 
                 self.record_post_pass(device, cmd, image_index, Some(query_offset + 7));
@@ -2935,7 +3203,7 @@ impl Renderer {
         // â”€â”€ Shadow pass (capture) â”€â”€
         self.record_shadow_pass(device, cmd, None);
 
-        self.record_main_pass_setup(device, cmd, image_index, self.frames[0].descriptor_set);
+        self.record_main_pass_setup(device, cmd, image_index, self.frames[0].descriptor_set, self.frames[0].tile_remap_descriptor_set);
 
         // Sky or panorama pass (capture).
         if show_panorama && self.panorama.loaded {
@@ -2982,6 +3250,7 @@ impl Renderer {
             &vp_cols,
             game_time,
             self.frames[0].descriptor_set,
+            self.frames[0].tile_remap_descriptor_set,
             camera.pos,
         );
 
@@ -3230,14 +3499,13 @@ impl Renderer {
         }
         let mut frames = self.occlusion_frames.write();
         let frame = &mut frames[frame_idx];
-        // Reset all queries that were used in the PREVIOUS use of this frame
-        // slot (2 frames ago, guaranteed complete by fence wait).
-        if !frame.used_queries.is_empty() {
-            let min_q = *frame.used_queries.iter().min().unwrap();
-            let max_q = *frame.used_queries.iter().max().unwrap();
-            unsafe {
-                device.cmd_reset_query_pool(cmd, frame.query_pool, min_q, max_q - min_q + 1);
-            }
+        // Reset ALL queries in the pool (not just the previously-used ones)
+        // so the very first frame after init has every slot in the
+        // "unavailable" state required by VUID-vkCmdBeginQuery-None-00807.
+        // The min/max optimization only worked on frame N>=2; frame 0
+        // had an empty used_queries list and skipped the reset entirely.
+        unsafe {
+            device.cmd_reset_query_pool(cmd, frame.query_pool, 0, MAX_OCCLUSION_QUERIES);
         }
         frame.used_queries.clear();
     }
@@ -3347,7 +3615,12 @@ impl Renderer {
                     device.cmd_push_constants(
                         cmd,
                         self.pipeline_layout,
-                        vk::ShaderStageFlags::VERTEX,
+                        // `self.pipeline_layout` declares the push-constant range
+                        // as VERTEX|FRAGMENT (96 B, layout.rs `create_pipeline_layout`),
+                        // so the call site must echo both stages or validation
+                        // reports VUID-VkCmdPushConstants-offset-01796 ("missing
+                        // stageFlags from the overlapping VkPushConstantRange").
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                         0,
                         bytemuck::bytes_of(&push),
                     );
@@ -3436,7 +3709,9 @@ impl Renderer {
                             device.cmd_push_constants(
                                 cmd,
                                 self.pipeline_layout,
-                                vk::ShaderStageFlags::VERTEX,
+                                // chunk material layout declares VERTEX|FRAGMENT (96 B);
+                                // see VUID-VkCmdPushConstants-offset-01796 above.
+                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                                 0,
                                 bytemuck::bytes_of(&push),
                             );
@@ -3890,13 +4165,20 @@ impl Renderer {
             // Restore the chunk pipeline + descriptor set so chunk draws
             // see the right state. The viewport is already correct (same
             // negative-height viewport) so it doesn't need to be reset.
+            // Bind BOTH descriptor sets 0 (chunk material UBO group) and 1
+            // (tile_remap UBO) because the chunk material pipeline statically
+            // references both — binding only set 0 trips
+            // VUID-vkCmdDrawIndexed-pDescriptorSets-04616 ("set 1 out of bounds
+            // for the number of sets bound").
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.active_pipeline());
+            let tile_remap_ds = self.frames[self.frame_counter % FRAMES_IN_FLIGHT]
+                .tile_remap_descriptor_set;
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[chunk_descriptor_set],
+                &[chunk_descriptor_set, tile_remap_ds],
                 &[],
             );
         }
@@ -3984,12 +4266,20 @@ impl Renderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.active_pipeline(),
             );
+            // Bind both chunk descriptor sets: set 0 (chunk material UBO group)
+            // and set 1 (tile_remap UBO). The chunk material pipeline statically
+            // references both layouts — binding only set 0 trips the
+            // "set 1 out of bounds" validation.
+            let cur_frame = self.frame_counter % FRAMES_IN_FLIGHT;
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[self.frames[self.frame_counter % FRAMES_IN_FLIGHT].descriptor_set],
+                &[
+                    self.frames[cur_frame].descriptor_set,
+                    self.frames[cur_frame].tile_remap_descriptor_set,
+                ],
                 &[],
             );
         }
@@ -4078,6 +4368,7 @@ impl Renderer {
         cmd: vk::CommandBuffer,
         image_index: u32,
         descriptor_set: vk::DescriptorSet,
+        tile_remap_descriptor_set: vk::DescriptorSet,
     ) {
         // Always 3 clear values. When MSAA is off the render pass has only
         // 2 attachments, so the 3rd entry is harmlessly ignored by Vulkan.
@@ -4121,7 +4412,12 @@ impl Renderer {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout,
                 0,
-                &[descriptor_set],
+                // Two-set layout since cluster A wired in `tile_remap` at
+                // set 1 binding 0: without binding both descriptor sets in a
+                // single `cmd_bind_descriptor_sets` call the validation
+                // layer fires VUID-08600 ("set (1) is out of bounds for the
+                // number of sets bound (1)") on every chunk draw.
+                &[descriptor_set, tile_remap_descriptor_set],
                 &[],
             );
         }
@@ -4764,6 +5060,7 @@ impl Renderer {
         vp_cols: &[f32],
         game_time: f32,
         descriptor_set: vk::DescriptorSet,
+        tile_remap_descriptor_set: vk::DescriptorSet,
         cam_pos: glam::Vec3,
     ) {
         let any_transparent = self.chunks.read().iter().any(|(_, b)| b.transparent.is_some());
@@ -4845,7 +5142,12 @@ impl Renderer {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.transparent_pipeline);
             device.cmd_bind_descriptor_sets(
                 cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0,
-                &[descriptor_set], &[],
+                // Two-set bind: `transparent_pipeline` is created against the
+                // chunk material layout (which now has set 1 = tile_remap
+                // from cluster A), and `chunk.frag`'s `tile_remap` UBO read
+                // would otherwise fail with VUID-08600. Same one-shot bind
+                // pattern used in `record_main_pass_setup`.
+                &[descriptor_set, tile_remap_descriptor_set], &[],
             );
             for (origin, vbo_buffer, ibo_buffer, index_count, _dist_sq) in draws.iter() {
                 let mut pc = [0.0f32; 24];
@@ -4870,10 +5172,19 @@ impl Renderer {
 
     impl Drop for Renderer {
     fn drop(&mut self) {
-        let device = &self.device;
-        unsafe {
-            let _ = device.device_wait_idle();
+        // Wait for the GPU to finish, then drain any pending cmd+fence
+        // pairs while the handles are still valid. `device_wait_idle`
+        // signals every upload-batch fence, so the `wait_for_fences`
+        // inside `drain_pending_destructions` is a no-op for surviving
+        // entries, and `free_command_buffers` + `destroy_fence` then
+        // run on still-valid handles before pool/device teardown.
+        // Without this, every Renderer shutdown would silently leak
+        // the per-frame tail of pending cmd+fence pairs.
+        if let Err(e) = unsafe { self.device.device_wait_idle() } {
+            log::warn!("Renderer::drop: device_wait_idle failed: {e:?}");
         }
+        self.drain_pending_destructions();
+        let device = &self.device;
 
         // Chunk buffers.
         let chunks = std::mem::take(&mut self.chunks).into_inner();
@@ -4899,6 +5210,11 @@ impl Renderer {
             }
             f.camera_ubo.destroy(device, &self.alloc);
             f.shadow_ubo.destroy(device, &self.alloc);
+            // Tile-remap UBO was added in cluster A so the chunk pipeline
+            // layout has set-1 binding 0 wired up; without this destroy it
+            // leaks `FRAMES_IN_FLIGHT` host-visible UBOs (each 1024 B + a
+            // GPU allocation) every Renderer::drop.
+            f.tile_remap_ubo.destroy(device, &self.alloc);
         }
 
         // Atlas + fog UBO + UI resources + sky resources.
@@ -4909,6 +5225,11 @@ impl Renderer {
         self.ui_vbo.destroy_in_place(device, &self.alloc);
         self.ui_ibo.destroy_in_place(device, &self.alloc);
         self.sky_ubo.destroy_in_place(device, &self.alloc);
+        // Tile material lookup table (chunk binding 5). Was added in the
+        // cluster A fix wave (engine pushes a fresh table each frame via
+        // `set_tile_material_table`) but no Drop cleanup — leaked 4 KB
+        // host-visible every Renderer::drop.
+        self.tile_material_ubo.destroy_in_place(device, &self.alloc);
 
         // MSAA images.
         if let Some(mut img) = self.msaa_color.take() {
@@ -4935,6 +5256,13 @@ impl Renderer {
 
         // Panorama cubemap image/view/sampler.
         self.panorama.destroy(device, &self.alloc);
+        // Placeholder cubemap (only allocated when no `assets/textures/panorama/*.png`
+        // files were present this launch). Pre-refactor these four resources
+        // lived in `let` locals inside the constructor's else-branch and
+        // leaked 3 KB device-local every Renderer::drop.
+        if let Some(mut pp) = self.panorama_placeholder.take() {
+            pp.destroy(device, &self.alloc);
+        }
 
         // Post-processing pass resources.
         for &fb in &self.post_framebuffers {

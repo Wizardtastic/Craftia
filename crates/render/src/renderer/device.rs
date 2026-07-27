@@ -152,11 +152,28 @@ pub(super) fn create_logical_device(
     let features = vk::PhysicalDeviceFeatures::default()
         .sampler_anisotropy(false)
         .multi_draw_indirect(true)
-        .draw_indirect_first_instance(true);
+        .draw_indirect_first_instance(true)
+        // Validation requires these for the chunks/SSR/wireframe/AA paths:
+        //   - fill_mode_non_solid: the wireframe overlay pipeline uses
+        //     VK_POLYGON_MODE_LINE (chunk wireframe preview + debug grid).
+        //   - sample_rate_shading: post.frag declares a SPIR-V `SampleRateShading`
+        //     capability to drive per-sample MSAA shading on the SSR sample ray;
+        //     without the feature bit, vkCreateShaderModule fails at startup.
+        .fill_mode_non_solid(true)
+        .sample_rate_shading(true);
+    // Enable Vulkan 1.2 host_query_reset so vkResetQueryPool can be called
+    // from host code (e.g., the init-time pool resets and the per-frame
+    // timestamp readback reset in renderer/mod.rs). Without this feature
+    // the calls return VK_ERROR_FEATURE_NOT_PRESENT and the queries stay
+    // in the "uninitialized" state, tripping
+    // VUID-vkGetQueryPoolResults-None-09401.
+    let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
+        .host_query_reset(true);
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_infos)
         .enabled_extension_names(&extension_names)
-        .enabled_features(&features);
+        .enabled_features(&features)
+        .push_next(&mut vulkan12_features);
 
     let device = unsafe { instance.create_device(pdev, &create_info, None) }
         .map_err(|e| anyhow!("create_device: {e:?}"))?;

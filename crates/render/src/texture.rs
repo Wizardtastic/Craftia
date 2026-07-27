@@ -1,6 +1,9 @@
 //! Atlas texture: uploads the procedurally generated RGBA8 atlas to a
 //! device-local image and creates a linear sampler for it.
 
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
+
 use anyhow::{anyhow, Result};
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -8,6 +11,15 @@ use gpu_allocator::MemoryLocation;
 use crate::alloc::Alloc;
 use crate::atlas::Atlas;
 use crate::buffer::{create_image_view, GpuBuffer};
+
+/// Set of `(old_layout, new_layout)` pairs we've already logged about as
+/// unhandled. The `transition_image_layout` fallback arm inserts each
+/// unique pair on first sight and refuses to re-log it for the rest of the
+/// session — without this, a per-frame ping-pong transition (e.g. the
+/// reflection path) would spam `logs/latest.log` with millions of copies
+/// of the same warning and saturate the disk.
+static UNHANDLED_LOGGED: LazyLock<Mutex<HashSet<(vk::ImageLayout, vk::ImageLayout)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Owned atlas image + sampler. Destroy via `destroy`.
 pub struct AtlasTexture {
@@ -230,136 +242,20 @@ pub fn transition_image_layout(
     mip_levels: u32,
     layer_count: u32,
 ) {
-    let (src_access, dst_access, src_stage, dst_stage) = match (old_layout, new_layout) {
-        (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
-            vk::AccessFlags::empty(),
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-        ),
-        (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::AccessFlags::SHADER_READ,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-        ),
-        (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
-            vk::AccessFlags::SHADER_READ,
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::PipelineStageFlags::TRANSFER,
-        ),
-        (vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL) => (
-            vk::AccessFlags::empty(),
-            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        ),
-        (vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL) => (
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            vk::AccessFlags::TRANSFER_READ,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::PipelineStageFlags::TRANSFER,
-        ),
-        (vk::ImageLayout::PRESENT_SRC_KHR, vk::ImageLayout::TRANSFER_SRC_OPTIMAL) => (
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            vk::AccessFlags::TRANSFER_READ,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::PipelineStageFlags::TRANSFER,
-        ),
-        (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR) => (
-            vk::AccessFlags::TRANSFER_READ,
-            vk::AccessFlags::MEMORY_READ,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-        ),
-        (vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) => (
-            vk::AccessFlags::empty(),
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        ),
-        (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) => (
-            vk::AccessFlags::SHADER_READ,
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        ),
-        (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) => (
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        ),
-        (
-            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        ) => (
-            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            vk::AccessFlags::SHADER_READ,
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-        ),
-        (
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        ) => (
-            vk::AccessFlags::SHADER_READ,
-            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-        ),
-        (vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            vk::AccessFlags::SHADER_READ,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-        ),
-        // Depth attachment -> transfer source (scene_opaque_depth copy for the
-        // water/glass SSR ray-march, right after the main render pass ends).
-        (
-            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-        ) => (
-            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            vk::AccessFlags::TRANSFER_READ,
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-            vk::PipelineStageFlags::TRANSFER,
-        ),
-        // Transfer source -> depth attachment (restore after the copy so the
-        // later SSAO transition + next frame's render pass see the layout they
-        // expect).
-        (
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        ) => (
-            vk::AccessFlags::TRANSFER_READ,
-            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-        ),
-        _ => {
-            log::warn!(
-                "unhandled image layout transition: {:?} -> {:?}",
-                old_layout,
-                new_layout
-            );
-            (
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::empty(),
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            )
-        }
-    };
+    let (src_access, dst_access, src_stage, dst_stage) =
+        match dispatch_image_layout_transition(old_layout, new_layout) {
+            Some(t) => t,
+            None => {
+                // Unhandled pair: rate-limit log + emit a legal no-op barrier.
+                check_and_log_unhandled(old_layout, new_layout);
+                (
+                    vk::AccessFlags::empty(),
+                    vk::AccessFlags::empty(),
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                )
+            }
+        };
 
     let barrier = vk::ImageMemoryBarrier::default()
         .old_layout(old_layout)
@@ -386,5 +282,294 @@ pub fn transition_image_layout(
             &[],
             &[barrier],
         );
+    }
+}
+
+/// Pure-Rust dispatch: returns `Some((src_access, dst_access, src_stage,
+/// dst_stage))` for an image layout transition pair that the engine knows
+/// how to barrier correctly, or `None` for an unhandled pair (which the
+/// caller must handle with a safe-default + warning).
+///
+/// Pulled out of [`transition_image_layout`] so the dispatch table can be
+/// unit-tested without a Vulkan device, and so the rate-limit decision for
+/// the unhandled arm can be tested in isolation.
+pub fn dispatch_image_layout_transition(
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> Option<(
+    vk::AccessFlags,
+    vk::AccessFlags,
+    vk::PipelineStageFlags,
+    vk::PipelineStageFlags,
+)> {
+    use vk::ImageLayout as L;
+    Some(match (old_layout, new_layout) {
+        (L::UNDEFINED, L::TRANSFER_DST_OPTIMAL) => (
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+        ),
+        (L::TRANSFER_DST_OPTIMAL, L::SHADER_READ_ONLY_OPTIMAL) => (
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::SHADER_READ,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+        ),
+        (L::SHADER_READ_ONLY_OPTIMAL, L::TRANSFER_DST_OPTIMAL) => (
+            vk::AccessFlags::SHADER_READ,
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+        ),
+        (L::UNDEFINED, L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL) => (
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        ),
+        (L::COLOR_ATTACHMENT_OPTIMAL, L::TRANSFER_SRC_OPTIMAL) => (
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            vk::PipelineStageFlags::TRANSFER,
+        ),
+        (L::PRESENT_SRC_KHR, L::TRANSFER_SRC_OPTIMAL) => (
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            vk::PipelineStageFlags::TRANSFER,
+        ),
+        (L::TRANSFER_SRC_OPTIMAL, L::PRESENT_SRC_KHR) => (
+            vk::AccessFlags::TRANSFER_READ,
+            vk::AccessFlags::MEMORY_READ,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+        ),
+        (L::UNDEFINED, L::COLOR_ATTACHMENT_OPTIMAL) => (
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        ),
+        (L::SHADER_READ_ONLY_OPTIMAL, L::COLOR_ATTACHMENT_OPTIMAL) => (
+            vk::AccessFlags::SHADER_READ,
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        ),
+        (L::TRANSFER_DST_OPTIMAL, L::COLOR_ATTACHMENT_OPTIMAL) => (
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        ),
+        (
+            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            L::SHADER_READ_ONLY_OPTIMAL,
+        ) => (
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::AccessFlags::SHADER_READ,
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+        ),
+        (
+            L::SHADER_READ_ONLY_OPTIMAL,
+            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        ) => (
+            vk::AccessFlags::SHADER_READ,
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+        ),
+        (L::COLOR_ATTACHMENT_OPTIMAL, L::SHADER_READ_ONLY_OPTIMAL) => (
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            vk::AccessFlags::SHADER_READ,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+        ),
+        // Depth attachment -> transfer source (scene_opaque_depth copy for the
+        // water/glass SSR ray-march, right after the main render pass ends).
+        (
+            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            L::TRANSFER_SRC_OPTIMAL,
+        ) => (
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            vk::PipelineStageFlags::TRANSFER,
+        ),
+        // Transfer source -> depth attachment (restore after the copy so the
+        // later SSAO transition + next frame's render pass see the layout they
+        // expect).
+        (
+            L::TRANSFER_SRC_OPTIMAL,
+            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        ) => (
+            vk::AccessFlags::TRANSFER_READ,
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+        ),
+        // Reflection / scene-copy transitions added for the water + SSR fix.
+        // The previous `unhandled` arms fired thousands of times per frame
+        // before the rate-limit landed, and the fallback's empty access masks
+        // + TOP_OF_PIPE/BOTTOM_OF_PIPE barrier stalled the whole GPU
+        // pipeline — that's why water looked broken and the engine froze.
+        (L::SHADER_READ_ONLY_OPTIMAL, L::TRANSFER_SRC_OPTIMAL) => (
+            vk::AccessFlags::SHADER_READ,
+            vk::AccessFlags::TRANSFER_READ,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+        ),
+        (L::TRANSFER_SRC_OPTIMAL, L::COLOR_ATTACHMENT_OPTIMAL) => (
+            vk::AccessFlags::TRANSFER_READ,
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        ),
+        (L::UNDEFINED, L::SHADER_READ_ONLY_OPTIMAL) => (
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::SHADER_READ,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+        ),
+        _ => return None,
+    })
+}
+
+/// Insert `(old, new)` into the unhandled-set and `log::warn!` exactly once
+/// per session per unique pair. Lock acquisition is `if let Ok(...)` —
+/// a poisoned Mutex would mean we're already in the GPU-hang unwind path
+/// the user is debugging; skip the log silently on poison.
+fn check_and_log_unhandled(old_layout: vk::ImageLayout, new_layout: vk::ImageLayout) {
+    if let Ok(mut seen) = UNHANDLED_LOGGED.lock() {
+        if seen.insert((old_layout, new_layout)) {
+            log::warn!(
+                "unhandled image layout transition: {:?} -> {:?}",
+                old_layout,
+                new_layout
+            );
+        }
+    }
+}
+
+/// Test-only helper: clear the unhandled-logged dedupe set so tests are
+/// deterministic. Not part of the public API.
+#[cfg(test)]
+pub(crate) fn reset_unhandled_logged_for_test() {
+    if let Ok(mut s) = UNHANDLED_LOGGED.lock() {
+        s.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three transitions the reflection / SSR pipeline uses per frame.
+    /// If any of these dispatch to `_` instead of an explicit arm, water
+    /// reflects garbage and the engine freezes. This test would have caught
+    /// the original bug.
+    #[test]
+    fn reflection_path_dispatch_is_complete() {
+        assert!(
+            dispatch_image_layout_transition(
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            )
+            .is_some(),
+            "SHADER_READ_ONLY_OPTIMAL -> TRANSFER_SRC_OPTIMAL must have an explicit dispatch arm",
+        );
+        assert!(
+            dispatch_image_layout_transition(
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            )
+            .is_some(),
+            "TRANSFER_SRC_OPTIMAL -> COLOR_ATTACHMENT_OPTIMAL must have an explicit dispatch arm",
+        );
+        assert!(
+            dispatch_image_layout_transition(
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            )
+            .is_some(),
+            "UNDEFINED -> SHADER_READ_ONLY_OPTIMAL must have an explicit dispatch arm",
+        );
+    }
+
+    /// Every transition pair the engine uses internally must hit a known
+    /// arm, not the `_` fallback. Adding a new transition that breaks this
+    /// list forces the author to add its arm simultaneously.
+    #[test]
+    fn known_transitions_all_dispatched() {
+        let pairs = [
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
+            (vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+            (vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            (vk::ImageLayout::PRESENT_SRC_KHR, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+            (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR),
+            (vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            (vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+            (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+            (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+        ];
+        for (old, new) in pairs {
+            assert!(
+                dispatch_image_layout_transition(old, new).is_some(),
+                "transition {:?} -> {:?} should be in the dispatch table",
+                old,
+                new
+            );
+        }
+    }
+
+    /// Per-frame transitions can fire thousands of times. The dedupe set
+    /// behind `check_and_log_unhandled` must hold so the log isn't spammed.
+    /// Hashes up the same would-be-logged pair 10_000 times and asserts the
+    /// set contains exactly one entry.
+    #[test]
+    fn unhandled_rate_limit_holds_under_load() {
+        reset_unhandled_logged_for_test();
+
+        // Use a pair that we know is NOT in the dispatch table so the
+        // unhandled-arm path is exercised.
+        let pair = (vk::ImageLayout::UNDEFINED, vk::ImageLayout::PRESENT_SRC_KHR);
+        for _ in 0..10_000 {
+            check_and_log_unhandled(pair.0, pair.1);
+        }
+
+        let set = UNHANDLED_LOGGED
+            .lock()
+            .expect("UNHANDLED_LOGGED mutex poisoned in test");
+        assert_eq!(
+            set.len(),
+            1,
+            "10k identical pairs must yield exactly one unique entry"
+        );
+        assert!(set.contains(&pair));
+
+        // A second unique pair should still be admitted.
+        let pair_b = (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::UNDEFINED);
+        check_and_log_unhandled(pair_b.0, pair_b.1);
+        assert_eq!(set.len(), 2, "a distinct pair should be a second entry");
     }
 }

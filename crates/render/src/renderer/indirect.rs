@@ -629,12 +629,185 @@ pub struct GpuMesher {
     block_count: u32,
 }
 
+/// Partially-constructed `GpuMesher`. Holds every Vulkan resource it has
+/// successfully created, and runs the matching teardown on `Drop` if
+/// construction fails partway through (e.g. shader compile error in
+/// `create_compute_pipeline`). Without this guard, the 14 resources the
+/// `GpuMesher::new` body allocates before that step would all be leaked
+/// (the `GpuBuffer` / `GpuImage` `Drop` impls only WARN — they don't
+/// actually free the GPU handle).
+///
+/// Idiom:
+///   1. Allocate each resource in source order, assigning into the
+///      corresponding `Option<...>` field on success. After that point,
+///      an early `?` return triggers our cleanup.
+///   2. After every step succeeds, call `.finalize()` to consume the
+///      builder into a real `GpuMesher`. Step 11 in `GpuMesher::new` does
+///      this; the no-fail path uses `Ok(b.finalize())`.
+///
+/// Notes on subtle invariants:
+///   - `descriptor_set` is not explicitly destroyed in `Drop` because
+///     `create_mesh_descriptor_pool` allocates the pool with
+///     `FREE_DESCRIPTOR_SET` — destroying the pool auto-frees every set
+///     that was allocated from it. Don't add explicit set cleanup here
+///     without also restructuring the pool-creation flags or you'll
+///     double-free.
+///   - `finalize` uses `std::mem::take(&mut self.X)` rather than
+///     `self.X.expect(...)`. Rust forbids destructuring/moving fields out
+///     of any type that implements `Drop`, even via the `Option` enum's
+///     `expect`, because the borrow checker can't verify the move leaves
+///     `self` in a state matchable by the `Drop` impl. `mem::take` swaps
+///     the field to `None` and returns the original, leaving `self` in a
+///     valid (all-`None`) state for `Drop`.
+struct PartialGpuMesher<'a> {
+    image: Option<(vk::Image, gpu_allocator::vulkan::Allocation)>,
+    view: Option<vk::ImageView>,
+    sampler: Option<vk::Sampler>,
+    staging: Option<GpuBuffer>,
+    block_props: Option<GpuBuffer>,
+    out_verts: Option<GpuBuffer>,
+    out_idxs: Option<GpuBuffer>,
+    counter: Option<GpuBuffer>,
+    pipeline: Option<vk::Pipeline>,
+    pipeline_layout: Option<vk::PipelineLayout>,
+    set_layout: Option<vk::DescriptorSetLayout>,
+    descriptor_pool: Option<vk::DescriptorPool>,
+    descriptor_set: Option<vk::DescriptorSet>,
+    device: &'a ash::Device,
+    alloc: &'a Alloc,
+}
+
+impl<'a> PartialGpuMesher<'a> {
+    fn new(device: &'a ash::Device, alloc: &'a Alloc) -> Self {
+        Self {
+            image: None,
+            view: None,
+            sampler: None,
+            staging: None,
+            block_props: None,
+            out_verts: None,
+            out_idxs: None,
+            counter: None,
+            pipeline: None,
+            pipeline_layout: None,
+            set_layout: None,
+            descriptor_pool: None,
+            descriptor_set: None,
+            device,
+            alloc,
+        }
+    }
+
+    /// Consume the partial builder and produce a `GpuMesher`. Only valid
+    /// to call once every field has been populated by a successful step.
+    /// Uses `std::mem::take` rather than direct move-out, because Rust
+    /// forbids destructuring fields out of any type that implements
+    /// `Drop`. After this returns, `self` is left in an all-`None` state
+    /// so its `Drop` becomes a no-op.
+    fn finalize(mut self) -> GpuMesher {
+        // Pull each field out via mem::take (which replaces with `None`
+        // and returns the original Option<T>) so the Drop impl on
+        // `PartialGpuMesher` still typechecks. The replacement-None
+        // values are then no-ops in `Drop::drop`.
+        let (voxel_image, voxel_image_mem) = std::mem::take(&mut self.image)
+            .expect("PartialGpuMesher::finalize without image: commit missing");
+        let voxel_view = std::mem::take(&mut self.view)
+            .expect("PartialGpuMesher::finalize without view: commit missing");
+        let voxel_sampler = std::mem::take(&mut self.sampler)
+            .expect("PartialGpuMesher::finalize without sampler: commit missing");
+        let voxel_staging = std::mem::take(&mut self.staging)
+            .expect("PartialGpuMesher::finalize without staging: commit missing");
+        let block_props = std::mem::take(&mut self.block_props)
+            .expect("PartialGpuMesher::finalize without block_props: commit missing");
+        let out_verts = std::mem::take(&mut self.out_verts)
+            .expect("PartialGpuMesher::finalize without out_verts: commit missing");
+        let out_idxs = std::mem::take(&mut self.out_idxs)
+            .expect("PartialGpuMesher::finalize without out_idxs: commit missing");
+        let counter = std::mem::take(&mut self.counter)
+            .expect("PartialGpuMesher::finalize without counter: commit missing");
+        let mesh_pipeline = std::mem::take(&mut self.pipeline)
+            .expect("PartialGpuMesher::finalize without pipeline: commit missing");
+        let mesh_pipeline_layout = std::mem::take(&mut self.pipeline_layout)
+            .expect("PartialGpuMesher::finalize without pipeline_layout: commit missing");
+        let mesh_set_layout = std::mem::take(&mut self.set_layout)
+            .expect("PartialGpuMesher::finalize without set_layout: commit missing");
+        let mesh_descriptor_pool = std::mem::take(&mut self.descriptor_pool)
+            .expect("PartialGpuMesher::finalize without descriptor_pool: commit missing");
+        let mesh_descriptor_set = std::mem::take(&mut self.descriptor_set)
+            .expect("PartialGpuMesher::finalize without descriptor_set: commit missing");
+        GpuMesher {
+            voxel_image,
+            voxel_image_mem: Some(voxel_image_mem),
+            voxel_view,
+            voxel_sampler,
+            voxel_staging,
+            block_props,
+            out_verts,
+            out_idxs,
+            counter,
+            mesh_pipeline,
+            mesh_pipeline_layout,
+            mesh_set_layout,
+            mesh_descriptor_pool,
+            mesh_descriptor_set,
+            block_count: 0,
+        }
+    }
+}
+
+impl<'a> Drop for PartialGpuMesher<'a> {
+    fn drop(&mut self) {
+        // Reverse-construction-order teardown. Anything still allocated at
+        // the site of the `?`-induced early return gets destroyed here.
+        // We idempotently no-op on `Some(null)` and tolerate null handles
+        // for the same reason — using `destroy_*` on a destroy-handle that
+        // was already freed is undefined, so we must only call it when
+        // the handle genuinely points at something we created.
+        unsafe {
+            if let Some(p) = self.descriptor_pool {
+                self.device.destroy_descriptor_pool(p, None);
+            }
+            if let Some(p) = self.pipeline {
+                self.device.destroy_pipeline(p, None);
+            }
+            if let Some(p) = self.pipeline_layout {
+                self.device.destroy_pipeline_layout(p, None);
+            }
+            if let Some(s) = self.set_layout {
+                self.device.destroy_descriptor_set_layout(s, None);
+            }
+        }
+        // GpuBuffer-owned resources need both device + alloc to free memory.
+        // `destroy_in_place` is idempotent on an already-empty buffer thanks
+        // to the `buffer != null` check in its body, so these `take()`s are
+        // safe even if some intermediate step already cleared them.
+        if let Some(mut b) = self.counter.take() { b.destroy_in_place(self.device, self.alloc); }
+        if let Some(mut b) = self.out_idxs.take() { b.destroy_in_place(self.device, self.alloc); }
+        if let Some(mut b) = self.out_verts.take() { b.destroy_in_place(self.device, self.alloc); }
+        if let Some(mut b) = self.block_props.take() { b.destroy_in_place(self.device, self.alloc); }
+        if let Some(mut b) = self.staging.take() { b.destroy_in_place(self.device, self.alloc); }
+        unsafe {
+            if let Some(s) = self.sampler { self.device.destroy_sampler(s, None); }
+            if let Some(v) = self.view { self.device.destroy_image_view(v, None); }
+            if let Some((img, alloc)) = self.image.take() {
+                self.device.destroy_image(img, None);
+                self.alloc.free(alloc);
+            }
+        }
+    }
+}
+
 impl GpuMesher {
     pub fn new(device: &ash::Device, alloc: &Alloc, command_pool: vk::CommandPool, graphics_queue: vk::Queue) -> Result<Self> {
         use crate::texture::{begin_one_time, end_and_submit, transition_image_layout};
         use gpu_allocator::vulkan::{AllocationCreateDesc, AllocationScheme};
         use gpu_allocator::MemoryLocation;
 
+        let mut b = PartialGpuMesher::new(device, alloc);
+
+        // 1. Voxel 3D image + device-local memory.
+        //    `vk::Image` is Copy, so we can keep using `voxel_image` even after
+        //    stashing a copy of it into `b.image`.
         let img_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_3D).format(vk::Format::R16_UINT)
             .extent(vk::Extent3D { width: VOXEL_TEX_SIZE, height: VOXEL_TEX_SIZE, depth: VOXEL_TEX_SIZE })
@@ -652,6 +825,9 @@ impl GpuMesher {
         })?;
         unsafe { device.bind_image_memory(voxel_image, voxel_image_mem.memory(), voxel_image_mem.offset())
             .map_err(|e| anyhow!("mesher bind_image: {e:?}"))?; }
+        b.image = Some((voxel_image, voxel_image_mem));
+
+        // 2. Image view.
         let view_info = vk::ImageViewCreateInfo::default()
             .image(voxel_image).view_type(vk::ImageViewType::TYPE_3D).format(vk::Format::R16_UINT)
             .subresource_range(vk::ImageSubresourceRange {
@@ -660,6 +836,9 @@ impl GpuMesher {
             });
         let voxel_view = unsafe { device.create_image_view(&view_info, None) }
             .map_err(|e| anyhow!("mesher image_view: {e:?}"))?;
+        b.view = Some(voxel_view);
+
+        // 3. First-image layout transition (UNDEFINED -> SHADER_READ_ONLY).
         {
             let cmd = begin_one_time(device, command_pool)?;
             transition_image_layout(device, cmd, voxel_image,
@@ -667,6 +846,8 @@ impl GpuMesher {
                 vk::ImageAspectFlags::COLOR, 1, 1);
             end_and_submit(device, command_pool, graphics_queue, cmd)?;
         }
+
+        // 4. Sampler.
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST)
             .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
@@ -675,36 +856,70 @@ impl GpuMesher {
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         let voxel_sampler = unsafe { device.create_sampler(&sampler_info, None) }
             .map_err(|e| anyhow!("mesher sampler: {e:?}"))?;
+        b.sampler = Some(voxel_sampler);
+
+        // 5. Mesh staging + block props + output buffers + atomic counter.
+        //    Each GpuBuffer is committed to `b.X` immediately after
+        //    creation. The two-step `host_visible -> mapped_slice_mut` for
+        //    `block_props` and `counter` would otherwise leak a buffer
+        //    allocation if `mapped_slice_mut()` returned Err between the
+        //    `host_visible` success point and the eventual commit step.
         let voxel_staging = GpuBuffer::host_visible(device, alloc,
             (VOXEL_TEX_SIZE * VOXEL_TEX_SIZE * VOXEL_TEX_SIZE * 2) as vk::DeviceSize,
             vk::BufferUsageFlags::TRANSFER_SRC, "voxel_staging")?;
+        b.staging = Some(voxel_staging);
         let block_props = GpuBuffer::host_visible(device, alloc,
             256 * std::mem::size_of::<crate::BlockPropertiesGpu>() as vk::DeviceSize,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST, "block_props")?;
+        b.block_props = Some(block_props);
         let out_verts = GpuBuffer::device_local(device, alloc,
             MESH_MAX_VERTS * MESH_VERT_UINTS * 4,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC, "mesh_out_verts")?;
+        b.out_verts = Some(out_verts);
         let out_idxs = GpuBuffer::device_local(device, alloc,
             MESH_MAX_IDXS * 4,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC, "mesh_out_idxs")?;
-        let mut counter = GpuBuffer::host_visible(device, alloc, 8,
+        b.out_idxs = Some(out_idxs);
+        let counter = GpuBuffer::host_visible(device, alloc, 8,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST, "mesh_counter")?;
-        counter.mapped_slice_mut()?.fill(0);
+        b.counter = Some(counter);
+        // mapped_slice_mut on a freshly-created host_visible buffer is
+        // effectively infallible (CpuToGpu allocations always have a
+        // mapped slice from gpu_allocator), but the ? keeps the API
+        // symmetric with the rest of the file. If it does fail, `b.counter`
+        // is already Some so PartialGpuMesher::drop will free it cleanly.
+        b.counter.as_mut()
+            .ok_or_else(|| anyhow!("counter stashed but immediately missing"))?
+            .mapped_slice_mut()?
+            .fill(0);
+
+        // 6. Mesh compute pipeline + descriptor plumbing. Each step commits
+        //    to `b` immediately after success so a `?`-induced early return
+        //    triggers `PartialGpuMesher::drop` to tear down whatever's in
+        //    `b` so far. `vk::*` handle types are Copy, so re-reading from
+        //    `b` later via `expect(...)` is a borrow, not a move.
         let mesh_spv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/chunk_mesh.comp.spv")).to_vec();
         let mesh_set_layout = create_mesh_set_layout(device)?;
+        b.set_layout = Some(mesh_set_layout);
         let mesh_pipeline_layout = create_mesh_pipeline_layout(device, mesh_set_layout)?;
+        b.pipeline_layout = Some(mesh_pipeline_layout);
         let mesh_pipeline = create_compute_pipeline(device, mesh_pipeline_layout, &mesh_spv)?;
+        b.pipeline = Some(mesh_pipeline);
         let mesh_descriptor_pool = create_mesh_descriptor_pool(device)?;
+        b.descriptor_pool = Some(mesh_descriptor_pool);
         let mesh_descriptor_set = allocate_set(device, mesh_descriptor_pool, mesh_set_layout)?;
-        update_mesh_set(device, mesh_descriptor_set, voxel_view, voxel_sampler,
-            block_props.buffer, out_verts.buffer, out_idxs.buffer, counter.buffer);
+        b.descriptor_set = Some(mesh_descriptor_set);
+        update_mesh_set(
+            device, mesh_descriptor_set,
+            b.view.expect("view committed in step 2"),
+            b.sampler.expect("sampler committed in step 4"),
+            b.block_props.as_ref().expect("block_props committed in step 5").buffer,
+            b.out_verts.as_ref().expect("out_verts committed in step 5").buffer,
+            b.out_idxs.as_ref().expect("out_idxs committed in step 5").buffer,
+            b.counter.as_ref().expect("counter committed in step 5").buffer,
+        );
         log::info!("GPU compute mesher ready (voxel tex {}³, max {} verts)", VOXEL_TEX_SIZE, MESH_MAX_VERTS);
-        Ok(Self {
-            voxel_image, voxel_image_mem: Some(voxel_image_mem), voxel_view, voxel_sampler,
-            voxel_staging, block_props, out_verts, out_idxs, counter,
-            mesh_pipeline, mesh_pipeline_layout, mesh_set_layout,
-            mesh_descriptor_pool, mesh_descriptor_set, block_count: 0,
-        })
+        Ok(b.finalize())
     }
 
     pub fn set_block_properties(&mut self, device: &ash::Device, alloc: &Alloc, props: &[crate::BlockPropertiesGpu]) {

@@ -38,8 +38,36 @@ pub(super) struct ShadowUbo {
     pub(super) light_dir_and_bias: [f32; 4],
 }
 
+/// Per-frame tile remap (set 1, binding 0). Maps canonical tile IDs to
+/// animated tile IDs for procedural texture variation. The chunk fragment
+/// shader reads `tile_remap.map[frag_tile]` at line 257 of
+/// `shaders/chunk.frag` so the descriptor set layout MUST declare set 1
+/// binding 0 — the validation layer otherwise reports VUID-07988 ("binding
+/// was not declared in VkPipelineLayoutCreateInfo::pSetLayouts[1]") at
+/// pipeline creation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(super) struct TileRemapUbo {
+    pub(super) map: [u32; 256],
+}
+
+// `[u32; 256]` doesn't implement `Default` (only fixed-size arrays up to a
+// certain length do), so we provide one explicitly. Maps to an identity
+// remap (every canonical tile ID renders to itself) — the animated-tile
+// rotation code lives elsewhere and writes a different map into this UBO
+// before binding.
+impl Default for TileRemapUbo {
+    fn default() -> Self {
+        let mut map = [0u32; 256];
+        for (i, slot) in map.iter_mut().enumerate() {
+            *slot = i as u32;
+        }
+        Self { map }
+    }
+}
+
 /// Per-frame reflection/environment uniform (binding 8 of the chunk set).
-/// Feeds the water + glass + reflective-tile reflection paths in
+///
 /// `shaders/chunk.frag`. The sky colours mirror the sky UBO so the shader can
 /// evaluate the same analytic sky for reflected rays instead of rendering a
 /// per-frame cubemap probe (see docs/notes/water_reflections.md).
@@ -488,11 +516,12 @@ pub(super) fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::D
 
 pub(super) fn create_descriptor_pool(device: &ash::Device, max_sets: usize) -> Result<vk::DescriptorPool> {
     let pool_sizes = [
-        // 5 chunk UBOs (camera + fog + shadow + material table + reflection)
-        // per frame set.
+        // 6 chunk UBOs (camera + fog + shadow + material table + reflection
+        // + tile_remap) per frame set. The extra UBO is the set-1 tile_remap
+        // binding the chunk fragment shader reads, see `TileRemapUbo`.
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: (max_sets * 5) as u32,
+            descriptor_count: (max_sets * 6) as u32,
         },
         // 4 combined image samplers per frame set (atlas + shadow +
         // scene_opaque_color + scene_opaque_depth).
@@ -675,9 +704,47 @@ pub(super) fn update_scene_copy_descriptors(
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
 
+/// Create the chunk material set-1 descriptor set layout (sets binding 0
+/// = the `tile_remap` UBO consumed by `shaders/chunk.frag`). The chunk
+/// pipeline layout stitches this layout in at set 1 so the shader's
+/// `layout(set = 1, binding = 0) uniform TileRemap` resolves.
+pub(super) fn create_tile_remap_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
+    let bindings = [vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+    let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    unsafe { device.create_descriptor_set_layout(&create_info, None) }
+        .map_err(|e| anyhow!("create_tile_remap_descriptor_set_layout: {e:?}"))
+}
+
+/// Bind the per-frame tile_remap UBO into the set-1 descriptor set at
+/// binding 0. Called once per frame from `Renderer::new`.
+pub(super) fn update_tile_remap_descriptor_set(
+    device: &ash::Device,
+    set: vk::DescriptorSet,
+    tile_remap_buffer: vk::Buffer,
+) {
+    let tile_remap_info = vk::DescriptorBufferInfo::default()
+        .buffer(tile_remap_buffer)
+        .offset(0)
+        .range(std::mem::size_of::<TileRemapUbo>() as u64);
+    let tile_remap_infos = [tile_remap_info];
+    let writes = [vk::WriteDescriptorSet::default()
+        .dst_set(set)
+        .dst_binding(0)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .buffer_info(&tile_remap_infos)];
+    unsafe { device.update_descriptor_sets(&writes, &[]) };
+}
+
 pub(super) fn create_pipeline_layout(
     device: &ash::Device,
-    set_layout: vk::DescriptorSetLayout,
+    chunk_set_layout: vk::DescriptorSetLayout,
+    tile_remap_set_layout: vk::DescriptorSetLayout,
 ) -> Result<vk::PipelineLayout> {
     let push_range = vk::PushConstantRange::default()
         .stage_flags(
@@ -685,7 +752,13 @@ pub(super) fn create_pipeline_layout(
         )
         .offset(0)
         .size(96); // vec4 + mat4 + vec4 (origin, view_proj, time)
-    let set_layouts = [set_layout];
+    // TWO set layouts: `chunk_set_layout` (camera, fog, atlas, shadow,
+    // material table, scene-opaque color/depth, reflection) and
+    // `tile_remap_set_layout` (TileRemap UBO consumed by the chunk frag at
+    // `layout(set = 1, binding = 0) uniform TileRemap`). The chunk pipeline
+    // layout MUST include both — without tile_remap at set 1 binding 0,
+    // `vkCreateGraphicsPipelines` fails VUID-07988 on chunk.frag.
+    let set_layouts = [chunk_set_layout, tile_remap_set_layout];
     let push_ranges = [push_range];
     let create_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
@@ -2271,22 +2344,12 @@ pub(super) fn create_aabb_index_buffer(
     let mut staging = staging;
     staging.upload(bytes)?;
 
-    let _ibo = GpuBuffer::device_local(
-        device,
-        alloc,
-        size,
-        vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
-        "aabb_idx",
-    )?;
-
-    // Record and submit a one-time copy command.
-    let _pool_info = vk::CommandPoolCreateInfo::default()
-        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-        .queue_family_index(0); // graphics queue family is always 0 in this engine
-    // We can't easily get the queue family index here. Instead, use the
-    // pattern the engine already uses: upload via the caller's command pool.
-    // For simplicity, return the staging buffer and let the caller copy.
-    // Actually — let's just keep it host-visible since it's tiny (72 bytes).
+    // 72 bytes is small enough to keep the index buffer host-visible
+    // (no need for the device_local + staging copy dance). The earlier
+    // `_ibo` device_local attempt was dead-code leaking because the
+    // variable was bound to `_` and never destroyed — its `GpuBuffer`
+    // Drop emitted a leak warning and the `gpu_allocator` allocation
+    // reported "aabb_idx" as leaked on shutdown.
     staging.destroy(device, alloc);
 
     let ibo = GpuBuffer::host_visible(
