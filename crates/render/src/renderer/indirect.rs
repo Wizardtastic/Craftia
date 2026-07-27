@@ -148,9 +148,9 @@ impl GpuDriven {
         let ind_set_layout = create_indirect_set_layout(device)?;
         let ind_pl = create_indirect_pipeline_layout(device, chunk_set_layout, ind_set_layout)?;
         let opaque_pipeline = create_graphics_pipeline(device, render_pass, ind_pl,
-            vk::PolygonMode::FILL, vk::CullModeFlags::BACK, &vert_spv, &frag_spv, msaa_samples)?;
+            vk::PolygonMode::FILL, vk::CullModeFlags::BACK, &vert_spv, &frag_spv, msaa_samples, true)?;
         let transparent_pipeline = create_graphics_pipeline(device, render_pass, ind_pl,
-            vk::PolygonMode::FILL, vk::CullModeFlags::NONE, &vert_spv, &frag_spv, msaa_samples)?;
+            vk::PolygonMode::FILL, vk::CullModeFlags::NONE, &vert_spv, &frag_spv, msaa_samples, false)?;
         let ind_pool = create_indirect_descriptor_pool(device)?;
         let ind_set = allocate_set(device, ind_pool, ind_set_layout)?;
         update_indirect_set(device, ind_set, dummy.buffer, origins_buf.buffer);

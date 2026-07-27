@@ -725,7 +725,7 @@ impl Renderer {
             &device,
             swapchain_format,
             depth_format,
-            msaa_samples,
+            vk::SampleCountFlags::TYPE_1,
         )?;
         let pipeline_layout = pipeline::create_pipeline_layout(&device, descriptor_set_layout)?;
         let pipeline = pipeline::create_graphics_pipeline(
@@ -737,6 +737,7 @@ impl Renderer {
             &chunk_vert_spirv,
             &chunk_frag_spirv,
             msaa_samples,
+            true,
         )?;
         let wireframe_pipeline = pipeline::create_graphics_pipeline(
             &device,
@@ -747,12 +748,20 @@ impl Renderer {
             &chunk_vert_spirv,
             &chunk_frag_spirv,
             msaa_samples,
+            true,
         )?;
         // The transparent pipeline is created against the TRANSPARENT render
         // pass (not the main pass): it is only ever bound inside
         // `transparent_render_pass` (slice 2), and after the main pass grew a
         // 4th (depth-resolve) attachment the two passes are no longer
         // trivially compatible.
+        // Depth write is DISABLED for transparent geometry so water/glass
+        // don't occlude each other or corrupt the depth buffer for SSAO.
+        // MSAA is forced to 1x for the transparent pass: the water shader's
+        // SSR ray-march is extremely expensive at 4x (24 texture fetches per
+        // step × 4 samples), and transparent geometry doesn't benefit much
+        // from MSAA anyway.  This eliminates the GPU timeout (device lost)
+        // that occurs when large water surfaces are in view.
         let transparent_pipeline = pipeline::create_graphics_pipeline(
             &device,
             transparent_render_pass,
@@ -761,7 +770,8 @@ impl Renderer {
             vk::CullModeFlags::NONE,
             &chunk_vert_spirv,
             &chunk_frag_spirv,
-            msaa_samples,
+            vk::SampleCountFlags::TYPE_1,
+            false,
         )?;
 
         // ── Particle descriptor set layout + pipeline layout (Phase 2) ──
@@ -1072,33 +1082,20 @@ impl Renderer {
         // NOTE: `transparent_render_pass` itself was created earlier, right
         // after the main render pass, so `transparent_pipeline` could be
         // built against it.
-        let transparent_framebuffers = if msaa_samples != vk::SampleCountFlags::TYPE_1 {
-            let msaa_c = msaa_color_img.as_ref().unwrap();
-            let msaa_d = msaa_depth_img.as_ref().unwrap();
-            offscreen_images
-                .iter()
-                .map(|img| {
-                    create_framebuffer_with(
-                        &device,
-                        transparent_render_pass,
-                        &[msaa_c.view, msaa_d.view, img.view],
-                        swapchain_extent,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            offscreen_images
-                .iter()
-                .map(|img| {
-                    create_framebuffer_with(
-                        &device,
-                        transparent_render_pass,
-                        &[img.view, depth.view],
-                        swapchain_extent,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
+        // The transparent pass is always single-sample (MSAA=1) to avoid
+        // the GPU timeout from running the expensive water SSR shader at
+        // 4x resolution. Framebuffers always use the non-MSAA path.
+        let transparent_framebuffers = offscreen_images
+            .iter()
+            .map(|img| {
+                create_framebuffer_with(
+                    &device,
+                    transparent_render_pass,
+                    &[img.view, depth.view],
+                    swapchain_extent,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for &descriptor_set in descriptor_sets.iter().take(FRAMES_IN_FLIGHT) {
             let cmd = {
@@ -1893,6 +1890,7 @@ impl Renderer {
             &self.chunk_vert_spirv,
             &self.chunk_frag_spirv,
             self.msaa_samples,
+            true,
         )?;
         self.wireframe_pipeline = pipeline::create_graphics_pipeline(
             &self.device,
@@ -1903,6 +1901,7 @@ impl Renderer {
             &self.chunk_vert_spirv,
             &self.chunk_frag_spirv,
             self.msaa_samples,
+            true,
         )?;
         self.transparent_pipeline = pipeline::create_graphics_pipeline(
             &self.device,
@@ -1912,7 +1911,8 @@ impl Renderer {
             vk::CullModeFlags::NONE,
             &self.chunk_vert_spirv,
             &self.chunk_frag_spirv,
-            self.msaa_samples,
+            vk::SampleCountFlags::TYPE_1,
+            false,
         )?;
         Ok(())
     }
@@ -4448,33 +4448,19 @@ impl Renderer {
 
         // Recreate the transparent pass framebuffers against the new
         // offscreen images (they referenced the destroyed ones before).
-        self.transparent_framebuffers = if self.msaa_samples != vk::SampleCountFlags::TYPE_1 {
-            let msaa_c = self.msaa_color.as_ref().unwrap();
-            let msaa_d = self.msaa_depth.as_ref().unwrap();
-            offscreen_images
-                .iter()
-                .map(|img| {
-                    create_framebuffer_with(
-                        &self.device,
-                        self.transparent_render_pass,
-                        &[msaa_c.view, msaa_d.view, img.view],
-                        swapchain_extent,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            offscreen_images
-                .iter()
-                .map(|img| {
-                    create_framebuffer_with(
-                        &self.device,
-                        self.transparent_render_pass,
-                        &[img.view, depth.view],
-                        swapchain_extent,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
+        // Transparent pass is always single-sample (MSAA=1) — see comment
+        // in Renderer::new() for rationale.
+        self.transparent_framebuffers = offscreen_images
+            .iter()
+            .map(|img| {
+                create_framebuffer_with(
+                    &self.device,
+                    self.transparent_render_pass,
+                    &[img.view, depth.view],
+                    swapchain_extent,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         // Recreate post framebuffers (one per swapchain image view).
         let post_framebuffers = swapchain_image_views
             .iter()
@@ -4780,7 +4766,6 @@ impl Renderer {
         descriptor_set: vk::DescriptorSet,
         cam_pos: glam::Vec3,
     ) {
-        let _ = frustum;
         let any_transparent = self.chunks.read().iter().any(|(_, b)| b.transparent.is_some());
         if !any_transparent {
             // No transparent draws this frame. The scene_opaque copy restored
@@ -4789,24 +4774,23 @@ impl Renderer {
             // final layout would have produced SHADER_READ_ONLY_OPTIMAL),
             // transition explicitly so the post pass samples a valid layout.
             let offscreen = &self.offscreen_images[image_index as usize];
-            unsafe {
-                crate::texture::transition_image_layout(
-                    device,
-                    cmd,
-                    offscreen.image,
-                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    vk::ImageAspectFlags::COLOR,
-                    1,
-                    1,
-                );
-            }
+            crate::texture::transition_image_layout(
+                device,
+                cmd,
+                offscreen.image,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageAspectFlags::COLOR,
+                1,
+                1,
+            );
             return;
         }
 
         const CHUNK_SIZE: f32 = 16.0;
         // (origin, vbo_buf, ibo_buf, index_count, dist_sq) — copy everything
         // out so we drop the chunks lock before the unsafe draw loop.
+        // Frustum-cull transparent chunks so off-screen water is not drawn.
         let mut draws: Vec<(glam::Vec3, vk::Buffer, vk::Buffer, u32, f32)> = Vec::new();
         for (pos, bufs) in self.chunks.read().iter() {
             if let Some(ref t) = bufs.transparent {
@@ -4815,6 +4799,11 @@ impl Renderer {
                     pos.0.y as f32 * CHUNK_SIZE,
                     pos.0.z as f32 * CHUNK_SIZE,
                 );
+                let min = origin;
+                let max = origin + glam::Vec3::splat(CHUNK_SIZE);
+                if !frustum.intersects_aabb(min, max) {
+                    continue;
+                }
                 let center = origin + glam::Vec3::splat(CHUNK_SIZE * 0.5);
                 draws.push((
                     origin,

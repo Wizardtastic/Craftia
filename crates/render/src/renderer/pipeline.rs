@@ -703,6 +703,7 @@ pub(super) fn create_graphics_pipeline(
     vs_spirv: &[u8],
     fs_spirv: &[u8],
     msaa_samples: vk::SampleCountFlags,
+    depth_write: bool,
 ) -> Result<vk::Pipeline> {
     let vert_spv: &[u8] = vs_spirv;
     let frag_spv: &[u8] = fs_spirv;
@@ -801,7 +802,7 @@ pub(super) fn create_graphics_pipeline(
 
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
-        .depth_write_enable(true)
+        .depth_write_enable(depth_write)
         .depth_compare_op(vk::CompareOp::LESS)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);
@@ -2184,7 +2185,7 @@ pub(super) fn create_occlusion_pipeline(
     // Depth test + write: standard LESS comparison.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
-        .depth_write_enable(false)
+        .depth_write_enable(true)
         .depth_compare_op(vk::CompareOp::LESS)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);

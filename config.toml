@@ -15,7 +15,7 @@ msaa_samples = 4
 occlusion_culling = true  # directory of PNG texture overrides (see textures.toml)
 
 # Water + translucency upgrade master scalars (driving chunk shader binding 5)
-water_y = 0.0              # global water surface Y (world units)
+water_y = 62.0             # global water surface Y (world units)
 wet_edge_strength = 0.5    # 0.0..1.0 cool tint on blocks near water surface
 caustics_strength = 0.6    # 0.0..1.0 sun caustics on submerged terrain
 leaves_sss_strength = 0.65 # 0.0..1.0 chlorophyll backlight on leaves

@@ -215,13 +215,16 @@ vec3 face_normal(vec3 view_dir) {
 // The scene depth contains only the OPAQUE pass (copied before the
 // transparent pass), so water never self-occludes and the lake bed / shores
 // are valid hit targets.
-vec4 ssr_raymarch(vec3 origin, vec3 dir) {
-    const int MAX_STEPS = 24;
+vec4 ssr_raymarch(vec3 origin, vec3 dir, float view_dist) {
+    // Scale ray-march quality with fragment distance: close water gets the
+    // full 24-step budget; distant water steps down to save GPU time.
+    int max_steps = view_dist < 30.0 ? 24 : (view_dist < 60.0 ? 12 : 6);
+    float step_len = 0.45;
     // Per-pixel jitter breaks up the banding of the coarse fixed-step march.
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
     vec3 p = origin + dir * (0.55 + jitter * 0.35);
-    float step_len = 0.45;
-    for (int i = 0; i < MAX_STEPS; i++) {
+    for (int i = 0; i < 24; i++) {
+        if (i >= max_steps) break;
         vec4 clip = push.view_proj * vec4(p, 1.0);
         if (clip.w <= 0.0) return vec4(0.0);           // marched behind camera
         vec2 uv = vec2(clip.x / clip.w * 0.5 + 0.5,
@@ -394,10 +397,15 @@ void main() {
 
         // Reflection: SSR where possible, analytic sky otherwise. SSR fades
         // out with fragment distance (hides artifacts, saves marching).
+        // Checkerboard pattern: only run the expensive SSR on half the pixels
+        // (odd/even screen coords), using the sky fallback for the other half.
+        // This halves the fragment-shader cost of reflections with minimal
+        // visual impact thanks to spatial blending.
         vec3 sky_col = sky_reflection_color(r);
         vec3 reflected = sky_col;
-        if (refl.proj_misc.w > 0.5 && view_dist < 80.0) {
-            vec4 hit = ssr_raymarch(frag_world_pos, r);
+        bool checker = (int(gl_FragCoord.x + gl_FragCoord.y) & 1) == 0;
+        if (refl.proj_misc.w > 0.5 && view_dist < 60.0 && checker) {
+            vec4 hit = ssr_raymarch(frag_world_pos, r, view_dist);
             float conf = hit.a * (1.0 - smoothstep(24.0, 60.0, view_dist));
             reflected = mix(sky_col, hit.rgb, conf);
         }
@@ -462,7 +470,7 @@ void main() {
             vec3 sky_col = sky_reflection_color(r);
             vec3 refl_col = sky_col;
             if (refl.proj_misc.w > 0.5 && view_dist < 60.0) {
-                vec4 hit = ssr_raymarch(frag_world_pos + n * 0.05, r);
+                vec4 hit = ssr_raymarch(frag_world_pos + n * 0.05, r, view_dist);
                 float conf = hit.a * (1.0 - smoothstep(20.0, 45.0, view_dist));
                 refl_col = mix(sky_col, hit.rgb, conf);
             }
