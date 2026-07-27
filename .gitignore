@@ -8,3 +8,5 @@ capture_*.png
 .idea/
 .scratch/
 assets/**/.cache/
+/saves
+.omo
