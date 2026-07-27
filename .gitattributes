@@ -1,0 +1,27 @@
+# Force LF line endings across the repo so a Windows checkout (clone /
+# pull with core.autocrlf=true, or editors that write CRLF) can't
+# reintroduce CR bytes into source files. Rust raw strings `r"..."`
+# reject bare CRs at parse time, so this policy keeps the build green
+# no matter what OS the developer is on.
+
+*               text=auto eol=lf
+
+# All Rust source must be LF.
+*.rs            text eol=lf
+
+# Config + manifest files are also LF (every TOML/JSON viewer we use
+# handles LF; CRLF in a Cargo.toml is tolerated but messy in diffs).
+*.toml          text eol=lf
+*.json          text eol=lf
+
+# Markdown (README, plan files) — LF so GitHub renders cleanly.
+*.md            text eol=lf
+
+# GLSL shader sources — must be LF for the same Rust raw-string reason
+# when a `.vert`/`.frag` is included via `include_str!`.
+*.glsl          text eol=lf
+*.vert          text eol=lf
+*.frag          text eol=lf
+
+# Compiled SPIR-V is binary, never normalized.
+*.spv           -text

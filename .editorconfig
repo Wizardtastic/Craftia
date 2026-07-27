@@ -1,0 +1,32 @@
+# Editor config — keeps the working tree on LF + UTF-8 + 4-space indent
+# even before a `.gitattributes` checkout normalization step. Editors
+# that respect editorconfig (VS Code, IntelliJ, Helix, vim-with-
+# editorconfig, etc.) will write LF without CRLF, preventing Rust's
+# "bare CR not allowed in raw string" parse errors at edit time.
+
+root = true
+
+[*]
+end_of_line          = lf
+insert_final_newline = true
+charset              = utf-8
+indent_style         = space
+trim_trailing_whitespace = true
+
+# Rust uses 4-space soft tabs (rustfmt default).
+[*.rs]
+indent_size = 4
+
+# TOML / JSON / markdown preserved by Cargo/intellij.
+[*.{toml,json}]
+indent_size = 2
+
+# GLSL shaders (matched with both .glsl and the .vert/.frag suffixes we
+# use) — 4-space indent to match Rust source layout.
+[*.{glsl,vert,frag}]
+indent_size = 4
+
+# Markdown shouldn't have trailing whitespace trimmed (line breaks are
+# significant in source-code blocks).
+[*.md]
+trim_trailing_whitespace = false

@@ -1,0 +1,28 @@
+[alias]
+r = "run --release"
+d = "run"
+rd = "run --release"
+c = "check"
+t = "test"
+b = "build"
+
+[build]
+# Explicit incremental compilation (default for dev, but prevents accidental disable).
+incremental = true
+
+# NOTE: For build timing reports, run: cargo build --timings
+# This produces target/cargo-timings.html — essential for identifying
+# future regressions. Not set as default to avoid the "unused config key"
+# warning on older cargo versions.
+
+# NOTE: For sccache support, install sccache (`cargo install sccache`) and
+# uncomment the following line. It caches compiled artifacts across clean
+# builds and branch switches, yielding 40-60% faster rebuilds.
+# rustc-wrapper = "sccache"
+
+[target.x86_64-pc-windows-msvc]
+# Use the Rust-bundled LLD linker instead of MSVC link.exe.
+# LLD is 5-10x faster at linking, saving ~5-15s per full build.
+# If this causes issues, comment out the linker line to revert to link.exe.
+linker = "rust-lld"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

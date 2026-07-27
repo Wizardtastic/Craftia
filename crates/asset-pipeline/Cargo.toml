@@ -1,0 +1,16 @@
+[package]
+name = "voxel-asset-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Build-time / first-run asset preprocessing with BLAKE3-cached atlas and mip chain generation."
+
+[dependencies]
+voxel-core.workspace = true
+image.workspace = true
+toml.workspace = true
+log.workspace = true
+anyhow.workspace = true
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }

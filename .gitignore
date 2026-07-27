@@ -1,0 +1,10 @@
+/target
+**/target
+Cargo.lock.bak
+*.spv
+!shaders/**/*.spv
+capture_*.png
+.vs/
+.idea/
+.scratch/
+assets/**/.cache/

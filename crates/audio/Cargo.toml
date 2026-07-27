@@ -1,0 +1,15 @@
+[package]
+name = "voxel-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Audio system for the voxel engine using kira."
+
+[dependencies]
+kira = { version = "0.12", features = ["ogg", "wav"] }
+voxel-core.workspace = true
+log.workspace = true
+anyhow.workspace = true
+flume.workspace = true
+serde.workspace = true
