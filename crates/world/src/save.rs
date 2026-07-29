@@ -39,12 +39,12 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
 
 use crate::chunk::Chunk;
+use crate::error::{Result, WorldError};
 use crate::world::World;
 
 const MAGIC: &[u8; 9] = b"VOXELSAV2";
@@ -53,7 +53,7 @@ const FORMAT_VERSION: u32 = 3;
 /// Save the entire world to a directory. Each chunk is a separate compressed
 /// blob keyed by (cx, cy, cz).
 pub fn save_world(world: &World, path: &Path) -> Result<()> {
-    fs::create_dir_all(path).context("creating save directory")?;
+    fs::create_dir_all(path)?;
 
     let meta_path = path.join("meta.bin");
     let seed = world.seed();
@@ -84,21 +84,24 @@ pub fn save_world(world: &World, path: &Path) -> Result<()> {
 pub fn load_world(path: &Path) -> Result<(i32, Vec<(voxel_core::ChunkPos, Chunk)>)> {
     let meta_path = path.join("meta.bin");
     if !meta_path.exists() {
-        bail!("No save file found at {}", path.display());
+        return Err(WorldError::SaveFormat(format!(
+            "No save file found at {}",
+            path.display()
+        )));
     }
 
     let mut f = BufReader::new(File::open(&meta_path)?);
     let mut magic = [0u8; 9];
     f.read_exact(&mut magic)?;
     if &magic != MAGIC {
-        bail!("Invalid save file magic");
+        return Err(WorldError::CorruptData("Invalid save file magic".into()));
     }
 
     let mut version_buf = [0u8; 4];
     f.read_exact(&mut version_buf)?;
     let version = u32::from_le_bytes(version_buf);
-    if version != FORMAT_VERSION {
-        bail!("Unsupported save version {version}");
+    if version > FORMAT_VERSION {
+        return Err(WorldError::UnsupportedVersion(version, FORMAT_VERSION));
     }
 
     let mut seed_buf = [0u8; 4];
@@ -155,7 +158,10 @@ fn write_chunk(chunk: &Chunk, writer: &mut impl Write) -> Result<()> {
         // Write palette.
         let pal = chunk.palette_data();
         if pal.len() > 4096 {
-            bail!("palette size {} exceeds 4096", pal.len());
+            return Err(WorldError::SaveFormat(format!(
+                "palette size {} exceeds 4096",
+                pal.len()
+            )));
         }
         encoder.write_all(&(pal.len() as u16).to_le_bytes())?;
         for id in pal {
@@ -196,7 +202,11 @@ fn read_chunk(reader: &mut impl Read) -> Result<Chunk> {
     let palette_mode = match mode_buf[0] {
         0 => false,
         1 => true,
-        other => bail!("unknown chunk mode {other}"),
+        other => {
+            return Err(WorldError::CorruptData(format!(
+                "unknown chunk mode {other}"
+            )))
+        }
     };
 
     let mut chunk = Chunk::new(voxel_core::ChunkPos::new(0, 0, 0));

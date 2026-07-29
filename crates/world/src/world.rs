@@ -16,11 +16,78 @@ use voxel_core::{
 use crate::schematic::{SchematicEntity, SchematicId};
 use crate::{chunk::Chunk, gen::TerrainGenerator, mesh::ChunkMeshBundle, registry::BlockRegistry};
 
+/// Number of shards for the chunk storage. Must be a power of two.
+const NUM_SHARDS: usize = 16;
+const SHARD_MASK: usize = NUM_SHARDS - 1;
+
+/// Sharded chunk storage: splits the chunk map across N independent `RwLock`s
+/// so concurrent readers/writers hitting different regions of the world don't
+/// contend on the same lock. The shard is selected by hashing the chunk
+/// position.
+pub struct ShardedChunks {
+    shards: [RwLock<HashMap<ChunkPos, Chunk>>; NUM_SHARDS],
+}
+
+impl ShardedChunks {
+    fn new() -> Self {
+        // `HashMap::new()` is const-capable in recent Rust; build the array
+        // with a small loop to avoid needing `MaybeUninit`.
+        let mut shards: Vec<RwLock<HashMap<ChunkPos, Chunk>>> = Vec::with_capacity(NUM_SHARDS);
+        for _ in 0..NUM_SHARDS {
+            shards.push(RwLock::new(HashMap::new()));
+        }
+        // Convert `Vec` → `[T; N]` via `try_into()`.
+        let vec: Vec<RwLock<HashMap<ChunkPos, Chunk>>> = shards;
+        let arr: [RwLock<HashMap<ChunkPos, Chunk>>; NUM_SHARDS] =
+            vec.try_into().unwrap_or_else(|_| {
+                panic!("shard count mismatch");
+            });
+        Self { shards: arr }
+    }
+
+    #[inline]
+    fn shard_index(pos: ChunkPos) -> usize {
+        // Simple hash: XOR the coordinate components and mask to shard count.
+        let h = (pos.x() as usize).wrapping_mul(0x9e3779b9)
+            ^ (pos.y() as usize).wrapping_mul(0x85ebca6b)
+            ^ (pos.z() as usize).wrapping_mul(0xc2b2ae35);
+        h & SHARD_MASK
+    }
+
+    /// Read-only access to the shard containing `pos`.
+    #[inline]
+    pub fn read_shard(&self, pos: ChunkPos) -> parking_lot::RwLockReadGuard<'_, HashMap<ChunkPos, Chunk>> {
+        self.shards[Self::shard_index(pos)].read()
+    }
+
+    /// Write access to the shard containing `pos`.
+    #[inline]
+    pub fn write_shard(&self, pos: ChunkPos) -> parking_lot::RwLockWriteGuard<'_, HashMap<ChunkPos, Chunk>> {
+        self.shards[Self::shard_index(pos)].write()
+    }
+
+    /// Read access to ALL shards (for operations like `all_loaded_chunks`).
+    /// Caller must be careful not to deadlock by holding multiple shard reads.
+    pub fn read_all(&self) -> Vec<parking_lot::RwLockReadGuard<'_, HashMap<ChunkPos, Chunk>>> {
+        self.shards.iter().map(|s| s.read()).collect()
+    }
+
+    /// Total number of loaded chunks across all shards.
+    pub fn len(&self) -> usize {
+        self.shards.iter().map(|s| s.read().len()).sum()
+    }
+
+    /// True if no chunks are loaded.
+    pub fn is_empty(&self) -> bool {
+        self.shards.iter().all(|s| s.read().is_empty())
+    }
+}
+
 pub struct World {
     seed: i32,
     reg: Arc<BlockRegistry>,
     gen: Arc<TerrainGenerator>,
-    chunks: RwLock<HashMap<ChunkPos, Chunk>>,
+    pub(crate) chunks: ShardedChunks,
     meshes: RwLock<HashMap<ChunkPos, ChunkMeshBundle>>,
     sun_dir: RwLock<glam::Vec3>,
     /// Positions of water sources/flowing water still spreading. Drained and
@@ -31,6 +98,8 @@ pub struct World {
     source_water: RwLock<HashSet<IVec3>>,
     /// Accumulated wall-clock seconds since the last water tick.
     water_tick_accumulator: RwLock<f32>,
+    /// Reusable scratch buffers for `simulate_flow_step` to avoid per-tick allocations.
+    water_sim_buf: RwLock<crate::water::SimulateBuffers>,
     /// Self-reference for safe cross-thread closure capture. Built once in
     /// `new_with_path` via `Arc::new_cyclic`; used by `with_chunk_for_mesh`,
     /// `recompute_lighting_at`, and `set_block` to hand closures an `Arc<World>`
@@ -90,12 +159,13 @@ impl World {
             seed,
             reg,
             gen,
-            chunks: RwLock::new(HashMap::new()),
+            chunks: ShardedChunks::new(),
             meshes: RwLock::new(HashMap::new()),
             sun_dir: RwLock::new(glam::Vec3::new(0.3, 0.9, 0.1).normalize()),
             pending_flow: RwLock::new(HashSet::new()),
             source_water: RwLock::new(HashSet::new()),
             water_tick_accumulator: RwLock::new(0.0),
+            water_sim_buf: RwLock::new(crate::water::SimulateBuffers::new()),
             self_ref: Weak::clone(weak),
             schematic_entities: RwLock::new(HashMap::new()),
         })
@@ -123,13 +193,12 @@ impl World {
 
     pub fn insert_chunk(&self, pos: ChunkPos, mut chunk: Chunk) {
         chunk.pos = pos;
-        self.chunks.write().insert(pos, chunk);
+        self.chunks.write_shard(pos).insert(pos, chunk);
     }
 
     pub fn remove_chunk(&self, pos: ChunkPos) {
-        let mut chunks = self.chunks.write();
         let mut meshes = self.meshes.write();
-        chunks.remove(&pos);
+        self.chunks.write_shard(pos).remove(&pos);
         meshes.remove(&pos);
     }
 
@@ -138,7 +207,7 @@ impl World {
     }
 
     pub fn loaded_chunk_count(&self) -> usize {
-        self.chunks.read().len()
+        self.chunks.len()
     }
     pub fn meshed_chunk_count(&self) -> usize {
         self.meshes.read().len()
@@ -151,19 +220,21 @@ impl World {
 
     /// Get all loaded chunks (for save).
     pub fn all_loaded_chunks(&self) -> Vec<(ChunkPos, Chunk)> {
-        self.chunks
-            .read()
-            .iter()
-            .map(|(&cp, c)| (cp, c.clone()))
-            .collect()
+        let mut result = Vec::new();
+        for shard in self.chunks.shards.iter() {
+            let guard = shard.read();
+            for (&cp, c) in guard.iter() {
+                result.push((cp, c.clone()));
+            }
+        }
+        result
     }
 
     /// Insert multiple chunks (for load).
     pub fn insert_chunks(&self, chunks: Vec<(ChunkPos, Chunk)>) {
-        let mut map = self.chunks.write();
         for (cp, mut chunk) in chunks {
             chunk.pos = cp;
-            map.insert(cp, chunk);
+            self.chunks.write_shard(cp).insert(cp, chunk);
         }
     }
 
@@ -173,7 +244,7 @@ impl World {
             return 0;
         }
         let cp = block_to_chunk(IVec3::new(x, y, z));
-        let chunks = self.chunks.read();
+        let chunks = self.chunks.read_shard(cp);
         let Some(chunk) = chunks.get(&cp) else {
             if y >= voxel_core::SEA_LEVEL {
                 return 15;
@@ -190,7 +261,7 @@ impl World {
             return 0;
         }
         let cp = block_to_chunk(IVec3::new(x, y, z));
-        let chunks = self.chunks.read();
+        let chunks = self.chunks.read_shard(cp);
         let Some(chunk) = chunks.get(&cp) else {
             return 0;
         };
@@ -204,7 +275,7 @@ impl World {
             return;
         }
         let cp = block_to_chunk(IVec3::new(x, y, z));
-        let mut chunks = self.chunks.write();
+        let mut chunks = self.chunks.write_shard(cp);
         let Some(chunk) = chunks.get_mut(&cp) else {
             return;
         };
@@ -220,7 +291,7 @@ impl World {
             return;
         }
         let cp = block_to_chunk(IVec3::new(x, y, z));
-        let mut chunks = self.chunks.write();
+        let mut chunks = self.chunks.write_shard(cp);
         let Some(chunk) = chunks.get_mut(&cp) else {
             return;
         };
@@ -232,7 +303,7 @@ impl World {
     /// flow simulation modifies block types/light absorption across chunks.
     pub fn recompute_lighting_at(&self, cp: ChunkPos) {
         let reg = self.reg.clone();
-        let chunks = self.chunks.read();
+        let chunks = self.chunks.read_shard(cp);
         let Some(chunk) = chunks.get(&cp) else {
             return;
         };
@@ -267,7 +338,7 @@ impl World {
                 self.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
             }
 
-            let mut chunks = self.chunks.write();
+            let mut chunks = self.chunks.write_shard(cp);
         if let Some(chunk) = chunks.get_mut(&cp) {
             std::mem::swap(&mut chunk.sunlight, &mut chunk_copy.sunlight);
             std::mem::swap(&mut chunk.torchlight, &mut chunk_copy.torchlight);
@@ -279,14 +350,14 @@ impl World {
 
     /// True if a chunk is loaded (generated) at the given chunk position.
     pub fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {
-        self.chunks.read().contains_key(&pos)
+        self.chunks.read_shard(pos).contains_key(&pos)
     }
 
     /// Chunk debug info for the minimap visualization.
     /// Returns (loaded, dirty, palette_mode, has_mesh).
     pub fn chunk_debug_info(&self, pos: ChunkPos) -> (bool, bool, bool, bool) {
         let loaded = {
-            let chunks = self.chunks.read();
+            let chunks = self.chunks.read_shard(pos);
             match chunks.get(&pos) {
                 Some(c) => (true, c.dirty, c.is_palette_mode()),
                 None => return (false, false, false, false),
@@ -303,14 +374,16 @@ impl World {
         half: i32,
     ) -> Vec<(ChunkPos, bool, bool, bool, bool)> {
         let mut result = Vec::with_capacity(((half * 2 + 1) * (half * 2 + 1)) as usize);
-        let chunks = self.chunks.read();
         let meshes = self.meshes.read();
         for dx in -half..=half {
             for dz in -half..=half {
                 let pos = ChunkPos::new(center.x() + dx, 0, center.z() + dz);
-                let (loaded, dirty, palette_mode) = match chunks.get(&pos) {
-                    Some(c) => (true, c.dirty, c.is_palette_mode()),
-                    None => (false, false, false),
+                let (loaded, dirty, palette_mode) = {
+                    let chunks = self.chunks.read_shard(pos);
+                    match chunks.get(&pos) {
+                        Some(c) => (true, c.dirty, c.is_palette_mode()),
+                        None => (false, false, false),
+                    }
                 };
                 let has_mesh = meshes.contains_key(&pos);
                 result.push((pos, loaded, dirty, palette_mode, has_mesh));
@@ -346,7 +419,7 @@ impl World {
             return BlockId::AIR;
         }
         let cp = block_to_chunk(IVec3::new(x, y, z));
-        let chunks = self.chunks.read();
+        let chunks = self.chunks.read_shard(cp);
         let Some(chunk) = chunks.get(&cp) else {
             return BlockId::AIR;
         };
@@ -354,9 +427,9 @@ impl World {
         chunk.get(x - origin.x, y - origin.y, z - origin.z)
     }
 
-    /// Get a read reference to the chunks map for batch access.
+    /// Get a read reference to the chunks storage for batch access.
     /// The caller must not hold this longer than necessary to avoid blocking writers.
-    pub fn chunks_ref(&self) -> &parking_lot::RwLock<std::collections::HashMap<ChunkPos, Chunk>> {
+    pub fn chunks_ref(&self) -> &ShardedChunks {
         &self.chunks
     }
 
@@ -412,7 +485,7 @@ impl World {
 
         // Grab the chunk write lock once, write the block, drop the lock.
         {
-            let mut chunks = self.chunks.write();
+            let mut chunks = self.chunks.write_shard(cp);
             let Some(chunk) = chunks.get_mut(&cp) else {
                 return false;
             };
@@ -489,7 +562,7 @@ impl World {
             return 0;
         }
         let cp = block_to_chunk(IVec3::new(x, y, z));
-        let chunks = self.chunks.read();
+        let chunks = self.chunks.read_shard(cp);
         let Some(chunk) = chunks.get(&cp) else {
             return 0;
         };
@@ -504,7 +577,7 @@ impl World {
             return;
         }
         let cp = block_to_chunk(IVec3::new(x, y, z));
-        let mut chunks = self.chunks.write();
+        let mut chunks = self.chunks.write_shard(cp);
         let Some(chunk) = chunks.get_mut(&cp) else {
             return;
         };
@@ -622,7 +695,8 @@ impl World {
             }
         }
         let mut pending = self.pending_flow.write();
-        crate::water::simulate_flow_step(self, &mut pending)
+        let mut buf = self.water_sim_buf.write();
+        crate::water::simulate_flow_step(self, &mut pending, &mut buf)
     }
 
     // --- meshing support ---------------------------------------------------
@@ -650,7 +724,7 @@ impl World {
         // Clone the target chunk out from under the lock so meshing is lock-free;
         // neighbours are sampled live (cheap read lock per sample is acceptable).
         let chunk = {
-            let chunks = self.chunks.read();
+            let chunks = self.chunks.read_shard(pos);
             chunks.get(&pos).cloned()
         };
 

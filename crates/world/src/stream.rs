@@ -437,7 +437,7 @@ fn run_worker(
                         // worker can mutate it while the `sample` closure
                         // re-acquires a read lock for cross-chunk queries.
                         let chunk_clone = {
-                            let chunks = world_for_sample.chunks_ref().read();
+                            let chunks = world_for_sample.chunks.read_shard(pos);
                             chunks.get(&pos).cloned()
                         };
                         let mut chunk = chunk_clone.unwrap_or_else(|| Chunk::new(pos));

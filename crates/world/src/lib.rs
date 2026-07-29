@@ -9,6 +9,7 @@
 //! - `world`    — `World` facade tying storage + streaming + queries together
 
 pub mod chunk;
+pub mod error;
 pub mod gen;
 pub mod light;
 pub mod map;
@@ -20,6 +21,8 @@ pub mod stream;
 pub mod volume;
 pub mod water;
 pub mod world;
+
+pub use error::{Result, WorldError};
 
 pub use chunk::Chunk;
 pub use gen::{BiomeId, TerrainGenerator};

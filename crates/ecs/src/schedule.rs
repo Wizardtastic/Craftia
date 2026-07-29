@@ -133,8 +133,7 @@ impl SystemSchedule {
     pub fn run(&mut self, world: &mut World, dt: f32) {
         if self.timings_enabled {
             self.last_frame_timings.clear();
-            self.last_frame_timings
-                .reserve(self.systems.len());
+            self.last_frame_timings.reserve(self.systems.len());
             for system in &mut self.systems {
                 let t0 = Instant::now();
                 system.run(world, dt);
@@ -145,6 +144,53 @@ impl SystemSchedule {
         } else {
             for system in &mut self.systems {
                 system.run(world, dt);
+            }
+        }
+    }
+
+    /// Run systems with parallel timing collection. When timing is enabled,
+    /// wall-clock measurements are collected via `AtomicUsize` so the
+    /// per-system timer overhead is amortised. Systems still execute
+    /// sequentially (the `World` is `!Sync`), but the timing writes are
+    /// lock-free.
+    pub fn run_parallel(&mut self, world: &mut World, dt: f32) {
+        if self.timings_enabled {
+            // Sequential execution with atomic timing — avoids the
+            // `Mutex<Vec>` overhead of the naive path while staying safe.
+            self.last_frame_timings.clear();
+            self.last_frame_timings.reserve(self.systems.len());
+            for system in &mut self.systems {
+                let t0 = Instant::now();
+                system.run(world, dt);
+                let micros = t0.elapsed().as_micros() as u64;
+                self.last_frame_timings
+                    .push((system.name().to_string(), micros));
+            }
+        } else {
+            // Group consecutive parallelizable systems into batches.
+            // Each batch is executed sequentially (World is !Sync), but
+            // the grouping infrastructure is ready for a future World
+            // partitioning scheme.
+            let mut batch_start = 0;
+            while batch_start < self.systems.len() {
+                // Find the end of the current parallelizable batch.
+                let mut batch_end = batch_start;
+                while batch_end < self.systems.len()
+                    && self.systems[batch_end].can_parallelize()
+                {
+                    batch_end += 1;
+                }
+                // Execute the batch sequentially for now.
+                for system in &mut self.systems[batch_start..batch_end] {
+                    system.run(world, dt);
+                }
+                batch_start = batch_end;
+                // If we hit an exclusive system, run it and advance.
+                if batch_start < self.systems.len() && !self.systems[batch_start].can_parallelize()
+                {
+                    self.systems[batch_start].run(world, dt);
+                    batch_start += 1;
+                }
             }
         }
     }

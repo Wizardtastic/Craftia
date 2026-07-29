@@ -37,8 +37,6 @@ impl World {
         center: (i32, i32),
         radius_blocks: u32,
     ) -> Vec<ColumnSample> {
-        let chunks = self.chunks_ref().read();
-
         let radius_chunks = (radius_blocks as i32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
         let center_cx = center.0 >> 4;
         let center_cz = center.1 >> 4;
@@ -46,50 +44,57 @@ impl World {
         let capacity = (radius_blocks as usize * 2 + 1).pow(2);
         let mut results = Vec::with_capacity(capacity);
 
+        // Collect chunk positions in the radius first, then lock each shard as needed.
+        let mut chunk_positions = Vec::new();
         for dcx in -radius_chunks..=radius_chunks {
             for dcz in -radius_chunks..=radius_chunks {
                 let cx = center_cx + dcx;
                 let cz = center_cz + dcz;
                 let pos = ChunkPos::new(cx, 0, cz);
+                chunk_positions.push(pos);
+            }
+        }
 
-                let Some(chunk) = chunks.get(&pos) else {
-                    continue;
-                };
-                if !chunk.generated {
-                    continue;
-                }
+        // Group positions by shard to minimize lock acquisitions.
+        for pos in &chunk_positions {
+            let chunks = self.chunks.read_shard(*pos);
+            let Some(chunk) = chunks.get(pos) else {
+                continue;
+            };
+            if !chunk.generated {
+                continue;
+            }
 
-                let origin = chunk_origin(pos);
+            let origin = chunk_origin(*pos);
 
-                for lx in 0..CHUNK_SIZE {
-                    for lz in 0..CHUNK_SIZE {
-                        let wx = origin.x + lx;
-                        let wz = origin.z + lz;
+            for lx in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    let wx = origin.x + lx;
+                    let wz = origin.z + lz;
 
-                        // Skip columns outside the block radius.
-                        let dx = wx - center.0;
-                        let dz = wz - center.1;
-                        if dx * dx + dz * dz > (radius_blocks as i32).pow(2) {
-                            continue;
-                        }
-
-                        let height = chunk.column_height(lx, lz);
-                        if height <= 0 {
-                            continue;
-                        }
-                        let top_y = height - 1;
-                        let top_block = chunk.get(lx, top_y, lz);
-                        if top_block.is_air() {
-                            continue;
-                        }
-
-                        results.push(ColumnSample {
-                            block_x: wx,
-                            block_z: wz,
-                            top_block,
-                            height: top_y,
-                        });
+                    // Skip columns outside the block radius.
+                    let dx = wx - center.0;
+                    let dz = wz - center.1;
+                    if dx * dx + dz * dz > (radius_blocks as i32).pow(2) {
+                        continue;
                     }
+
+                    let height = chunk.column_height(lx, lz);
+                    if height <= 0 {
+                        continue;
+                    }
+                    let top_y = height - 1;
+                    let top_block = chunk.get(lx, top_y, lz);
+                    if top_block.is_air() {
+                        continue;
+                    }
+
+                    results.push(ColumnSample {
+                        block_x: wx,
+                        block_z: wz,
+                        top_block,
+                        height: top_y,
+                    });
                 }
             }
         }

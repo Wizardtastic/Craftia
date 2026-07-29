@@ -699,6 +699,55 @@ impl Default for KeybindSettings {
     }
 }
 
+/// Macro to copy graphics fields from `GameSettings` into `EngineConfig`,
+/// reducing the field-by-field boilerplate. Usage:
+/// ```ignore
+/// let mut cfg = graphics_fields!(self);
+/// cfg.seed = self.world.seed;
+/// // ... fill non-graphics fields ...
+/// ```
+macro_rules! graphics_fields {
+    ($settings:expr) => {{
+        let g = &$settings.graphics;
+        crate::EngineConfig {
+            // Graphics fields (copied from GraphicsSettings).
+            shadow_enabled: g.shadow_enabled,
+            shadow_resolution: g.shadow_resolution,
+            exposure: g.exposure,
+            vignette_strength: g.vignette_strength,
+            ssao_enabled: g.ssao_enabled,
+            ssao_radius: g.ssao_radius,
+            ssao_bias: g.ssao_bias,
+            ssao_strength: g.ssao_strength,
+            water_y: g.water_y,
+            wet_edge_strength: g.wet_edge_strength,
+            caustics_strength: g.caustics_strength,
+            leaves_sss_strength: g.leaves_sss_strength,
+            reflection_strength: g.reflection_strength,
+            window_size: (g.width, g.height),
+            // Defaults for non-graphics fields (overwritten by caller).
+            seed: 0,
+            title: String::new(),
+            render: RendererConfig::default(),
+            stream: StreamConfig::default(),
+            world: WorldSettings::default(),
+            player: PlayerConfig::default(),
+            capture_after_frames: None,
+            capture_path: std::path::PathBuf::new(),
+            exit_after_capture: false,
+            capture_cam_pos: None,
+            capture_cam_rot: None,
+            spawn: None,
+            day_length: 0.0,
+            keybinds: KeybindSettings::default(),
+            assets_path: None,
+            fullscreen: false,
+            profile_cpu_systems: false,
+            config_path: std::path::PathBuf::new(),
+        }
+    }};
+}
+
 impl GameSettings {
     /// Load from a TOML file. Returns defaults if the file doesn't exist.
 
@@ -835,111 +884,38 @@ impl GameSettings {
     /// paths can never drift apart.
 
     pub fn to_engine_config(&self) -> crate::EngineConfig {
-        // Substruct transforms and scalar field reads happen first;
-
-        // the only fields we move out of `self` are clones
-
-        // (`self.keys`, `self.world`), so `self` remains intact for
-
-        // `Drop` at end of function.
-
         let render = self.to_renderer_config();
-
         let stream = self.to_stream_config();
-
         let player = self.to_player_config();
-
         let keybinds = self.keys.clone();
-
-        let world_seed = self.world.seed;
-
-        let day_length = self.world.day_length;
-
         let assets_path = self
             .world
             .assets_path
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let window_size = (self.graphics.width, self.graphics.height);
-
-        let shadow_enabled = self.graphics.shadow_enabled;
-
-        let shadow_resolution = self.graphics.shadow_resolution;
-
-        let exposure = self.graphics.exposure;
-
-        let vignette_strength = self.graphics.vignette_strength;
-
-        let ssao_enabled = self.graphics.ssao_enabled;        let ssao_radius = self.graphics.ssao_radius;
-        let ssao_bias = self.graphics.ssao_bias;
-        let ssao_strength = self.graphics.ssao_strength;
-        let water_y = self.graphics.water_y;
-        let wet_edge_strength = self.graphics.wet_edge_strength;
-        let caustics_strength = self.graphics.caustics_strength;
-        let leaves_sss_strength = self.graphics.leaves_sss_strength;
-        let reflection_strength = self.graphics.reflection_strength;
-
-        crate::EngineConfig {
-            seed: world_seed,
-
-            title: "voxel ΓÇö custom Vulkan engine".into(),
-
-            window_size,
-
-            render,
-
-            stream,
-
-            world: self.world.clone(),
-
-            player,
-
-            capture_after_frames: None,
-
-            capture_path: std::path::PathBuf::from("capture.png"),
-
-            exit_after_capture: false,
-
-            capture_cam_pos: None,
-
-            capture_cam_rot: None,
-
-            spawn: None,
-
-            day_length,
-
-            keybinds,
-
-            assets_path,
-
-            shadow_enabled,
-
-            shadow_resolution,
-
-            exposure,
-
-            vignette_strength,            ssao_enabled,
-            ssao_radius,
-            ssao_bias,
-            ssao_strength,
-            water_y,
-            wet_edge_strength,
-            caustics_strength,
-            leaves_sss_strength,
-            reflection_strength,
-
-            fullscreen: false,
-
-            // Default to enabled so the F6 profiler overlay has data; flip
-
-            // off in the config if a release build wants to skip the
-
-            // per-system `Instant::now()` measurement cost.
-            profile_cpu_systems: true,
-
-            config_path: std::path::PathBuf::from("config.toml"),
-        }
+        let mut cfg = graphics_fields!(self);
+        // Override defaults with computed values.
+        cfg.seed = self.world.seed;
+        cfg.title = "voxel — custom Vulkan engine".into();
+        cfg.render = render;
+        cfg.stream = stream;
+        cfg.world = self.world.clone();
+        cfg.player = player;
+        cfg.capture_after_frames = None;
+        cfg.capture_path = std::path::PathBuf::from("capture.png");
+        cfg.exit_after_capture = false;
+        cfg.capture_cam_pos = None;
+        cfg.capture_cam_rot = None;
+        cfg.spawn = None;
+        cfg.day_length = self.world.day_length;
+        cfg.keybinds = keybinds;
+        cfg.assets_path = assets_path;
+        cfg.fullscreen = false;
+        // Default to enabled so the F6 profiler overlay has data.
+        cfg.profile_cpu_systems = true;
+        cfg.config_path = std::path::PathBuf::from("config.toml");
+        cfg
     }
 }
 

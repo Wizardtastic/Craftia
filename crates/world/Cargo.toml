@@ -17,6 +17,7 @@ glam.workspace = true
 bytemuck.workspace = true
 log.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 flate2.workspace = true
 
 [dev-dependencies]

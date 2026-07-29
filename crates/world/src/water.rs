@@ -25,6 +25,34 @@ const SIDES: [IVec3; 4] = [
     IVec3::new(0, 0, -1),
 ];
 
+/// Reusable scratch buffers for the water simulation hot path.
+/// Avoids per-tick `HashSet::new()` / `Vec::new()` allocations.
+pub struct SimulateBuffers {
+    to_process: Vec<IVec3>,
+    next_pending: HashSet<IVec3>,
+}
+
+impl SimulateBuffers {
+    pub fn new() -> Self {
+        Self {
+            to_process: Vec::with_capacity(1024),
+            next_pending: HashSet::with_capacity(1024),
+        }
+    }
+
+    /// Clear all buffers for reuse without deallocating.
+    pub fn clear(&mut self) {
+        self.to_process.clear();
+        self.next_pending.clear();
+    }
+}
+
+impl Default for SimulateBuffers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Run one water simulation step.
 ///
 /// For every position in `pending`:
@@ -35,15 +63,22 @@ const SIDES: [IVec3; 4] = [
 ///
 /// Sources (level 8) that remain in the world are re-queued so they keep
 /// responding to neighbour changes. Returns the set of chunks modified.
-pub fn simulate_flow_step(world: &World, pending: &mut HashSet<IVec3>) -> HashSet<ChunkPos> {
+pub fn simulate_flow_step(
+    world: &World,
+    pending: &mut HashSet<IVec3>,
+    buf: &mut SimulateBuffers,
+) -> HashSet<ChunkPos> {
     let mut affected = HashSet::new();
     let reg = world.registry();
     let _ = reg.id_of("water");
 
-    let to_process: Vec<IVec3> = pending.drain().collect();
-    let mut next_pending: HashSet<IVec3> = HashSet::new();
+    buf.clear();
+    buf.to_process.extend(pending.drain());
+    std::mem::swap(&mut buf.next_pending, &mut HashSet::new());
+    // Reuse the hashset from last tick — `clear()` keeps the allocation.
+    let next_pending = &mut buf.next_pending;
 
-    for pos in to_process.iter().copied() {
+    for pos in buf.to_process.iter().copied() {
         if !world.is_block_loaded(pos.x, pos.y, pos.z) {
             // Defer until the chunk loads.
             next_pending.insert(pos);
@@ -154,7 +189,9 @@ pub fn simulate_flow_step(world: &World, pending: &mut HashSet<IVec3>) -> HashSe
         }
     }
 
-    *pending = next_pending;
+    // Swap the reusable buffer into `pending` so the caller keeps ownership
+    // of the next tick's work set while we return the affected-chunk set.
+    std::mem::swap(pending, next_pending);
     affected
 }
 
@@ -175,10 +212,11 @@ pub fn simulate_flow_full(world: &World, start: IVec3) -> HashSet<ChunkPos> {
     clear_flow(world, &sources, &mut affected);
 
     let mut pending: HashSet<IVec3> = sources.iter().copied().collect();
+    let mut buf = SimulateBuffers::new();
     // Sources are kept in `pending` across ticks, so the set never drains.
     // Detect quiescence by the absence of new water placements.
     loop {
-        let tick_affected = simulate_flow_step(world, &mut pending);
+        let tick_affected = simulate_flow_step(world, &mut pending, &mut buf);
         if tick_affected.is_empty() {
             break;
         }
@@ -359,6 +397,12 @@ mod tests {
     use crate::world::World;
     use glam::IVec3;
     use voxel_core::ChunkPos;
+
+    /// Convenience wrapper for tests — allocates a fresh `SimulateBuffers` each call.
+    fn step(world: &World, pending: &mut HashSet<IVec3>) -> HashSet<ChunkPos> {
+        let mut buf = SimulateBuffers::new();
+        simulate_flow_step(world, pending, &mut buf)
+    }
 
     /// Create a test world with a flat stone floor at y=0 and chunks loaded
     /// around the origin.
@@ -610,7 +654,7 @@ mod tests {
         let mut pending = HashSet::new();
         pending.insert(IVec3::new(0, 3, 0));
 
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         // Water fell one block; no sideways spread yet.
         assert_eq!(world.get_water_level_world(0, 2, 0), 8);
         assert_eq!(world.get_water_level_world(1, 3, 0), 0);
@@ -628,16 +672,16 @@ mod tests {
         pending.insert(IVec3::new(0, 3, 0));
 
         // Tick 1: water falls one block to y=2 at level 8.
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         assert_eq!(world.get_water_level_world(0, 2, 0), 8);
         assert_eq!(world.get_water_level_world(0, 1, 0), 0);
 
         // Tick 2: falls one more block to y=1.
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         assert_eq!(world.get_water_level_world(0, 1, 0), 8);
 
         // Tick 3: lands on stone floor; spreads sideways at level 7.
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         assert_eq!(world.get_water_level_world(0, 1, 0), 8);
         assert_eq!(world.get_water_level_world(1, 1, 0), 7);
     }
@@ -651,7 +695,7 @@ mod tests {
         pending.insert(IVec3::new(0, 1, 0));
 
         // Tick 1: source spreads to all four sides at level 7.
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         assert_eq!(world.get_water_level_world(1, 1, 0), 7);
         assert_eq!(world.get_water_level_world(-1, 1, 0), 7);
         assert_eq!(world.get_water_level_world(0, 1, 1), 7);
@@ -660,7 +704,7 @@ mod tests {
         assert_eq!(world.get_water_level_world(2, 1, 0), 0);
 
         // Tick 2: level-7 blocks spread further to level 6.
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         assert_eq!(world.get_water_level_world(2, 1, 0), 6);
     }
 
@@ -678,7 +722,7 @@ mod tests {
 
         let mut pending = HashSet::new();
         pending.insert(IVec3::new(0, 1, 0));
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
 
         // (1, 1, 0) is over water at (1, 0, 0) — should NOT be placed.
         assert_eq!(world.get_water_level_world(1, 1, 0), 0);
@@ -694,7 +738,7 @@ mod tests {
         pending.insert(IVec3::new(0, 1, 0));
 
         // After one tick, the source should still be in pending (level 8).
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         assert!(pending.contains(&IVec3::new(0, 1, 0)));
     }
 
@@ -710,7 +754,7 @@ mod tests {
         pending.insert(IVec3::new(0, 1, 0));
         pending.insert(IVec3::new(5, 1, 0));
 
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         // The cleared position is dropped; the source remains.
         assert!(!pending.contains(&IVec3::new(5, 1, 0)));
         assert!(pending.contains(&IVec3::new(0, 1, 0)));
@@ -720,7 +764,7 @@ mod tests {
     fn step_empty_pending_does_nothing() {
         let world = setup_world();
         let mut pending = HashSet::new();
-        let affected = simulate_flow_step(&world, &mut pending);
+        let affected = step(&world, &mut pending);
         assert!(affected.is_empty());
         assert!(pending.is_empty());
         assert_eq!(world.get_water_level_world(0, 1, 0), 0);
@@ -854,7 +898,7 @@ mod tests {
         let mut pending = HashSet::new();
         pending.insert(IVec3::new(0, 5, 0));
         pending.insert(IVec3::new(0, 3, 0));
-        simulate_flow_step(&world, &mut pending);
+        step(&world, &mut pending);
         // The level-2 water below should stay at level 2 (not promoted to 8).
         // Note: in one step, water at (0,3,0) falls to (0,2,0) — but we expect
         // (0,2,0) to stay at 2 since the fix only fills air below.
@@ -864,7 +908,7 @@ mod tests {
         // the key invariant is that level-2 doesn't become 8.
         // Run a few more ticks and verify.
         for _ in 0..10 {
-            simulate_flow_step(&world, &mut pending);
+            step(&world, &mut pending);
         }
         // After settling, the pre-existing level-2 should not have been promoted
         // to 8 by the falling water from above.

@@ -16,6 +16,7 @@
 
 mod device;
 mod indirect;
+mod init;
 mod pipeline;
 mod swapchain;
 
@@ -643,28 +644,25 @@ impl Renderer {
         // Cache shader SPIR-V at startup. `build.rs` has already compiled
         // them; we just borrow the bytes into owned Vec<u8> so the reload
         // path can update a single file via glslangValidator.
-        let chunk_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/chunk.vert.spv")).to_vec();
-        let chunk_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/chunk.frag.spv")).to_vec();
-        let ui_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/ui.vert.spv")).to_vec();
-        let ui_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/ui.frag.spv")).to_vec();
-        let sky_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/sky.vert.spv")).to_vec();
-        let sky_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/sky.frag.spv")).to_vec();
-        let shadow_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/shadow.vert.spv")).to_vec();
-        let shadow_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/shadow.frag.spv")).to_vec();
-        let post_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/post.vert.spv")).to_vec();
-        let post_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/post.frag.spv")).to_vec();
-        let entity_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/entity.vert.spv")).to_vec();
-        let entity_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/entity.frag.spv")).to_vec();
-        // Particle shaders (subpass 1). Cached so `shaders/particle.*` can be
-        // reloaded at runtime via `Renderer::reload_shader("particle.vert"|"particle.frag")`
-        // if the user adds the renderer plumbing later — for now a fresh
-        // pipeline is created from the cached bytes at init.
-        let particle_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/particle.vert.spv")).to_vec();
-        let particle_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/particle.frag.spv")).to_vec();
-        let overlay_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/overlay.vert.spv")).to_vec();
-        let overlay_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/overlay.frag.spv")).to_vec();
-        let aabb_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/aabb_occlusion.vert.spv")).to_vec();
-        let aabb_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/aabb_occlusion.frag.spv")).to_vec();
+        let spirv = init::load_shader_blobs();
+        let chunk_vert_spirv = spirv.chunk_vert;
+        let chunk_frag_spirv = spirv.chunk_frag;
+        let ui_vert_spirv = spirv.ui_vert;
+        let ui_frag_spirv = spirv.ui_frag;
+        let sky_vert_spirv = spirv.sky_vert;
+        let sky_frag_spirv = spirv.sky_frag;
+        let shadow_vert_spirv = spirv.shadow_vert;
+        let shadow_frag_spirv = spirv.shadow_frag;
+        let post_vert_spirv = spirv.post_vert;
+        let post_frag_spirv = spirv.post_frag;
+        let entity_vert_spirv = spirv.entity_vert;
+        let entity_frag_spirv = spirv.entity_frag;
+        let particle_vert_spirv = spirv.particle_vert;
+        let particle_frag_spirv = spirv.particle_frag;
+        let overlay_vert_spirv = spirv.overlay_vert;
+        let overlay_frag_spirv = spirv.overlay_frag;
+        let aabb_vert_spirv = spirv.aabb_vert;
+        let aabb_frag_spirv = spirv.aabb_frag;
         let atlas =
             AtlasTexture::new(&device, &alloc, command_pool, graphics_queue, &atlas_pixels)?;
 
@@ -742,52 +740,13 @@ impl Renderer {
         let depth_format = device::find_depth_format(&instance, physical_device);
 
         // Resolve the requested MSAA sample count against what the device supports.
-        let msaa_samples = {
-            let limits = unsafe { instance.get_physical_device_properties(physical_device) }.limits;
-            let props = limits.framebuffer_color_sample_counts
-                & limits.framebuffer_depth_sample_counts;
-            let requested = config.msaa_samples;
-            if requested >= 8 && props.contains(vk::SampleCountFlags::TYPE_8) {
-                vk::SampleCountFlags::TYPE_8
-            } else if requested >= 4 && props.contains(vk::SampleCountFlags::TYPE_4) {
-                vk::SampleCountFlags::TYPE_4
-            } else if requested >= 2 && props.contains(vk::SampleCountFlags::TYPE_2) {
-                vk::SampleCountFlags::TYPE_2
-            } else {
-                vk::SampleCountFlags::TYPE_1
-            }
-        };
+        let msaa_samples = init::resolve_msaa_samples(&instance, physical_device, config.msaa_samples);
         if msaa_samples != vk::SampleCountFlags::TYPE_1 {
             log::info!("MSAA {:?} enabled", msaa_samples);
         }
 
         // ── Depth-stencil-resolve support (for the SSR scene-depth copy) ──
-        // Vulkan 1.2 promoted VK_KHR_depth_stencil_resolve to core. Query the
-        // device's supported depth resolve modes; prefer MIN (closest surface
-        // wins → cleaner SSR occlusion) and fall back to SAMPLE_ZERO (which
-        // the spec guarantees when depth resolve is supported at all). When
-        // unavailable (pre-1.2 device) the main render pass gets no depth
-        // resolve attachment and the shader falls back to sky-only
-        // reflections under MSAA.
-        let depth_resolve_mode: Option<vk::ResolveModeFlags> = {
-            let props = unsafe { instance.get_physical_device_properties(physical_device) };
-            if props.api_version >= vk::make_api_version(0, 1, 2, 0) {
-                let mut dsr_props = vk::PhysicalDeviceDepthStencilResolveProperties::default();
-                let mut props2 =
-                    vk::PhysicalDeviceProperties2::default().push_next(&mut dsr_props);
-                unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
-                let modes = dsr_props.supported_depth_resolve_modes;
-                if modes.contains(vk::ResolveModeFlags::MIN) {
-                    Some(vk::ResolveModeFlags::MIN)
-                } else if modes.contains(vk::ResolveModeFlags::SAMPLE_ZERO) {
-                    Some(vk::ResolveModeFlags::SAMPLE_ZERO)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
+        let depth_resolve_mode = init::probe_depth_resolve(&instance, physical_device);
         // The SSR scene-depth copy is valid without MSAA (the single-sample
         // depth attachment is copied directly) and with MSAA only when depth
         // resolve works. Recorded once here; surfaced to the shader via the

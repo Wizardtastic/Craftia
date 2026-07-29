@@ -1,43 +1,41 @@
-# Voxel Engine Configuration
-# Delete this file to reset to defaults. CLI flags override these values.
-
 [graphics]
-width = 1280
-height = 720
+width = 2560
+height = 1369
 vsync = true
-fog_distance = 256.0
+fog_distance = 100.0
 shadow_enabled = true
 shadow_resolution = 1024
-exposure = 0.6
-vignette_strength = 0.15
+exposure = 0.6000000238418579
+vignette_strength = 0.15000000596046448
 textures_dir = "assets/textures"
 msaa_samples = 2
-occlusion_culling = true  # directory of PNG texture overrides (see textures.toml)
-
-# Water + translucency upgrade master scalars (driving chunk shader binding 5)
-water_y = 62.0             # global water surface Y (world units)
-wet_edge_strength = 0.5    # 0.0..1.0 cool tint on blocks near water surface
-caustics_strength = 0.6    # 0.0..1.0 sun caustics on submerged terrain
-leaves_sss_strength = 0.65 # 0.0..1.0 chlorophyll backlight on leaves
-
-# Reflections (chunk shader binding 8): water SSR + sky reflection, glass
-# sheen, opaque glossy tiles (snow). 0.0 disables all reflections.
-reflection_strength = 0.85 # 0.0..1.0
-
+occlusion_culling = true
+ssao_enabled = true
+gpu_driven = false
+ssao_radius = 1.5
+ssao_bias = 0.02500000037252903
+ssao_strength = 1.0
+water_y = 62.0
+wet_edge_strength = 0.5
+caustics_strength = 0.6000000238418579
+leaves_sss_strength = 0.6499999761581421
+reflection_strength = 0.8500000238418579
 
 [world]
 seed = 1337
 load_radius = 4
 unload_radius = 6
-day_length = 1200.0  # seconds per full day cycle (1200 = 20 minutes)
-assets_path = "assets"  # path to data-driven block definitions (null = use builtins)
+day_length = 1200.0
+assets_path = "assets"
 
 [player]
-walk_speed = 4.317
-sprint_speed = 5.6
+walk_speed = 4.316999912261963
+sprint_speed = 5.599999904632568
+sneak_speed = 1.7999999523162842
 jump_speed = 7.5
 gravity = 26.0
-mouse_sensitivity = 0.0022
+terminal_velocity = 55.0
+mouse_sensitivity = 0.002199999988079071
 fly_speed = 20.0
 
 [keys]
@@ -49,11 +47,18 @@ render_distance_up = "F8"
 render_distance_down = "F9"
 screenshot = "F2"
 pause = "Escape"
+block_picker = "E"
+profiler = "F6"
+chunk_debug = "F7"
+ecs_inspector = "F10"
+pin_unpin = "F11"
+pin_cycle_next = "BracketRight"
+pin_cycle_prev = "BracketLeft"
+pin_clear = "Backslash"
 developer_console = "Backquote"
 telemetry_dashboard = "F1"
 edit_mode = "X"
 fullscreen_map = "M"
-
 
 [debug]
 show_overlay = false

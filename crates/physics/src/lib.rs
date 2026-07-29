@@ -6,12 +6,10 @@
 //! - `raycast_voxels` — DDA voxel traversal returning the first solid hit and
 //!   the face normal, used for block targeting (breaking/placing).
 
-use voxel_core::math::ChunkPos;
 use voxel_core::{
     math::{world_to_block, Aabb, Ray},
     BlockId,
 };
-use voxel_world::chunk::Chunk;
 use voxel_world::World;
 
 /// A single voxel ray hit.
@@ -76,11 +74,8 @@ pub fn raycast_voxels(world: &World, ray: Ray) -> Option<RayHit> {
     let abs_y = dir.y.abs();
     let abs_z = dir.z.abs();
 
-    // Acquire chunks read lock once for the entire raycast.
-    let chunks_guard = world.chunks_ref().read();
-
     while t <= ray.max_dist {
-        let id = World::get_block_guarded(&chunks_guard, block.x, block.y, block.z);
+        let id = world.get_block(block.x, block.y, block.z);
         if !id.is_air() {
             // Skip water/liquid blocks so the player can hit blocks through
             // water. Fall through to the DDA advancement to step past.
@@ -167,40 +162,15 @@ pub fn swept_aabb(
 ) -> MoveResult {
     let mut p = pos;
     let mut hit = [false; 6];
-    let chunks_guard = world.chunks_ref().read();
 
     // Y axis first so that AABB height changes (crouch↔stand) resolve
     // vertically before horizontal sweeps, preventing the taller AABB
     // from intersecting with blocks below the ground surface.
-    p = move_axis(
-        &chunks_guard,
-        world.registry_ref(),
-        p,
-        box_half,
-        glam::Vec3::new(0.0, delta.y, 0.0),
-        &mut hit,
-        1,
-    );
+    p = move_axis(world, p, box_half, glam::Vec3::new(0.0, delta.y, 0.0), &mut hit, 1);
     // X axis
-    p = move_axis(
-        &chunks_guard,
-        world.registry_ref(),
-        p,
-        box_half,
-        glam::Vec3::new(delta.x, 0.0, 0.0),
-        &mut hit,
-        0,
-    );
+    p = move_axis(world, p, box_half, glam::Vec3::new(delta.x, 0.0, 0.0), &mut hit, 0);
     // Z axis
-    p = move_axis(
-        &chunks_guard,
-        world.registry_ref(),
-        p,
-        box_half,
-        glam::Vec3::new(0.0, 0.0, delta.z),
-        &mut hit,
-        2,
-    );
+    p = move_axis(world, p, box_half, glam::Vec3::new(0.0, 0.0, delta.z), &mut hit, 2);
 
     let on_ground = hit[3] && delta.y < 0.0; // hit -Y while moving down
     MoveResult {
@@ -211,8 +181,7 @@ pub fn swept_aabb(
 }
 
 fn move_axis(
-    chunks: &std::collections::HashMap<ChunkPos, Chunk>,
-    reg: &voxel_world::registry::BlockRegistry,
+    world: &World,
     pos: glam::Vec3,
     half: glam::Vec3,
     delta: glam::Vec3,
@@ -229,7 +198,7 @@ fn move_axis(
     for by in min_b.y..=max_b.y {
         for bz in min_b.z..=max_b.z {
             for bx in min_b.x..=max_b.x {
-                if !World::is_solid_guarded(chunks, reg, bx, by, bz) {
+                if !world.is_solid(bx, by, bz) {
                     continue;
                 }
                 // Collision on this axis: push the box back to the block face.
@@ -275,11 +244,10 @@ pub fn intersects_solid(world: &World, pos: glam::Vec3, half: glam::Vec3) -> boo
     let aabb = Aabb::from_center_size(pos, half * 2.0);
     let min_b = world_to_block(aabb.min);
     let max_b = world_to_block(aabb.max - glam::Vec3::splat(0.001));
-    let chunks_guard = world.chunks_ref().read();
     for by in min_b.y..=max_b.y {
         for bz in min_b.z..=max_b.z {
             for bx in min_b.x..=max_b.x {
-                if World::is_solid_guarded(&chunks_guard, world.registry_ref(), bx, by, bz) {
+                if world.is_solid(bx, by, bz) {
                     return true;
                 }
             }
