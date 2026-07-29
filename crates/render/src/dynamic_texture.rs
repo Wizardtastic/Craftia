@@ -134,7 +134,7 @@ impl DynamicAtlasTexture {
             data.len()
         );
 
-        self.staging.upload(data)?;
+        self.staging.upload(device, data)?;
 
         let cmd = begin_one_time(device, pool)?;
 

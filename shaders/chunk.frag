@@ -136,15 +136,15 @@ float compute_shadow_factor(vec3 world_pos, float view_depth) {
     float bias = shadow.light_dir_and_bias.w;
     float current_depth = proj_coords.z;
 
-    vec2 texel_size = 1.0 / vec2(2048.0);
+    vec2 texel_size = 1.0 / vec2(textureSize(shadow_map, 0).xy);
     float shadow_accum = 0.0;
-    for (int x = -1; x <= 1; x++) {
-        for (int y = -1; y <= 1; y++) {
-            vec2 offset = vec2(x, y) * texel_size;
-            shadow_accum += texture(shadow_map, vec4(proj_coords.xy + offset, float(cascade_idx), current_depth - bias));
-        }
-    }
-    shadow_accum /= 9.0;
+    // 4-tap cross pattern instead of 3x3 grid (halves shadow sampling cost).
+    shadow_accum += texture(shadow_map, vec4(proj_coords.xy, float(cascade_idx), current_depth - bias));
+    shadow_accum += texture(shadow_map, vec4(proj_coords.xy + vec2(1.0, 0.0) * texel_size, float(cascade_idx), current_depth - bias));
+    shadow_accum += texture(shadow_map, vec4(proj_coords.xy + vec2(-1.0, 0.0) * texel_size, float(cascade_idx), current_depth - bias));
+    shadow_accum += texture(shadow_map, vec4(proj_coords.xy + vec2(0.0, 1.0) * texel_size, float(cascade_idx), current_depth - bias));
+    shadow_accum += texture(shadow_map, vec4(proj_coords.xy + vec2(0.0, -1.0) * texel_size, float(cascade_idx), current_depth - bias));
+    shadow_accum /= 5.0;
 
     return shadow_accum;
 }
@@ -217,13 +217,13 @@ vec3 face_normal(vec3 view_dir) {
 // are valid hit targets.
 vec4 ssr_raymarch(vec3 origin, vec3 dir, float view_dist) {
     // Scale ray-march quality with fragment distance: close water gets the
-    // full 24-step budget; distant water steps down to save GPU time.
-    int max_steps = view_dist < 30.0 ? 24 : (view_dist < 60.0 ? 12 : 6);
+    // full 16-step budget; distant water steps down to save GPU time.
+    int max_steps = view_dist < 30.0 ? 16 : (view_dist < 60.0 ? 8 : 4);
     float step_len = 0.45;
     // Per-pixel jitter breaks up the banding of the coarse fixed-step march.
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
     vec3 p = origin + dir * (0.55 + jitter * 0.35);
-    for (int i = 0; i < 24; i++) {
+    for (int i = 0; i < 16; i++) {
         if (i >= max_steps) break;
         vec4 clip = push.view_proj * vec4(p, 1.0);
         if (clip.w <= 0.0) return vec4(0.0);           // marched behind camera
@@ -353,6 +353,9 @@ void main() {
     // other path keeps the texture alpha.
     float out_alpha = tex.a;
 
+    // Pre-compute scene size once (shared by water refraction and glass absorption).
+    vec2 scene_size = vec2(textureSize(scene_opaque, 0));
+
     // ── WATER: refraction + fresnel reflection (SSR with sky fallback) ───
     // Replaces the base shading for water tiles. The refraction samples the
     // binding-6 opaque colour distorted by the procedural wave normal, with
@@ -367,7 +370,6 @@ void main() {
         float cos_theta = clamp(dot(-view_dir, n), 0.0, 1.0);
         float fres = (0.02 + 0.98 * pow(1.0 - cos_theta, 5.0)) * refl_master;
 
-        vec2 scene_size = vec2(textureSize(scene_opaque, 0));
         vec2 frag_uv_ss = gl_FragCoord.xy / scene_size;
         float frag_eye = (push.view_proj * vec4(frag_world_pos, 1.0)).w;
 
@@ -377,7 +379,18 @@ void main() {
         {
             vec2 refr_off = n.xz * (0.06 / max(frag_eye * 0.12, 0.35));
             vec2 refr_uv = clamp(frag_uv_ss + refr_off, vec2(0.001), vec2(0.999));
-            float scene_eye = linearize_depth(textureLod(scene_depth, refr_uv, 0.0).r);
+            // Sample `scene_depth` only when SSR / depth-resolve is genuinely
+            // available on this device. Otherwise the depth copy is skipped
+            // (`depth_resolve_mode = None`) and `scene_opaque_depth` is
+            // unwritten-undefined, which would make water chunks sample
+            // garbage `linearize_depth()` values and render as a solid-white
+            // flash. Falling back to a far-plane sentinel (1.0) drives
+            // `water_col` to the post-clamp 0.6 floor via the existing
+            // `scene_eye > 0.95 * proj_misc.y` branch, making the chunk
+            // render as an opaque sky-mirror instead of a white-out flash.
+            bool ssr_valid_refraction = refl.proj_misc.w > 0.5;
+            float scene_d_sample = ssr_valid_refraction ? textureLod(scene_depth, refr_uv, 0.0).r : 1.0;
+            float scene_eye = linearize_depth(scene_d_sample);
             float water_col = max(scene_eye - frag_eye, 0.0);
             // Sky behind the surface (ray exits): clamp to a shallow column so
             // edge-on water against the sky doesn't go black-blue.
@@ -435,10 +448,6 @@ void main() {
     // RGB so the visual identity of glassy blocks reads as green-glass,
     // blue-ice, etc.
     if ((flags & MATERIAL_FLAG_TRANSLUCENT_ABSORB) != 0u) {
-        // Get screen UV from the scene_opaque image's own dimensions (the
-        // sampler is sized to the offscreen extent). Avoids pushing an
-        // extra uniform just to know the resolution.
-        vec2 scene_size = vec2(textureSize(scene_opaque, 0));
         vec2 scene_uv = gl_FragCoord.xy / scene_size;
         vec3 scene_rgb = texture(scene_opaque, scene_uv).rgb;
         // absorption_pad: low 24 bits = RGB coefficients (0..1, inverse

@@ -136,6 +136,12 @@ impl GpuDriven {
         let mut dummy = GpuBuffer::host_visible(device, alloc, TILE_REMAP_UBO_SIZE,
             vk::BufferUsageFlags::UNIFORM_BUFFER, "dummy_tile_remap")?;
         dummy.mapped_slice_mut()?.fill(0);
+        // Flush zero-init so the device sees a deterministic UBO rather
+        // than garbage if the GPU ever reads it before another write.
+        // HOST_COHERENT -> no-op; non-coherent -> required.
+        if let Err(e) = dummy.flush_whole(device) {
+            log::warn!("dummy_tile_remap flush failed: {e}");
+        }
         let cull_spv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/chunk_cull.comp.spv")).to_vec();
         let vert_spv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/chunk_indirect.vert.spv")).to_vec();
         let frag_spv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/chunk.frag.spv")).to_vec();
@@ -360,6 +366,13 @@ impl GpuDriven {
                 off += v + i;
             }
         }
+        // Flush the staging buffer so the GPU's `cmd_copy_buffer` reads
+        // the latest bytes, not stale ones. Required on non-coherent
+        // memory (which is what produced the "flashing white chunks"
+        // symptom); no-op on HOST_COHERENT.
+        if let Err(e) = staging.flush_whole(device) {
+            log::error!("gpu staging flush failed: {e}");
+        }
         let cmd = match begin_one_time(device, command_pool) {
             Ok(c) => c, Err(e) => { log::error!("gpu begin_one_time: {e}"); staging.destroy(device, alloc); return; }
         };
@@ -442,7 +455,7 @@ impl GpuDriven {
         if self.chunks.remove(&pos).is_some() { self.dirty = true; }
     }
 
-    fn rebuild(&mut self) {
+    fn rebuild(&mut self, device: &ash::Device) {
         let mut positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();
         positions.sort_by_key(|p| (p.0.x, p.0.y, p.0.z));
         self.order = positions.clone();
@@ -482,14 +495,23 @@ impl GpuDriven {
         if let Ok(slice) = self.indirect_cmd_buf.mapped_slice_mut() {
             let n = std::mem::size_of::<DrawIndexedIndirectCommand>() * total;
             slice[..n].copy_from_slice(bytemuck::cast_slice(&cmds));
+            if let Err(e) = self.indirect_cmd_buf.flush_whole(device) {
+                log::warn!("indirect_cmd_buf flush failed: {e}");
+            }
         }
         if let Ok(slice) = self.aabb_buf.mapped_slice_mut() {
             let n = std::mem::size_of::<ChunkAabb>() * total;
             slice[..n].copy_from_slice(bytemuck::cast_slice(&aabbs));
+            if let Err(e) = self.aabb_buf.flush_whole(device) {
+                log::warn!("aabb_buf flush failed: {e}");
+            }
         }
         if let Ok(slice) = self.origins_buf.mapped_slice_mut() {
             let n = std::mem::size_of::<ChunkOrigin>() * total;
             slice[..n].copy_from_slice(bytemuck::cast_slice(&origins));
+            if let Err(e) = self.origins_buf.flush_whole(device) {
+                log::warn!("origins_buf flush failed: {e}");
+            }
         }
         self.dirty = false;
     }
@@ -501,13 +523,16 @@ impl GpuDriven {
         chunk_descriptor_set: vk::DescriptorSet, vp_cols: &[f32], game_time: f32,
         cam_pos: Vec3, query_pool: vk::QueryPool,
         opaque_end_ts: Option<u32>, transparent_end_ts: Option<u32>) {
-        if self.dirty { self.rebuild(); }
+        if self.dirty { self.rebuild(device); }
         let total = self.opaque_slots + self.transparent_slots;
         if total == 0 { return; }
         if let Ok(slice) = self.cull_ubo.mapped_slice_mut() {
             let mut a = [0f32; 16]; a.copy_from_slice(vp_cols);
             let ubo = CullUbo { view_proj: a, cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0] };
             slice[..std::mem::size_of::<CullUbo>()].copy_from_slice(bytemuck::bytes_of(&ubo));
+            if let Err(e) = self.cull_ubo.flush_whole(device) {
+                log::warn!("cull_ubo flush failed: {e}");
+            }
         }
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull_pipeline);
@@ -936,6 +961,9 @@ impl GpuMesher {
         if let Ok(slice) = self.block_props.mapped_slice_mut() {
             let n = needed.min(slice.len());
             slice[..n].copy_from_slice(bytemuck::cast_slice(props));
+            if let Err(e) = self.block_props.flush_whole(device) {
+                log::warn!("block_props flush failed: {e}");
+            }
         }
         self.block_count = props.len() as u32;
     }
@@ -952,6 +980,11 @@ impl GpuMesher {
             let slice = self.voxel_staging.mapped_slice_mut().ok()?;
             let n = (voxels.len() * 2).min(slice.len());
             slice[..n].copy_from_slice(bytemuck::cast_slice(voxels));
+            // GPU reads this via `cmd_copy_buffer_to_image` immediately
+            // below — flush so the device sees the latest voxel bytes.
+            if let Err(e) = self.voxel_staging.flush_whole(device) {
+                log::warn!("voxel_staging flush failed: {e}");
+            }
         }
         let cmd = begin_one_time(device, command_pool).ok()?;
         unsafe {

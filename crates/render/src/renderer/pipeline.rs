@@ -2342,7 +2342,7 @@ pub(super) fn create_aabb_index_buffer(
         "aabb_idx_staging",
     )?;
     let mut staging = staging;
-    staging.upload(bytes)?;
+    staging.upload(device, bytes)?;
 
     // 72 bytes is small enough to keep the index buffer host-visible
     // (no need for the device_local + staging copy dance). The earlier
@@ -2360,7 +2360,7 @@ pub(super) fn create_aabb_index_buffer(
         "aabb_idx",
     )?;
     let mut ibo = ibo;
-    ibo.upload(bytes)?;
+    ibo.upload(device, bytes)?;
     Ok(ibo)
 }
 

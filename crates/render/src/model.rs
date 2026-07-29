@@ -354,6 +354,13 @@ fn upload_mesh(
         if let Some((ref skin_bytes, _, _, _)) = skin_data {
             slice[offset..offset + skin_bytes.len()].copy_from_slice(skin_bytes);
         }
+        // GPU `vkCmdCopyBuffer` follows below — flush the writes so the
+        // device sees the latest bytes. On HOST_COHERENT memory this is a
+        // no-op; on non-coherent (the case that produced the
+        // "flashing white chunks" symptom) it's required.
+        if let Err(e) = staging.flush_whole(device) {
+            log::warn!("model staging flush failed: {e}");
+        }
     }
 
     // Copy from staging to device-local via one-time command buffer.

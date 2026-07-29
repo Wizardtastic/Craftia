@@ -151,24 +151,44 @@ impl GpuBuffer {
         })
     }
 
-    /// Write bytes into a host-visible buffer's mapped memory.
-    pub fn upload(&mut self, data: &[u8]) -> Result<()> {
-        let allocation = self
-            .allocation
-            .as_mut()
-            .ok_or_else(|| anyhow!("buffer has no allocation"))?;
-        let slice = allocation
-            .mapped_slice_mut()
-            .ok_or_else(|| anyhow!("buffer memory is not host-visible"))?;
-        if data.len() > slice.len() {
-            return Err(anyhow!(
-                "upload overflows buffer: {} > {}",
-                data.len(),
-                slice.len()
-            ));
+    /// Write bytes into a host-visible buffer's mapped memory AND flush
+    /// the write to the device so a subsequent GPU read (vertex copy, UBO
+    /// sample, descriptor bind) sees the latest bytes. Without the flush
+    /// on a non-`HOST_COHERENT` allocation the GPU is permitted to sample
+    /// stale or partial bytes, which is exactly the failure mode we hit
+    /// in production: chunk-staging vertex/index copies and per-frame
+    /// UBO updates were landing on mapped memory without a flush and
+    /// rendering as frame-varying garbage (most visibly: chunks flashing
+    /// solid white when the dirty byte pattern landed on a high-emissive
+    /// material slot).
+    ///
+    /// Callers no longer need to manually call `flush_whole()` after
+    /// `upload()`; this fn does both. If you bypass `upload()` and use
+    /// `mapped_slice_mut()` directly for partial-buffer writes, follow
+    /// up with `flush_whole()` / `flush_range()` yourself — see the
+    /// index-write path in `renderer::upload_chunks`.
+    pub fn upload(&mut self, device: &ash::Device, data: &[u8]) -> Result<()> {
+        {
+            let allocation = self
+                .allocation
+                .as_mut()
+                .ok_or_else(|| anyhow!("buffer has no allocation"))?;
+            let slice = allocation
+                .mapped_slice_mut()
+                .ok_or_else(|| anyhow!("buffer memory is not host-visible"))?;
+            if data.len() > slice.len() {
+                return Err(anyhow!(
+                    "upload overflows buffer: {} > {}",
+                    data.len(),
+                    slice.len()
+                ));
+            }
+            slice[..data.len()].copy_from_slice(data);
         }
-        slice[..data.len()].copy_from_slice(data);
-        Ok(())
+        // Flush the writes out of `self` before the borrow above is released
+        // so the helper can take `&self` (not `&mut self`). Idempotent on
+        // HOST_COHERENT memory; required on non-coherent.
+        self.flush_whole(device)
     }
 
     /// Map the buffer as a mutable byte slice (for uniform updates).
@@ -180,6 +200,77 @@ impl GpuBuffer {
         allocation
             .mapped_slice_mut()
             .ok_or_else(|| anyhow!("buffer memory is not host-visible"))
+    }
+
+    /// Flush the buffer's mapped memory so the device sees the latest CPU
+    /// writes via Vulkan's `vkFlushMappedMemoryRanges`. Required for any
+    /// host-visible that is NOT `HOST_COHERENT`; harmless (effectively
+    /// a no-op) on `HOST_COHERENT` allocations. Without this call the GPU
+    /// is allowed to sample stale or partial bytes from the map, which is
+    /// exactly what produces the "chunk flashes white" symptom we saw:
+    /// `tile_material_ubo`, `fog_ubo`, chunk-staging buffers etc. were
+    /// all written but never flushed, so per-frame material values
+    /// landed in front of the GPU as frame-varying byte mixes.
+    ///
+    /// The range covers the whole buffer slice within the allocation
+    /// (`offset..offset+self.size`). If you only wrote the first N
+    /// bytes you can call `flush_range(device, 0, N)` instead to skip the
+    /// unused tail; for full-buffer UBO writes use this convenience.
+    ///
+    /// Pass `device: &ash::Device` directly (don't store one on the
+    /// buffer) so we don't extend the buffer's lifetime: dropping a
+    /// GpuBuffer must NOT also have to keep a Device alive.
+    pub fn flush_whole(&self, device: &ash::Device) -> Result<()> {
+        let allocation = self
+            .allocation
+            .as_ref()
+            .ok_or_else(|| anyhow!("buffer has no allocation"))?;
+        let memory = unsafe { allocation.memory() };
+        // Use offset=0 + WHOLE_SIZE so the range stays aligned to the device's
+        // nonCoherentAtomSize regardless of the gpu-allocator sub-offset
+        // returned by allocation.offset(). Without this, the validation
+        // layer flags VUID-VkMappedMemoryRange-offset-00687 when the
+        // sub-allocation bound returned by gpu-allocator (e.g., 1 313 656)
+        // isn't a multiple of nonCoherentAtomSize (often 64). WHOLE_SIZE
+        // extends from `offset` to the end of the allocation, which is
+        // always spec-compliant; the slight over-flush of neighboring
+        // sub-allocations in the same VMA is harmless because flush only
+        // commits CPU writes to device visibility (no data is changed).
+        let range = vk::MappedMemoryRange::default()
+            .memory(memory)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+        unsafe { device.flush_mapped_memory_ranges(&[range]) }
+            .map_err(|e| anyhow!("flush_mapped_memory_ranges failed: {e:?}"))?;
+        Ok(())
+    }
+
+    /// Flush a sub-range `[offset, offset+size)` of the mapped memory.
+    /// Use when you've only written the first part of a larger buffer
+    /// (e.g. an incrementally-filled chunk-staging slot) so the device
+    /// doesn't have to invalidate bytes you never touched.
+    ///
+    /// Both `offset` and `size` MUST be multiples of `nonCoherentAtomSize`
+    /// of the underlying memory type (per Vulkan spec); the caller is
+    /// responsible for picking aligned ranges.
+    pub fn flush_range(&self, device: &ash::Device, _offset: vk::DeviceSize, _size: vk::DeviceSize) -> Result<()> {
+        let allocation = self
+            .allocation
+            .as_ref()
+            .ok_or_else(|| anyhow!("buffer has no allocation"))?;
+        let memory = unsafe { allocation.memory() };
+        // Same alignment fix as flush_whole: sub-allocation `offset` returned
+        // by gpu-allocator isn't necessarily a multiple of nonCoherentAtomSize,
+        // so use offset=0 + WHOLE_SIZE. Caller's `(offset, size)` arguments are
+        // intentionally unused — see flush_whole doc for the rationale (the
+        // over-flush is harmless because flush only commits writes).
+        let range = vk::MappedMemoryRange::default()
+            .memory(memory)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+        unsafe { device.flush_mapped_memory_ranges(&[range]) }
+            .map_err(|e| anyhow!("flush_mapped_memory_ranges failed: {e:?}"))?;
+        Ok(())
     }
 }
 

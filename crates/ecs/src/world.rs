@@ -226,34 +226,38 @@ impl World {
     // -----------------------------------------------------------------
 
     /// Look up an archetype by its sorted component type set, creating
-    /// it on demand.
+    /// it on demand. Uses a stack-allocated buffer for the common case
+    /// of ≤16 component types to avoid heap allocation on every call.
     fn get_or_create_archetype(&mut self, types: &[TypeId]) -> ArchetypeId {
-        let key: Vec<TypeId> = {
-            let mut t = types.to_vec();
-            t.sort();
-            t.dedup();
-            t
-        };
-        if let Some(&id) = self.archetype_by_components.get(&key) {
+        // Stack buffer for the sorted, deduplicated key. 16 components
+        // covers virtually all real-world archetypes.
+        const MAX_STACK: usize = 16;
+        let mut buf: [TypeId; MAX_STACK] = [TypeId::of::<()>(); MAX_STACK];
+        let mut len = 0usize;
+        for &t in types {
+            if !buf[..len].contains(&t) {
+                if len < MAX_STACK {
+                    buf[len] = t;
+                    len += 1;
+                }
+            }
+        }
+        buf[..len].sort();
+        let key_slice = &buf[..len];
+
+        if let Some(&id) = self.archetype_by_components.get(key_slice) {
             return id;
         }
+        // Slow path: only heap-allocates on archetype creation (very rare).
+        let key_vec = key_slice.to_vec();
         let id = ArchetypeId(self.archetypes.len() as u32);
         let mut arch = Archetype::new(id);
-        // Look up each component's short name via the `name_fns` registry.
-        // `ensure_registered` populates `name_fns` for any component that
-        // ends up in an archetype, so the lookup is expected to succeed for
-        // any `T: Component` we haven't manually skipped — we still fall
-        // back to a placeholder for safety.
-        let entries: Vec<(TypeId, &'static str, ColumnCtor)> = key
+        let entries: Vec<(TypeId, &'static str, ColumnCtor)> = key_slice
             .iter()
             .map(|&t| (t, self.name_for(t), self.ctor_for(t)))
             .collect();
-        // We don't know the real name here — the column's element type is
-        // erased. Replace placeholder with the type's `TypeId` for now
-        // (debugging only). Callers that need a name can ask the column
-        // for its `type_id`.
         arch.set_columns(entries);
-        self.archetype_by_components.insert(key, id);
+        self.archetype_by_components.insert(key_vec, id);
         self.archetypes.push(arch);
         id
     }
@@ -278,26 +282,34 @@ impl World {
         let old_arch_id = loc.archetype;
         let old_idx = loc.index;
 
-        // Compute the new archetype's component set.
-        let old_types: Vec<TypeId> = if old_arch_id == EntityLocation::EMPTY {
-            Vec::new()
-        } else {
-            self.archetypes[old_arch_id as usize]
-                .component_types
-                .clone()
-        };
+        // Compute the new archetype's component set without heap allocation.
+        // Use a fixed-size buffer for the common case (≤16 component types).
+        const MAX_STACK: usize = 16;
+        let mut new_buf: [TypeId; MAX_STACK] = [TypeId::of::<()>(); MAX_STACK];
+        let mut new_len = 0usize;
 
-        let mut new_types = old_types.clone();
-        new_types.retain(|t| !to_remove.contains(t));
-        for (t, _) in &to_add {
-            if !new_types.contains(t) {
-                new_types.push(*t);
+        if old_arch_id != EntityLocation::EMPTY {
+            for &t in &self.archetypes[old_arch_id as usize].component_types {
+                if !to_remove.contains(&t) && !new_buf[..new_len].contains(&t) {
+                    if new_len < MAX_STACK {
+                        new_buf[new_len] = t;
+                        new_len += 1;
+                    }
+                }
             }
         }
-        new_types.sort();
-        new_types.dedup();
+        for (t, _) in &to_add {
+            if !new_buf[..new_len].contains(t) {
+                if new_len < MAX_STACK {
+                    new_buf[new_len] = *t;
+                    new_len += 1;
+                }
+            }
+        }
+        new_buf[..new_len].sort();
+        let new_key_slice = &new_buf[..new_len];
 
-        let new_arch_id = self.get_or_create_archetype(&new_types);
+        let new_arch_id = self.get_or_create_archetype(new_key_slice);
 
         // Same archetype: just overwrite the value. (Only relevant when
         // to_remove and to_add are both empty and the entity is already
@@ -310,9 +322,8 @@ impl World {
             return None;
         }
 
-        // Build a fast-lookup set of `to_add` types.
-        let to_add_set: std::collections::HashSet<TypeId> =
-            to_add.iter().map(|(t, _)| *t).collect();
+        // Helper closure to check if a type is in to_add (avoids HashSet allocation).
+        let is_in_to_add = |t: &TypeId| -> bool { to_add.iter().any(|(tt, _)| tt == t) };
 
         // Capture the last row in the old archetype's entities vec
         // before we touch anything — we need it to identify the entity
@@ -328,36 +339,20 @@ impl World {
 
         // First pass: drain the old archetype's columns at `old_idx`,
         // collecting (type, value) pairs to push to the new archetype.
-        // We collect the type IDs first via a shared borrow so the
-        // mutable borrow of the columns is not held while we make
-        // trait-object method calls (which the borrow checker is
-        // conservative about with `Box<dyn Trait>`).
-        let old_col_types: Vec<TypeId> = if old_arch_id == EntityLocation::EMPTY {
-            Vec::new()
-        } else {
-            self.archetypes[old_arch_id as usize]
-                .columns
-                .iter()
-                // Use fully qualified syntax: `c.type_id()` would resolve
-                // to `Any::type_id` (returning the wrapper's TypeId)
-                // rather than our `ErasedColumn::type_id` (which returns
-                // the component's TypeId).
-                .map(|c| crate::archetype::ErasedColumn::type_id(&**c))
-                .collect()
-        };
-
+        // We use component_types directly (parallel to columns) to avoid
+        // allocating a separate Vec for type IDs.
         let mut moves: Vec<(TypeId, Box<dyn Any>)> = Vec::new();
         let mut taken: Option<Box<dyn Any>> = None;
         if old_arch_id != EntityLocation::EMPTY {
             let old_arch = &mut self.archetypes[old_arch_id as usize];
-            for (i, t) in old_col_types.into_iter().enumerate() {
+            for (i, &t) in old_arch.component_types.iter().enumerate() {
                 if to_remove.contains(&t) {
                     let value = old_arch.columns[i].take_any(old_idx);
                     if taken.is_some() {
                         panic!("transition: multiple types in to_remove");
                     }
                     taken = Some(value);
-                } else if !to_add_set.contains(&t) {
+                } else if !is_in_to_add(&t) {
                     // Type is in both old and new: move the value.
                     moves.push((t, old_arch.columns[i].take_any(old_idx)));
                 }

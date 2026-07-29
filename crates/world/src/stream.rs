@@ -533,7 +533,33 @@ fn run_worker(
             && mesh_batch.is_empty()
             && !focus_changed
         {
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            // Block on the command channel instead of polling with a sleep.
+            // This avoids 500Hz wake-ups and reduces CPU usage when idle.
+            if let Ok(cmd) = cmd_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                // Process the command we received and loop back.
+                match cmd {
+                    Cmd::Focus(p) => { focus = p; focus_changed = true; }
+                    Cmd::SunDir(d) => { sun_dir = d; }
+                    Cmd::Frustum(f) => { frustum = Some(f); }
+                    Cmd::LoadRadius(r) => { load_radius = r as i32; }
+                    Cmd::Remesh(pos) => { remesh_requests.push(pos); }
+                    Cmd::Stats(tx) => {
+                        let mut stats = StreamerStats::default();
+                        for s in state.values() {
+                            stats.total_tracked += 1;
+                            match s {
+                                State::Generating => stats.gen_queue += 1,
+                                State::Meshing => stats.mesh_queue += 1,
+                                _ => {}
+                            }
+                        }
+                        stats.pending_remesh = remesh_requests.len() as u32;
+                        let _ = tx.try_send(stats);
+                    }
+                    Cmd::Shutdown => return,
+                }
+                continue;
+            }
         }
     }
 }

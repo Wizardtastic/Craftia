@@ -704,6 +704,10 @@ impl Renderer {
             let slice = fog_ubo.mapped_slice_mut()?;
             let bytes: &[u8] = bytemuck::bytes_of(&fog);
             slice[..bytes.len()].copy_from_slice(bytes);
+        }
+        // Flush the init write so the first frame sees valid fog data.
+        if let Err(e) = fog_ubo.flush_whole(&device) {
+            log::warn!("fog_ubo init flush failed: {e}");
         }            // Tile material lookup table: the descriptor binding 5 the chunk
             // shader uses for leaves SSS, wet-edge tint, sun caustics, and (later)
             // glass tinted absorption. Host-visible; the engine pushes a fresh
@@ -1259,7 +1263,7 @@ impl Renderer {
                     *slot = i as u32;
                 }
                 let remap = pipeline::TileRemapUbo { map };
-                tile_remap_ubo.upload(bytemuck::bytes_of(&remap))?;
+                tile_remap_ubo.upload(&device, bytemuck::bytes_of(&remap))?;
             }
             pipeline::update_tile_remap_descriptor_set(
                 &device,
@@ -2222,6 +2226,9 @@ impl Renderer {
             if let Ok(slice) = self.tile_material_ubo.mapped_slice_mut() {
                 let bytes: &[u8] = bytemuck::bytes_of(&self.pending_material_table);
                 slice[..bytes.len()].copy_from_slice(bytes);
+                if let Err(e) = self.tile_material_ubo.flush_whole(&self.device) {
+                    log::warn!("tile_material_ubo flush failed: {e}");
+                }
             }
             self.material_table_dirty = false;
         }
@@ -2240,6 +2247,9 @@ impl Renderer {
         if let Ok(slice) = self.fog_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&fog_data);
             slice[..bytes.len()].copy_from_slice(bytes);
+            if let Err(e) = self.fog_ubo.flush_whole(&self.device) {
+                log::warn!("fog_ubo flush failed: {e}");
+            }
         }
 
         // Sky UBO
@@ -2261,6 +2271,9 @@ impl Renderer {
         if let Ok(slice) = self.sky_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&data);
             slice[..bytes.len()].copy_from_slice(bytes);
+            if let Err(e) = self.sky_ubo.flush_whole(&self.device) {
+                log::warn!("sky_ubo flush failed: {e}");
+            }
         }
 
         // Reflection/environment UBO (chunk binding 8). Mirrors the sky UBO
@@ -2286,6 +2299,9 @@ impl Renderer {
         if let Ok(slice) = self.reflection_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&refl_data);
             slice[..bytes.len()].copy_from_slice(bytes);
+            if let Err(e) = self.reflection_ubo.flush_whole(&self.device) {
+                log::warn!("reflection_ubo flush failed: {e}");
+            }
         }
 
         // Shadow UBO (per-frame).
@@ -2293,6 +2309,9 @@ impl Renderer {
         for frame in self.frames.iter_mut() {
             if let Ok(slice) = frame.shadow_ubo.mapped_slice_mut() {
                 slice[..shadow_bytes.len()].copy_from_slice(shadow_bytes);
+                if let Err(e) = frame.shadow_ubo.flush_whole(&self.device) {
+                    log::warn!("shadow_ubo flush failed: {e}");
+                }
             }
         }
     }
@@ -2382,14 +2401,21 @@ impl Renderer {
                 }
             };
             let mut staging = staging;
-            if let Err(e) = staging.upload(&u.vertices) {
+            if let Err(e) = staging.upload(device, &u.vertices) {
                 log::error!("staging vertex upload: {e}");
                 staging.destroy(device, alloc);
                 let _ = unsafe { device.end_command_buffer(cmd) };
                 unsafe { device.free_command_buffers(pool, &[cmd]); }
                 continue;
             }
-            // Copy indices after vertices in the staging buffer.
+            // Copy indices after vertices in the staging buffer. We bypass
+            // `upload()` here because indices follow vertices in the same
+            // buffer at a non-zero offset, so the helper can't write both
+            // with one call. The flush below covers BOTH the vertex run
+            // (already written+flushed by `upload()`) and this index tail;
+            // flushing twice in the same frame is safe and idempotent so
+            // this isn't worth optimizing unless we add a `write_range()`
+            // helper.
             {
                 let slice = match staging.mapped_slice_mut() {
                     Ok(s) => s,
@@ -2402,6 +2428,9 @@ impl Renderer {
                     }
                 };
                 slice[v_size as usize..(v_size + i_size) as usize].copy_from_slice(&u.indices);
+                if let Err(e) = staging.flush_whole(device) {
+                    log::error!("staging flush: {e}");
+                }
             }
 
             let vbo = match GpuBuffer::device_local(
@@ -3017,6 +3046,9 @@ impl Renderer {
                 let len = vert_bytes.len().min(slice.len());
                 slice[..len].copy_from_slice(&vert_bytes[..len]);
             }
+            if let Err(e) = self.entity_vbo.flush_whole(&self.device) {
+                log::warn!("entity_vbo flush failed: {e}");
+            }
             self.record_entity_pass(device, cmd, world_entities, view_proj);
         }
 
@@ -3032,6 +3064,9 @@ impl Renderer {
             if let Ok(slice) = self.overlay_vbo.mapped_slice_mut() {
                 let len = vert_bytes.len().min(slice.len());
                 slice[..len].copy_from_slice(&vert_bytes[..len]);
+            }
+            if let Err(e) = self.overlay_vbo.flush_whole(&self.device) {
+                log::warn!("overlay_vbo flush failed: {e}");
             }
             self.record_overlay_pass(device, cmd, view_proj);
         }
@@ -3296,6 +3331,9 @@ impl Renderer {
             if let Ok(slice) = self.overlay_vbo.mapped_slice_mut() {
                 let len = vert_bytes.len().min(slice.len());
                 slice[..len].copy_from_slice(&vert_bytes[..len]);
+            }
+            if let Err(e) = self.overlay_vbo.flush_whole(&self.device) {
+                log::warn!("overlay_vbo flush failed: {e}");
             }
             self.record_overlay_pass(device, cmd, view_proj);
         }
@@ -3927,6 +3965,9 @@ impl Renderer {
             let len = bytes.len().min(slice.len());
             slice[..len].copy_from_slice(&bytes[..len]);
         }
+        if let Err(e) = self.particle_instance_vbo.flush_whole(&self.device) {
+            log::warn!("particle_instance_vbo flush failed: {e}");
+        }
     }
 
     /// Spawn break particles at a block breakage site. Called by the
@@ -4442,9 +4483,17 @@ impl Renderer {
         };
         cam_ubo.cam_pos_and_maxdist = [camera.pos.x, camera.pos.y, camera.pos.z, fog_dist];
         let frame = &mut self.frames[frame_index];
-        let slice = frame.camera_ubo.mapped_slice_mut()?;
-        let bytes: &[u8] = bytemuck::bytes_of(&cam_ubo);
-        slice[..bytes.len()].copy_from_slice(bytes);
+        {
+            let slice = frame.camera_ubo.mapped_slice_mut()?;
+            let bytes: &[u8] = bytemuck::bytes_of(&cam_ubo);
+            slice[..bytes.len()].copy_from_slice(bytes);
+        }
+        // Flush so the GPU sees the latest camera pos + fog distance.
+        // Without this, non-coherent memory can serve stale camera data,
+        // causing fog/lighting miscalculations visible as border artifacts.
+        if let Err(e) = frame.camera_ubo.flush_whole(&self.device) {
+            log::warn!("camera_ubo flush failed: {e}");
+        }
         Ok(())
     }
 
@@ -4869,6 +4918,9 @@ impl Renderer {
             }
             vslice[..vbytes.len()].copy_from_slice(vbytes);
         }
+        if let Err(e) = self.ui_vbo.flush_whole(&self.device) {
+            log::warn!("ui_vbo flush failed: {e}");
+        }
         {
             let islice = match self.ui_ibo.mapped_slice_mut() {
                 Ok(s) => s,
@@ -4882,6 +4934,9 @@ impl Renderer {
                 return 0;
             }
             islice[..ibytes.len()].copy_from_slice(ibytes);
+        }
+        if let Err(e) = self.ui_ibo.flush_whole(&self.device) {
+            log::warn!("ui_ibo flush failed: {e}");
         }
         ui.indices.len() as u32
     }

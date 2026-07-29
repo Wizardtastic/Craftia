@@ -16,10 +16,10 @@ layout(push_constant) uniform Push {
 #define BLOOM_INTENSITY    0.25
 #define BLOOM_THRESHOLD    0.80
 #define BLOOM_PIXEL_RADIUS 1.5
-#define BLOOM_RINGS        3
+#define BLOOM_RINGS        2
 
 // SSAO constants.
-#define SSAO_SAMPLES 32
+#define SSAO_SAMPLES 16
 
 // ACES filmic tone mapping.
 vec3 aces_tonemap(vec3 color) {
@@ -70,7 +70,7 @@ float compute_ssao(vec2 uv, float depth_linear, vec3 view_pos) {
     vec3 bitangent = cross(normal, tangent);
     mat3 tbn = mat3(tangent, bitangent, normal);
 
-    // Pre-computed hemisphere kernel (32 samples, cosine-weighted distribution).
+    // Pre-computed hemisphere kernel (16 samples, cosine-weighted distribution).
     // Hardcoded here to avoid needing a UBO for the kernel.
     const vec3 kernel[SSAO_SAMPLES] = vec3[SSAO_SAMPLES](
         vec3(-0.073, 0.028, 0.071), vec3(0.044, -0.041, 0.063),
@@ -80,15 +80,7 @@ float compute_ssao(vec2 uv, float depth_linear, vec3 view_pos) {
         vec3(0.038, -0.074, 0.061), vec3(-0.051, 0.015, 0.088),
         vec3(0.071, 0.043, -0.035), vec3(-0.029, -0.086, 0.042),
         vec3(0.065, -0.033, 0.067), vec3(-0.047, 0.077, 0.021),
-        vec3(0.033, 0.021, 0.092), vec3(-0.081, -0.048, 0.044),
-        vec3(0.019, 0.062, -0.073), vec3(-0.056, 0.038, 0.068),
-        vec3(0.087, -0.026, 0.039), vec3(-0.014, -0.071, 0.083),
-        vec3(0.042, 0.089, -0.017), vec3(-0.068, 0.053, 0.058),
-        vec3(0.075, -0.061, 0.028), vec3(-0.037, -0.019, 0.097),
-        vec3(0.053, 0.034, -0.082), vec3(-0.091, 0.027, 0.048),
-        vec3(0.026, -0.088, 0.037), vec3(-0.043, 0.069, -0.061),
-        vec3(0.093, 0.017, 0.024), vec3(-0.018, -0.054, 0.079),
-        vec3(0.061, 0.056, -0.043), vec3(-0.076, -0.032, 0.065)
+        vec3(0.033, 0.021, 0.092), vec3(-0.081, -0.048, 0.044)
     );
 
     float occlusion = 0.0;

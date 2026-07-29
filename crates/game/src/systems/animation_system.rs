@@ -5,24 +5,27 @@
 //! Runs AFTER hierarchy_system in the schedule.
 
 use glam::{Quat, Vec3};
+use std::sync::Arc;
 use voxel_ecs::World;
 
 use crate::components::{AnimationPlayer, BoneTransforms, ModelRef};
 
 /// Resource: animation data for all loaded models, indexed by model_id.
 /// Inserted by the engine when models are loaded.
+/// Wrapped in Arc so the animation system can borrow without cloning.
 #[derive(Clone, Default)]
 pub struct AnimationDataResource {
     /// Per-model animation data. Index matches ModelRef.model_id.
-    pub data: Vec<ModelAnimationData>,
+    pub data: Arc<Vec<ModelAnimationData>>,
 }
 
 /// Resource: skin data for all loaded models, indexed by model_id.
 /// Inserted by the engine when models are loaded.
+/// Wrapped in Arc so the animation system can borrow without cloning.
 #[derive(Clone, Default)]
 pub struct SkinDataResource {
     /// Per-model skin data. Index matches ModelRef.model_id.
-    pub data: Vec<ModelSkinData>,
+    pub data: Arc<Vec<ModelSkinData>>,
 }
 
 /// Skin data for a single model.
@@ -84,26 +87,20 @@ pub enum AnimInterpolation {
 /// System: advance animation time and compute bone transforms.
 pub fn animation_system(world: &mut World, dt: f32) {
     let anim_data = match world.resource::<AnimationDataResource>() {
-        Some(r) => r.data.clone(),
+        Some(r) => Arc::clone(&r.data),
         None => return,
     };
 
     // Get skin data if available.
-    let skin_data = world.resource::<SkinDataResource>().map(|r| r.data.clone());
+    let skin_data = world.resource::<SkinDataResource>().map(|r| Arc::clone(&r.data));
 
     // Collect entities with AnimationPlayer + ModelRef + BoneTransforms.
+    // Iterate archetypes directly to avoid per-entity HashMap lookups.
     let entities: Vec<voxel_ecs::Entity> = world
         .archetypes()
         .iter()
-        .flat_map(|arch| {
-            arch.entities().iter().filter_map(|&e| {
-                if world.has::<AnimationPlayer>(e) && world.has::<ModelRef>(e) {
-                    Some(e)
-                } else {
-                    None
-                }
-            })
-        })
+        .filter(|arch| arch.has::<AnimationPlayer>() && arch.has::<ModelRef>())
+        .flat_map(|arch| arch.entities().iter().copied())
         .collect();
 
     for entity in entities {

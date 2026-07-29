@@ -159,7 +159,7 @@ impl Panorama {
         for face in &faces {
             all_data.extend_from_slice(face);
         }
-        if let Err(e) = staging.upload(&all_data) {
+        if let Err(e) = staging.upload(device, &all_data) {
             log::warn!("panorama: staging upload failed: {e}");
             staging.destroy(device, alloc);
             alloc.free(allocation);

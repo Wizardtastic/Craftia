@@ -111,7 +111,7 @@ impl AtlasTexture {
             vk::BufferUsageFlags::TRANSFER_SRC,
             "atlas_staging",
         )?;
-        staging.upload(&atlas.rgba)?;
+        staging.upload(device, &atlas.rgba)?;
 
         let cmd = begin_one_time(device, pool)?;
         transition_image_layout(

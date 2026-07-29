@@ -5,13 +5,13 @@
 width = 1280
 height = 720
 vsync = true
-fog_distance = 320.0
+fog_distance = 256.0
 shadow_enabled = true
-shadow_resolution = 2048
+shadow_resolution = 1024
 exposure = 0.6
 vignette_strength = 0.15
 textures_dir = "assets/textures"
-msaa_samples = 4
+msaa_samples = 2
 occlusion_culling = true  # directory of PNG texture overrides (see textures.toml)
 
 # Water + translucency upgrade master scalars (driving chunk shader binding 5)
@@ -27,8 +27,8 @@ reflection_strength = 0.85 # 0.0..1.0
 
 [world]
 seed = 1337
-load_radius = 6
-unload_radius = 8
+load_radius = 4
+unload_radius = 6
 day_length = 1200.0  # seconds per full day cycle (1200 = 20 minutes)
 assets_path = "assets"  # path to data-driven block definitions (null = use builtins)
 

@@ -88,26 +88,24 @@ pub fn hierarchy_system(world: &mut World, _dt: f32) {
         world.insert_resource(ChildMapResource::default());
     }
 
-    // Pass 1: orphan cleanup — despawn children whose parent is dead.
+    // Single pass: collect Parent entities + detect orphans + build new ChildMap.
     let mut orphans = Vec::new();
-    let parent_entities: Vec<Entity> = world
-        .archetypes()
-        .iter()
-        .flat_map(|arch| {
-            arch.entities().iter().filter_map(|&e| {
-                if world.has::<Parent>(e) {
-                    Some(e)
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
+    let mut new_child_map = ChildMap::default();
+    let mut parent_entities = Vec::new();
 
-    for entity in &parent_entities {
-        if let Some(parent_comp) = world.get::<Parent>(*entity) {
-            if !world.is_alive(parent_comp.entity) {
-                orphans.push(*entity);
+    for arch in world.archetypes().iter() {
+        // Only scan archetypes that have Parent component.
+        if !arch.has::<Parent>() {
+            continue;
+        }
+        for &e in arch.entities() {
+            if let Some(parent_comp) = world.get::<Parent>(e) {
+                if !world.is_alive(parent_comp.entity) {
+                    orphans.push(e);
+                } else {
+                    new_child_map.add_child(parent_comp.entity, e);
+                }
+                parent_entities.push(e);
             }
         }
     }
@@ -121,49 +119,21 @@ pub fn hierarchy_system(world: &mut World, _dt: f32) {
         despawn_recursive(world, *orphan);
     }
 
-    // Pass 2: rebuild ChildMap from Parent components.
-    let mut new_child_map = ChildMap::default();
-
-    // Re-collect (orphans may have changed the set).
-    let parent_entities: Vec<Entity> = world
-        .archetypes()
-        .iter()
-        .flat_map(|arch| {
-            arch.entities().iter().filter_map(|&e| {
-                if world.has::<Parent>(e) {
-                    Some(e)
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
-
-    for entity in &parent_entities {
-        if let Some(parent_comp) = world.get::<Parent>(*entity) {
-            if world.is_alive(parent_comp.entity) {
-                new_child_map.add_child(parent_comp.entity, *entity);
-            }
-        }
-    }
-
     // Update the ChildMapResource.
     if let Some(res) = world.resource_mut::<ChildMapResource>() {
         res.0 = new_child_map;
     }
 
-    // Pass 3: BFS transform propagation from roots (entities WITHOUT Parent).
-    let all_entities: Vec<Entity> = world
-        .archetypes()
-        .iter()
-        .flat_map(|arch| arch.entities().iter().copied())
-        .collect();
-
-    let roots: Vec<Entity> = all_entities
-        .iter()
-        .filter(|e| world.has::<Transform>(**e) && !world.has::<Parent>(**e))
-        .copied()
-        .collect();
+    // BFS transform propagation from roots (entities WITHOUT Parent).
+    // Collect roots in the same scan over archetypes.
+    let mut roots = Vec::new();
+    for arch in world.archetypes().iter() {
+        for &e in arch.entities() {
+            if world.has::<Transform>(e) && !world.has::<Parent>(e) {
+                roots.push(e);
+            }
+        }
+    }
 
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
@@ -172,12 +142,6 @@ pub fn hierarchy_system(world: &mut World, _dt: f32) {
         visited.insert(root);
         queue.push_back((root, 0u64));
     }
-
-    // Clone the child map for reading during BFS (avoids borrow conflict).
-    let child_map_snapshot = world
-        .resource::<ChildMapResource>()
-        .map(|r| r.0.clone())
-        .unwrap_or_default();
 
     while let Some((entity, depth)) = queue.pop_front() {
         if depth >= MAX_DEPTH {
@@ -190,8 +154,13 @@ pub fn hierarchy_system(world: &mut World, _dt: f32) {
             continue;
         }
 
-        let kids = child_map_snapshot.children_of(entity);
-        for &child in kids {
+        // Read children from the resource without holding a long borrow.
+        let kids: Vec<Entity> = world
+            .resource::<ChildMapResource>()
+            .map(|r| r.0.children_of(entity).to_vec())
+            .unwrap_or_default();
+
+        for child in kids {
             if visited.contains(&child) {
                 log::warn!(
                     "hierarchy: cycle detected at e[{}:{}], skipping",
@@ -223,7 +192,7 @@ pub fn hierarchy_system(world: &mut World, _dt: f32) {
 
 /// Recursively despawn an entity and all its children (DFS).
 fn despawn_recursive(world: &mut World, entity: Entity) {
-    // Collect children from ChildMapResource.
+    // Collect children from ChildMapResource without cloning the whole map.
     let kids: Vec<Entity> = world
         .resource::<ChildMapResource>()
         .map(|r| r.0.children_of(entity).to_vec())
