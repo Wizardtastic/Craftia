@@ -10,3 +10,8 @@ capture_*.png
 assets/**/.cache/
 /saves
 .omo
+.freebuff
+.codegraph
+.cargo
+.idea
+.scratch
