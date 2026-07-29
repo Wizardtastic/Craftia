@@ -15,3 +15,4 @@ assets/**/.cache/
 .cargo
 .idea
 .scratch
+/logs
