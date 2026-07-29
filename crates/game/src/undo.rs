@@ -158,9 +158,9 @@ impl UndoRedoState {
     }
 
     /// Push a single [`BlockEdit`] into the active batch. Returns `true` if
-    /// the edit landed in a batch, `false` if no batch is open — the caller
-    /// should then record the edit themselves (e.g. via [`Self::push`] with
-    /// a one-element [`EditAction`]).
+    /// the edit landed in a batch, `false` if no batch is open. In practice
+    /// all production call-sites discard the return value; it exists so unit
+    /// tests can assert batching behaviour.
     pub fn push_edit_batched(&mut self, edit: BlockEdit) -> bool {
         if let Some(batch) = self.active_batch.as_mut() {
             batch.edits.push(edit);

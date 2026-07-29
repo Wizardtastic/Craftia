@@ -272,8 +272,6 @@ pub fn draw_right_panel(
         action = RightPanelAction::ToggleShowChunks;
     }
 
-    let _ = y; // suppress unused warning
-
     action
 }
 
@@ -523,9 +521,6 @@ fn draw_select_options(
             theme::OPTION_ROW_H,
             theme::HOVER_BG,
         );
-        if false {
-            *action = RightPanelAction::SelectionCopy;
-        } // wired via keybind
     }
     y = draw_button_row(ui, "Cut", x, y, w, font, mx, my, false);
     y = draw_button_row(ui, "Delete", x, y, w, font, mx, my, false);
@@ -923,15 +918,7 @@ fn draw_filter_options(
 
     // Add filter buttons.
     y = draw_button_row(ui, "+ Noise Filter", x, y, w, font, mx, my, false);
-    if mx >= x + 8.0 && mx <= x + w - 8.0 && my >= y - theme::OPTION_ROW_H && my <= y && false {
-        *action = RightPanelAction::AddFilter(FilterOp::Noise {
-            scale: 10.0,
-            threshold: 0.5,
-            block_a: voxel_core::BlockId::new(1),
-            block_b: voxel_core::BlockId::new(2),
-            seed: 0,
-        });
-    }
+    // TODO: wire click handler for "+ Noise Filter" button.
     y = draw_button_row(ui, "+ Erode Filter", x, y, w, font, mx, my, false);
     y = draw_button_row(ui, "+ Dilate Filter", x, y, w, font, mx, my, false);
     y = draw_button_row(ui, "+ Smooth Filter", x, y, w, font, mx, my, false);

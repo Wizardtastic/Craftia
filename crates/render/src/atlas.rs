@@ -14,7 +14,7 @@ use voxel_core::ATLAS_TILE_SIZE;
 /// Atlas side length in tiles (16x16 = 256 tiles). Single source of truth.
 pub use voxel_core::ATLAS_TILES;
 /// Atlas side length in pixels.
-pub const ATLAS_PIXELS: u32 = ATLAS_TILES * ATLAS_TILE_SIZE;
+pub use voxel_core::ATLAS_PIXELS;
 
 /// A finished atlas: RGBA8 pixels + mip chain ready to upload to a Vulkan image.
 pub struct Atlas {

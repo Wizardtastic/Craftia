@@ -25,3 +25,5 @@ pub const SEA_LEVEL: i32 = 62;
 pub const ATLAS_TILE_SIZE: u32 = 16;
 /// Atlas grid dimension in tiles (16×16 = 256 tiles).
 pub const ATLAS_TILES: u32 = 16;
+/// Atlas side length in pixels.
+pub const ATLAS_PIXELS: u32 = ATLAS_TILES * ATLAS_TILE_SIZE;

@@ -86,10 +86,6 @@ pub struct TerrainGenerator {
     // Thin winding tunnels (noodle caves).
     noodle_cave: FastNoiseLite,
 
-    // 2D horizontal tunnel routing (added per the caves plan; reserved for
-    // future cave routing).
-    #[allow(dead_code)]
-    carver_2d: FastNoiseLite,
     // 2D ravine anchor mask (cellular).
     ravine_mask: FastNoiseLite,
     // 2D ravine orientation.
@@ -161,15 +157,6 @@ impl TerrainGenerator {
                 n.set_seed(Some(seed.wrapping_mul(23)));
                 n.set_noise_type(Some(fastnoise_lite::NoiseType::OpenSimplex2));
                 n.set_frequency(Some(0.025));
-                n.set_fractal_type(Some(fastnoise_lite::FractalType::FBm));
-                n.set_fractal_octaves(Some(3));
-                n
-            },
-            carver_2d: {
-                let mut n = FastNoiseLite::new();
-                n.set_seed(Some(seed.wrapping_mul(29)));
-                n.set_noise_type(Some(fastnoise_lite::NoiseType::OpenSimplex2));
-                n.set_frequency(Some(0.002));
                 n.set_fractal_type(Some(fastnoise_lite::FractalType::FBm));
                 n.set_fractal_octaves(Some(3));
                 n

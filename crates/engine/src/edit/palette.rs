@@ -174,13 +174,18 @@ fn brush_block(edit: &EditState) -> BlockId {
 
 fn filter_blocks(edit: &EditState) -> Vec<(BlockId, String)> {
     let mut out = Vec::new();
+    let search_lower = if edit.palette_search.is_empty() {
+        String::new()
+    } else {
+        edit.palette_search.to_ascii_lowercase()
+    };
     for (cat, blocks) in &edit.categories {
         if let Some(selected) = edit.selected_category {
             if *cat != selected { continue; }
         }
         for (id, name) in blocks {
-            if !edit.palette_search.is_empty()
-                && !name.to_lowercase().contains(&edit.palette_search.to_lowercase())
+            if !search_lower.is_empty()
+                && !name.to_ascii_lowercase().contains(&search_lower)
             {
                 continue;
             }

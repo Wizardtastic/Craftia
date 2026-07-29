@@ -531,32 +531,7 @@ impl Default for EditState {
             categories: Vec::new(),
             preview_valid: false,
             brush_center: None,
-            history: vec![
-                HistoryEntry {
-                    label: "Place Blocks".into(),
-                    is_current: false,
-                },
-                HistoryEntry {
-                    label: "Box Selection".into(),
-                    is_current: false,
-                },
-                HistoryEntry {
-                    label: "Smooth Terrain".into(),
-                    is_current: false,
-                },
-                HistoryEntry {
-                    label: "Paint Grass".into(),
-                    is_current: true,
-                },
-                HistoryEntry {
-                    label: "Extrude Walls".into(),
-                    is_current: false,
-                },
-                HistoryEntry {
-                    label: "Roughen Surface".into(),
-                    is_current: false,
-                },
-            ],
+            history: Vec::new(),
             search_focused: false,
             ui_click: false,
             scroll_delta: 0.0,

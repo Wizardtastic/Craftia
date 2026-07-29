@@ -84,13 +84,13 @@ pub fn brush_to_preset(
     name: &str,
     registry: &voxel_world::BlockRegistry,
 ) -> BrushPreset {
-    let block_name = registry.get(brush.block).name.clone().to_string();
+    let block_name = registry.get(brush.block).name.to_string();
     let palette = brush
         .palette
         .entries
         .iter()
         .map(|w| PresetWeight {
-            block: registry.get(w.block).name.clone().to_string(),
+            block: registry.get(w.block).name.to_string(),
             weight: w.weight,
         })
         .collect();

@@ -1130,16 +1130,6 @@ impl crate::EngineApp {
         );
     }
 
-    /// Draw block break particles as projected screen-space dots.
-    #[allow(dead_code)]
-    fn draw_particles(&self, _ui: &mut UiDrawData, _w: f32, _h: f32) {
-        // Phase 1: particles are rendered 3D by the renderer in subpass 1;
-        // see `Renderer::record_particle_subpass`. The HUD overlay path
-        // (2D projected dots) is removed. This stub stays so an external
-        // hook is preserved if someone re-introduces CPU-overlay particles
-        // for an effect type (e.g. inline tooltips) later.
-    }
-
     /// Draw the death screen overlay.
     fn draw_death_screen(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
         // Dark red background.
@@ -1351,14 +1341,14 @@ impl crate::EngineApp {
         let is_search = active_tab == tab_count - 1;
 
         let filtered_items: Vec<&crate::CreativeItem> = if is_search {
-            let q = self.gameplay.creative_search.to_lowercase();
+            let q = self.gameplay.creative_search.to_ascii_lowercase();
             if q.is_empty() {
                 self.gameplay.creative_items.iter().collect()
             } else {
                 self.gameplay
                     .creative_items
                     .iter()
-                    .filter(|it| it.name.to_lowercase().contains(&q))
+                    .filter(|it| it.name.to_ascii_lowercase().contains(&q))
                     .collect()
             }
         } else if active_tab == tab_count - 2 {
@@ -1583,7 +1573,7 @@ impl crate::EngineApp {
                 buttons[2].3,
             ) {
                 // Save the world and update metadata.
-                if let Some(ref save_path) = self.gameplay.current_world_path.clone() {
+                if let Some(ref save_path) = self.gameplay.current_world_path {
                     let _ = self.save_entities(save_path);
                     let _ = voxel_world::save::save_world(&self.world_state.world, save_path);
                     // Update world_info.json with play time and last_played.
@@ -1642,7 +1632,7 @@ impl crate::EngineApp {
             title_btn.3,
         ) {
             // Save and return to title.
-            if let Some(ref save_path) = self.gameplay.current_world_path.clone() {
+            if let Some(ref save_path) = self.gameplay.current_world_path {
                 let _ = self.save_entities(save_path);
                 let _ = voxel_world::save::save_world(&self.world_state.world, save_path);
                 if let Some(mut info) = crate::save::read_world_info(save_path) {
@@ -3745,14 +3735,14 @@ impl crate::EngineApp {
         let active_tab = self.gameplay.creative_tab;
         let is_search = active_tab == tab_count - 1; // last tab is search
         let filtered_items: Vec<&crate::CreativeItem> = if is_search {
-            let q = self.gameplay.creative_search.to_lowercase();
+            let q = self.gameplay.creative_search.to_ascii_lowercase();
             if q.is_empty() {
                 self.gameplay.creative_items.iter().collect()
             } else {
                 self.gameplay
                     .creative_items
                     .iter()
-                    .filter(|it| it.name.to_lowercase().contains(&q))
+                    .filter(|it| it.name.to_ascii_lowercase().contains(&q))
                     .collect()
             }
         } else if active_tab == tab_count - 2 {

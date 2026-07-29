@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::mipmap::generate_mip_chain;
-use voxel_core::{ATLAS_TILE_SIZE, ATLAS_TILES};
+use voxel_core::{ATLAS_PIXELS, ATLAS_TILE_SIZE, ATLAS_TILES};
 
 /// Magic bytes identifying the cache format.
 const MAGIC: &[u8; 20] = b"VOXEL_ASSET_CACHE_v1";
@@ -309,9 +309,6 @@ pub fn check_cache(textures_dir: &Path) -> Result<bool> {
     let composite = composite_hash(&manifest);
     Ok(read_cache(textures_dir, &composite).is_some())
 }
-
-/// Atlas side length in pixels.
-const ATLAS_PIXELS: u32 = ATLAS_TILES * ATLAS_TILE_SIZE;
 
 /// Read textures.toml and return tile_index -> filename mapping.
 fn load_texture_config(textures_dir: &Path) -> HashMap<u32, String> {

@@ -304,7 +304,7 @@ impl crate::EngineApp {
                     self.simulation.ecs_world_mut().set(player, new_mode);
                 }
                 // Update world_info.json to persist the change.
-                if let Some(ref save_path) = self.gameplay.current_world_path.clone() {
+                if let Some(ref save_path) = self.gameplay.current_world_path {
                     if let Some(mut info) = crate::save::read_world_info(save_path) {
                         info.game_mode = new_mode.display_name().to_lowercase();
                         let _ = crate::save::write_world_info(save_path, &info);
@@ -339,7 +339,7 @@ impl crate::EngineApp {
                     diff_res.0 = new_diff;
                 }
                 // Update world_info.json to persist the change.
-                if let Some(ref save_path) = self.gameplay.current_world_path.clone() {
+                if let Some(ref save_path) = self.gameplay.current_world_path {
                     if let Some(mut info) = crate::save::read_world_info(save_path) {
                         info.difficulty = new_diff.display_name().to_lowercase();
                         let _ = crate::save::write_world_info(save_path, &info);
