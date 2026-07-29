@@ -47,6 +47,17 @@
     "light_absorption": 12
   },
   {
+    "name": "lava",
+    "kind": "liquid",
+    "solid": false,
+    "opaque": false,
+    "breakable": false,
+    "replaceable": true,
+    "textures": { "same": 40 },
+    "emission": 15,
+    "light_absorption": 15
+  },
+  {
     "name": "wood",
     "kind": "solid",
     "solid": true,
@@ -161,24 +172,6 @@
     "opaque": false,
     "textures": { "same": 21 },
     "emission": 14,
-    "light_absorption": 0
-  },
-  {
-    "name": "bucket",
-    "kind": "solid",
-    "solid": false,
-    "opaque": false,
-    "textures": { "same": 22 },
-    "emission": 0,
-    "light_absorption": 0
-  },
-  {
-    "name": "water_bucket",
-    "kind": "solid",
-    "solid": false,
-    "opaque": false,
-    "textures": { "same": 23 },
-    "emission": 0,
     "light_absorption": 0
   },
   {
