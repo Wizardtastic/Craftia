@@ -18,6 +18,7 @@ pub mod registry;
 pub mod save;
 pub mod schematic;
 pub mod stream;
+pub mod tree;
 pub mod volume;
 pub mod water;
 pub mod world;

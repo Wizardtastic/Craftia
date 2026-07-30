@@ -352,6 +352,8 @@ fn run_worker(
                         gen.generate(&mut chunk, &reg);
                         gen.decorate(&mut chunk, &reg, |wx, wy, wz| {
                             world_for_light.get_block(wx, wy, wz)
+                        }, |wx, wy, wz, id| {
+                            world_for_light.set_block_no_light(wx, wy, wz, id)
                         });
                         // Compute lighting: ray-based sunlight + torchlight BFS.
                         let mut cross_updates = Vec::new();

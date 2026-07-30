@@ -17,7 +17,7 @@ use voxel_core::{
     BlockId, BlockPos, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT_BLOCKS,
 };
 
-use crate::{chunk::Chunk, registry::BlockRegistry};
+use crate::{chunk::Chunk, registry::BlockRegistry, tree};
 
 /// Identifier for a surface biome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -834,33 +834,21 @@ impl TerrainGenerator {
         chunk.dirty = true;
     }
 
-    /// Scatter trees on grass surfaces. Call after the chunk and its neighbours
-    /// are generated so trunks/leaves can spill across borders safely.
+    /// Scatter trees and surface foliage. Trees use `tree::try_place_tree`
+    /// which supports cross-chunk spills via `neighbour_set`. Foliage
+    /// (tall grass, flowers, mushrooms, cacti) stays single-chunk.
     pub fn decorate(
         &self,
         chunk: &mut Chunk,
         reg: &BlockRegistry,
         neighbour_sample: impl Fn(i32, i32, i32) -> BlockId,
+        neighbour_set: impl Fn(i32, i32, i32, BlockId) -> bool,
     ) {
         let origin = chunk_origin(chunk.pos);
         let grass = match reg.id_of("grass") {
             Some(g) => g,
             None => return,
         };
-        let wood = match reg.id_of("wood") {
-            Some(w) => w,
-            None => return,
-        };
-        let leaves = match reg.id_of("leaves") {
-            Some(l) => l,
-            None => return,
-        };
-        // New decorative blocks. None of these abort decoration: a missing block
-        // just skips that particular feature so the rest can still be placed.
-        let birch_log = reg.id_of("birch_log");
-        let birch_leaves = reg.id_of("birch_leaves");
-        let spruce_log = reg.id_of("spruce_log");
-        let spruce_leaves = reg.id_of("spruce_leaves");
         let tall_grass = reg.id_of("tall_grass");
         let poppy = reg.id_of("poppy");
         let dandelion = reg.id_of("dandelion");
@@ -868,14 +856,6 @@ impl TerrainGenerator {
         let mushroom_red = reg.id_of("mushroom_red");
         let mushroom_brown = reg.id_of("mushroom_brown");
         let sand = reg.id_of("sand");
-
-        // Which tree variety to plant for a given column.
-        #[derive(Clone, Copy)]
-        enum TreeType {
-            Oak,
-            Birch,
-            Spruce,
-        }
 
         // Deterministic per-column tree decision from cellular noise + hash.
         for lx in 2..CHUNK_SIZE - 2 {
@@ -890,8 +870,8 @@ impl TerrainGenerator {
                 let height_f = self.base_height(wx, wz);
                 let biome = self.biome_at(wx, wz, height_f);
 
-                // ---- Trees ------------------------------------------------
-                if n >= 0.55 && h <= 0.12 {
+                // ---- Trees (delegated to `tree` module) --------------------
+                if let Some(tree_type) = tree::pick_tree_type(self.seed, wx, wz, biome, n, h) {
                     // Find a grass surface by scanning down from chunk top.
                     let mut surface_y = None;
                     for ly in (0..CHUNK_SIZE).rev() {
@@ -909,110 +889,12 @@ impl TerrainGenerator {
                         }
                     }
                     if let Some(sy) = surface_y {
-                        // Pick tree variety by biome + secondary hash. Oak is
-                        // the default/fallback when no biome variant fires.
-                        let tree_hash = hash2(self.seed, wx + 1, wz);
-                        let tree_type = match biome {
-                            BiomeId::Forest if tree_hash < 0.3 => TreeType::Birch,
-                            BiomeId::Mountains if tree_hash < 0.4 => TreeType::Spruce,
-                            _ => TreeType::Oak,
-                        };
-                        match tree_type {
-                            TreeType::Oak => {
-                                let trunk_top = (sy + 5).min(CHUNK_SIZE - 1);
-                                for ty in (sy + 1)..=trunk_top {
-                                    chunk.set(lx, ty, lz, wood);
-                                }
-                                // Leaf canopy: a 3×3×2 blob centred on trunk_top.
-                                let cy = trunk_top;
-                                for dy in 0..=2 {
-                                    for dx in -2i32..=2 {
-                                        for dz in -2i32..=2 {
-                                            if dx == 0 && dz == 0 && dy < 2 {
-                                                continue; // leave the trunk
-                                            }
-                                            if dx.abs() == 2 && dz.abs() == 2 {
-                                                continue; // round corners
-                                            }
-                                            let lx2 = lx + dx;
-                                            let lz2 = lz + dz;
-                                            let ly2 = cy + dy;
-                                            if (0..CHUNK_SIZE).contains(&lx2)
-                                                && (0..CHUNK_SIZE).contains(&lz2)
-                                                && (0..CHUNK_SIZE).contains(&ly2)
-                                                && chunk.get(lx2, ly2, lz2).is_air()
-                                            {
-                                                chunk.set(lx2, ly2, lz2, leaves);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            TreeType::Birch => {
-                                if let (Some(log), Some(leaf)) = (birch_log, birch_leaves) {
-                                    // 6-7 tall trunk.
-                                    let trunk_h =
-                                        6 + (hash2(self.seed, wx + 3, wz + 3) * 2.0) as i32;
-                                    let trunk_top = (sy + trunk_h).min(CHUNK_SIZE - 1);
-                                    for ty in (sy + 1)..=trunk_top {
-                                        chunk.set(lx, ty, lz, log);
-                                    }
-                                    // Small 2×2×2 leaf canopy at the top.
-                                    for dy in 0..2 {
-                                        let ly2 = trunk_top + dy;
-                                        for dx in -1i32..=0 {
-                                            for dz in -1i32..=0 {
-                                                let lx2 = lx + dx;
-                                                let lz2 = lz + dz;
-                                                if (0..CHUNK_SIZE).contains(&lx2)
-                                                    && (0..CHUNK_SIZE).contains(&lz2)
-                                                    && (0..CHUNK_SIZE).contains(&ly2)
-                                                    && chunk.get(lx2, ly2, lz2).is_air()
-                                                {
-                                                    chunk.set(lx2, ly2, lz2, leaf);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            TreeType::Spruce => {
-                                if let (Some(log), Some(leaf)) = (spruce_log, spruce_leaves) {
-                                    // 6-8 tall trunk.
-                                    let trunk_h =
-                                        6 + (hash2(self.seed, wx + 5, wz + 5) * 3.0) as i32;
-                                    let trunk_top = (sy + trunk_h).min(CHUNK_SIZE - 1);
-                                    for ty in (sy + 1)..=trunk_top {
-                                        chunk.set(lx, ty, lz, log);
-                                    }
-                                    // Narrow tapered canopy: 3×3 at the bottom
-                                    // narrowing to 1×1 at the very top.
-                                    let canopy_top = trunk_top;
-                                    let canopy_bottom = trunk_top - 2;
-                                    for ly2 in canopy_bottom..=canopy_top {
-                                        let dist_from_top = canopy_top - ly2;
-                                        let radius = if dist_from_top == 0 { 0 } else { 1 };
-                                        for dx in -radius..=radius {
-                                            for dz in -radius..=radius {
-                                                // Leave the trunk except at the top.
-                                                if dx == 0 && dz == 0 && ly2 < canopy_top {
-                                                    continue;
-                                                }
-                                                let lx2 = lx + dx;
-                                                let lz2 = lz + dz;
-                                                if (0..CHUNK_SIZE).contains(&lx2)
-                                                    && (0..CHUNK_SIZE).contains(&lz2)
-                                                    && (0..CHUNK_SIZE).contains(&ly2)
-                                                    && chunk.get(lx2, ly2, lz2).is_air()
-                                                {
-                                                    chunk.set(lx2, ly2, lz2, leaf);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        tree::try_place_tree(
+                            chunk, reg, self.seed,
+                            wx, wz, sy,
+                            tree_type,
+                            &neighbour_set,
+                        );
                     }
                 }
 
@@ -1100,9 +982,9 @@ impl TerrainGenerator {
                 }
             }
         }
-        // neighbour_sample is reserved for future cross-chunk foliage; keep the
-        // parameter so callers don't need to change when we add it.
-        let _ = neighbour_sample;
+        // neighbour_sample / neighbour_set are consumed by the tree-placement
+        // path above; keep both params so the streamer can wire them up.
+        let _ = (&neighbour_sample, &neighbour_set);
     }
 
     /// Place dungeons, ruined towers and wells. Each chunk independently
@@ -1280,7 +1162,7 @@ impl TerrainGenerator {
 }
 
 /// Deterministic hash of (seed, x, z) into [0, 1).
-fn hash2(seed: i32, x: i32, z: i32) -> f32 {
+pub(crate) fn hash2(seed: i32, x: i32, z: i32) -> f32 {
     let mut h = (seed as u32).wrapping_mul(374761393);
     h = h.wrapping_add(x as u32).wrapping_mul(668265263);
     h = h.wrapping_add(z as u32).wrapping_mul(1274126177);

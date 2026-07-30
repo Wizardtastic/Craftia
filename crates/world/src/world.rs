@@ -468,6 +468,33 @@ impl World {
         reg.is_solid(id)
     }
 
+    /// Set a block without any lighting recomputation. Writes the block,
+    /// marks the chunk dirty + light_dirty, and returns true on success.
+    ///
+    /// Use this when placing many blocks during world generation (e.g.
+    /// tree leaves spilling across chunk borders) where the per-block
+    /// lighting recomputation cost of [`set_block`] would be prohibitive.
+    /// Lighting is deferred to the caller — typically the chunk's own
+    /// `compute_all` pass or a future remesh.
+    pub fn set_block_no_light(&self, x: i32, y: i32, z: i32, id: BlockId) -> bool {
+        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
+            return false;
+        }
+        let cp = block_to_chunk(IVec3::new(x, y, z));
+        let origin = chunk_origin(cp);
+        let lx = x - origin.x;
+        let ly = y - origin.y;
+        let lz = z - origin.z;
+
+        let mut chunks = self.chunks.write_shard(cp);
+        let Some(chunk) = chunks.get_mut(&cp) else {
+            return false;
+        };
+        chunk.set(lx, ly, lz, id);
+        chunk.light_dirty = true;
+        true
+    }
+
     /// Set a block by world coordinate. Returns true if a loaded chunk was
     /// updated. Also recomputes lighting for the affected chunk AND its
     /// 6 cardinal neighbours — this is what makes lighting actually go
