@@ -104,7 +104,11 @@ pub fn try_place_tree(
     neighbour_set: &dyn Fn(i32, i32, i32, BlockId) -> bool,
 ) -> u32 {
     let origin = voxel_core::math::chunk_origin(chunk.pos);
-    let mut placer = TreePlacer { chunk, origin, neighbour_set };
+    let mut placer = TreePlacer {
+        chunk,
+        origin,
+        neighbour_set,
+    };
 
     let (wood, leaves) = tree_blocks(reg, tree_type);
     let (Some(wood), Some(leaves)) = (wood, leaves) else {
@@ -194,15 +198,9 @@ pub fn pick_tree_type(
 
 fn tree_blocks(reg: &BlockRegistry, tt: TreeType) -> (Option<BlockId>, Option<BlockId>) {
     match tt {
-        TreeType::Oak | TreeType::BigOak => {
-            (reg.id_of("wood"), reg.id_of("leaves"))
-        }
-        TreeType::Birch => {
-            (reg.id_of("birch_log"), reg.id_of("birch_leaves"))
-        }
-        TreeType::Spruce => {
-            (reg.id_of("spruce_log"), reg.id_of("spruce_leaves"))
-        }
+        TreeType::Oak | TreeType::BigOak => (reg.id_of("wood"), reg.id_of("leaves")),
+        TreeType::Birch => (reg.id_of("birch_log"), reg.id_of("birch_leaves")),
+        TreeType::Spruce => (reg.id_of("spruce_log"), reg.id_of("spruce_leaves")),
     }
 }
 
@@ -429,7 +427,7 @@ mod tests {
 
     fn test_chunk() -> crate::chunk::Chunk {
         let mut c = Chunk::new(ChunkPos::new(0, 4, 0)); // y=64..80
-        // Fill bottom with grass to simulate a surface.
+                                                        // Fill bottom with grass to simulate a surface.
         let reg = BlockRegistry::with_builtins();
         let grass = reg.id_of("grass").unwrap();
         let dirt = reg.id_of("dirt").unwrap();
@@ -449,9 +447,12 @@ mod tests {
         let reg = BlockRegistry::with_builtins();
         let noop_neighbour = |_: i32, _: i32, _: i32, _: BlockId| false;
         let count = try_place_tree(
-            &mut c, &reg, 42,
-            4, 4, // world x,z within chunk origin (0,64,0)
-            0,    // surface_ly = 0 (grass at local y=0)
+            &mut c,
+            &reg,
+            42,
+            4,
+            4, // world x,z within chunk origin (0,64,0)
+            0, // surface_ly = 0 (grass at local y=0)
             TreeType::Oak,
             &noop_neighbour,
         );
@@ -467,10 +468,7 @@ mod tests {
         let mut c = test_chunk();
         let reg = BlockRegistry::with_builtins();
         let noop_neighbour = |_: i32, _: i32, _: i32, _: BlockId| false;
-        let count = try_place_tree(
-            &mut c, &reg, 42,
-            4, 4, 0, TreeType::Birch, &noop_neighbour,
-        );
+        let count = try_place_tree(&mut c, &reg, 42, 4, 4, 0, TreeType::Birch, &noop_neighbour);
         assert!(count > 0, "birch should place blocks");
     }
 
@@ -479,10 +477,7 @@ mod tests {
         let mut c = test_chunk();
         let reg = BlockRegistry::with_builtins();
         let noop_neighbour = |_: i32, _: i32, _: i32, _: BlockId| false;
-        let count = try_place_tree(
-            &mut c, &reg, 42,
-            4, 4, 0, TreeType::Spruce, &noop_neighbour,
-        );
+        let count = try_place_tree(&mut c, &reg, 42, 4, 4, 0, TreeType::Spruce, &noop_neighbour);
         assert!(count > 0, "spruce should place blocks");
     }
 
@@ -491,10 +486,7 @@ mod tests {
         let mut c = test_chunk();
         let reg = BlockRegistry::with_builtins();
         let noop_neighbour = |_: i32, _: i32, _: i32, _: BlockId| false;
-        let count = try_place_tree(
-            &mut c, &reg, 42,
-            4, 4, 0, TreeType::BigOak, &noop_neighbour,
-        );
+        let count = try_place_tree(&mut c, &reg, 42, 4, 4, 0, TreeType::BigOak, &noop_neighbour);
         assert!(count > 0, "big oak should place blocks");
     }
 
@@ -540,10 +532,7 @@ mod tests {
         };
         // Place a tree near the chunk edge so some canopy spills to
         // neighbouring chunks.
-        let _count = try_place_tree(
-            &mut c, &reg, 42,
-            0, 0, 0, TreeType::Oak, &neighbour_set,
-        );
+        let _count = try_place_tree(&mut c, &reg, 42, 0, 0, 0, TreeType::Oak, &neighbour_set);
         // Oak canopy at radius 2 from (wx=0,wz=0) should spill into
         // negative X/Z which is outside chunk origin (0, 64, 0).
         assert!(

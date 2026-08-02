@@ -18,6 +18,7 @@ use voxel_core::{
 
 use crate::{
     chunk::Chunk,
+    error::WorldError,
     gen::TerrainGenerator,
     mesh::{ChunkMeshBundle, ChunkMesher},
     registry::BlockRegistry,
@@ -73,10 +74,7 @@ pub enum ChunkStreamEvent {
     /// A chunk's raw voxel data is ready for GPU compute meshing (Phase 2).
     /// `voxels` is 18³ u16 BlockIds (16³ chunk + 1-voxel border from neighbours).
     /// Emitted for distant chunks when `gpu_mesh_distance` is configured.
-    GpuMeshReady {
-        pos: ChunkPos,
-        voxels: Box<[u16]>,
-    },
+    GpuMeshReady { pos: ChunkPos, voxels: Box<[u16]> },
     /// A chunk left the loaded set; free its GPU resources.
     Unloaded(ChunkPos),
 }
@@ -344,40 +342,51 @@ fn run_worker(
             let gen = gen.clone();
             let reg = reg.clone();
             let world_for_light = world.clone();
-            let generated: Vec<(ChunkPos, Chunk)> = pool.install(|| {
-                gen_batch
-                    .par_iter()
-                    .map(|&pos| {
-                        let mut chunk = Chunk::new(pos);
-                        gen.generate(&mut chunk, &reg);
-                        gen.decorate(&mut chunk, &reg, |wx, wy, wz| {
-                            world_for_light.get_block(wx, wy, wz)
-                        }, |wx, wy, wz, id| {
-                            world_for_light.set_block_no_light(wx, wy, wz, id)
-                        });
-                        // Compute lighting: ray-based sunlight + torchlight BFS.
-                        let mut cross_updates = Vec::new();
-                        crate::light::compute_all(
-                            &mut chunk,
-                            &reg,
-                            sun_dir,
-                            // sample_block: for cross-chunk block lookups
-                            &|wx, wy, wz| world_for_light.get_block(wx, wy, wz),
-                            // sample_torchlight: for cross-chunk torchlight
-                            &|wx, wy, wz| world_for_light.get_torchlight_world(wx, wy, wz),
-                            // cross_chunk_update: collect pending torchlight updates
-                            &mut |pos, level, color| cross_updates.push((pos, level, color)),
-                        );
-                        // Apply cross-chunk torchlight updates to the world.
-                        for (pos, level, color) in cross_updates {
-                            world_for_light.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
-                            world_for_light.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
-                        }
-                        (pos, chunk)
-                    })
-                    .collect()
-            });
-            for (pos, chunk) in generated {
+            let generated: Vec<std::result::Result<(ChunkPos, Chunk), WorldError>> =
+                pool.install(|| {
+                    gen_batch
+                        .par_iter()
+                        .map(|&pos| {
+                            let mut chunk = Chunk::new(pos);
+                            gen.generate(&mut chunk, &reg)?;
+                            gen.decorate(
+                                &mut chunk,
+                                &reg,
+                                |wx, wy, wz| world_for_light.get_block(wx, wy, wz),
+                                |wx, wy, wz, id| world_for_light.set_block_no_light(wx, wy, wz, id),
+                            );
+                            // Compute lighting: ray-based sunlight + torchlight BFS.
+                            let mut cross_updates = Vec::new();
+                            crate::light::compute_all(
+                                &mut chunk,
+                                &reg,
+                                sun_dir,
+                                // sample_block: for cross-chunk block lookups
+                                &|wx, wy, wz| world_for_light.get_block(wx, wy, wz),
+                                // sample_torchlight: for cross-chunk torchlight
+                                &|wx, wy, wz| world_for_light.get_torchlight_world(wx, wy, wz),
+                                // cross_chunk_update: collect pending torchlight updates
+                                &mut |pos, level, color| cross_updates.push((pos, level, color)),
+                            );
+                            // Apply cross-chunk torchlight updates to the world.
+                            for (pos, level, color) in cross_updates {
+                                world_for_light
+                                    .set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
+                                world_for_light
+                                    .set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
+                            }
+                            Ok((pos, chunk))
+                        })
+                        .collect()
+                });
+            for res in generated {
+                let (pos, chunk) = match res {
+                    Ok(generated) => generated,
+                    Err(e) => {
+                        log::error!("failed to generate a chunk: {e}");
+                        continue;
+                    }
+                };
                 world.insert_chunk(pos, chunk);
                 state.insert(pos, State::Generated);
                 let _ = event_tx.send(ChunkStreamEvent::Generated(pos));
@@ -540,11 +549,21 @@ fn run_worker(
             if let Ok(cmd) = cmd_rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 // Process the command we received and loop back.
                 match cmd {
-                    Cmd::Focus(p) => { focus = p; focus_changed = true; }
-                    Cmd::SunDir(d) => { sun_dir = d; }
-                    Cmd::Frustum(f) => { frustum = Some(f); }
-                    Cmd::LoadRadius(r) => { load_radius = r as i32; }
-                    Cmd::Remesh(pos) => { remesh_requests.push(pos); }
+                    Cmd::Focus(p) => {
+                        focus = p;
+                    }
+                    Cmd::SunDir(d) => {
+                        sun_dir = d;
+                    }
+                    Cmd::Frustum(f) => {
+                        frustum = Some(f);
+                    }
+                    Cmd::LoadRadius(r) => {
+                        load_radius = r as i32;
+                    }
+                    Cmd::Remesh(pos) => {
+                        remesh_requests.push(pos);
+                    }
                     Cmd::Stats(tx) => {
                         let mut stats = StreamerStats::default();
                         for s in state.values() {

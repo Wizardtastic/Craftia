@@ -102,13 +102,7 @@ impl UiDrawData {
 
     /// Push a filled triangle (3 vertices, 3 indices). Uses tex_id=0 (block
     /// atlas white tile).
-    pub fn triangle(
-        &mut self,
-        a: [f32; 2],
-        b: [f32; 2],
-        c: [f32; 2],
-        color: [u8; 4],
-    ) {
+    pub fn triangle(&mut self, a: [f32; 2], b: [f32; 2], c: [f32; 2], color: [u8; 4]) {
         let tile = 20u32; // white tile
         let tx = tile % ATLAS_TILES;
         let ty = tile / ATLAS_TILES;
@@ -120,11 +114,27 @@ impl UiDrawData {
         let _v_mid = (v0 + v1) * 0.5;
         let start = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&[
-            UiVertex { pos: a, uv: [u_mid, v0], color, tex_id: 0.0 },
-            UiVertex { pos: b, uv: [u0, v1], color, tex_id: 0.0 },
-            UiVertex { pos: c, uv: [u1, v1], color, tex_id: 0.0 },
+            UiVertex {
+                pos: a,
+                uv: [u_mid, v0],
+                color,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: b,
+                uv: [u0, v1],
+                color,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: c,
+                uv: [u1, v1],
+                color,
+                tex_id: 0.0,
+            },
         ]);
-        self.indices.extend_from_slice(&[start, start + 1, start + 2]);
+        self.indices
+            .extend_from_slice(&[start, start + 1, start + 2]);
     }
 
     /// Push a text string using the bitmap font (tex_id=1).
@@ -208,12 +218,39 @@ impl UiDrawData {
 
             let start = self.vertices.len() as u32;
             self.vertices.extend_from_slice(&[
-                UiVertex { pos: [x0 + nx, y0 + ny], uv: [0.0, 0.0], color, tex_id: 0.0 },
-                UiVertex { pos: [x0 - nx, y0 - ny], uv: [0.0, 0.0], color, tex_id: 0.0 },
-                UiVertex { pos: [x1 - nx, y1 - ny], uv: [0.0, 0.0], color, tex_id: 0.0 },
-                UiVertex { pos: [x1 + nx, y1 + ny], uv: [0.0, 0.0], color, tex_id: 0.0 },
+                UiVertex {
+                    pos: [x0 + nx, y0 + ny],
+                    uv: [0.0, 0.0],
+                    color,
+                    tex_id: 0.0,
+                },
+                UiVertex {
+                    pos: [x0 - nx, y0 - ny],
+                    uv: [0.0, 0.0],
+                    color,
+                    tex_id: 0.0,
+                },
+                UiVertex {
+                    pos: [x1 - nx, y1 - ny],
+                    uv: [0.0, 0.0],
+                    color,
+                    tex_id: 0.0,
+                },
+                UiVertex {
+                    pos: [x1 + nx, y1 + ny],
+                    uv: [0.0, 0.0],
+                    color,
+                    tex_id: 0.0,
+                },
             ]);
-            self.indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+            self.indices.extend_from_slice(&[
+                start,
+                start + 1,
+                start + 2,
+                start,
+                start + 2,
+                start + 3,
+            ]);
         }
     }
 
@@ -268,7 +305,10 @@ impl UiDrawData {
         // Compute cumulative totals to find the max for scaling.
         let mut max_total = 0.0f32;
         for i in 0..len {
-            let total: f32 = series.iter().map(|s| s.get(i).copied().unwrap_or(0.0)).sum();
+            let total: f32 = series
+                .iter()
+                .map(|s| s.get(i).copied().unwrap_or(0.0))
+                .sum();
             max_total = max_total.max(total);
         }
         let range = max_total.max(0.001);
@@ -292,15 +332,7 @@ impl UiDrawData {
     }
 
     /// Horizontal grid lines with optional value labels.
-    pub fn grid_h(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        divisions: u32,
-        line_color: [u8; 4],
-    ) {
+    pub fn grid_h(&mut self, x: f32, y: f32, w: f32, h: f32, divisions: u32, line_color: [u8; 4]) {
         for i in 0..=divisions {
             let ly = y + (i as f32 / divisions as f32) * h;
             self.quad(x, ly, w, 1.0, line_color);

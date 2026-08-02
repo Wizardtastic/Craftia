@@ -175,9 +175,7 @@ impl SystemSchedule {
             while batch_start < self.systems.len() {
                 // Find the end of the current parallelizable batch.
                 let mut batch_end = batch_start;
-                while batch_end < self.systems.len()
-                    && self.systems[batch_end].can_parallelize()
-                {
+                while batch_end < self.systems.len() && self.systems[batch_end].can_parallelize() {
                     batch_end += 1;
                 }
                 // Execute the batch sequentially for now.

@@ -2,9 +2,9 @@
 //! Aabb + PlayerInput + PlayerState). Supports fly / water / normal modes
 //! with full swept-AABB collision against the voxel world.
 
+use voxel_combat::{DamageEvent, DamageQueue, DamageSource};
 use voxel_core::Camera;
 use voxel_ecs::World;
-use voxel_combat::{DamageEvent, DamageQueue, DamageSource};
 use voxel_gamemode::GameMode;
 
 use crate::components::{Aabb, PlayerEntity, PlayerInput, PlayerState, Transform, Velocity};
@@ -35,9 +35,9 @@ pub const WATER_DRAG: f32 = 0.7;
 pub const SWIM_BASE_FRACTION: f32 = 0.5;
 
 // Minecraft-like movement physics constants.
-const GROUND_ACCEL: f32 = 15.0;   // approach rate on ground
+const GROUND_ACCEL: f32 = 15.0; // approach rate on ground
 const GROUND_FRICTION: f32 = 15.0; // friction coefficient on ground
-const AIR_CONTROL: f32 = 2.0;     // approach rate in air (much weaker)
+const AIR_CONTROL: f32 = 2.0; // approach rate in air (much weaker)
 const STOP_THRESHOLD: f32 = 0.01; // threshold below which velocity = 0
 
 const SNEAK_AABB_Y: f32 = 0.65;
@@ -45,7 +45,6 @@ const PLAYER_AABB_XZ: f32 = 0.3;
 const PLAYER_AABB_Y: f32 = 0.9;
 
 /// System: applies movement physics to the player entity for one frame.
-#[allow(unused_assignments)]
 pub fn movement_system(world: &mut World, dt: f32) {
     let player_entity = match world.resource::<PlayerEntity>().and_then(|p| p.0) {
         Some(e) => e,
@@ -210,8 +209,12 @@ pub fn movement_system(world: &mut World, dt: f32) {
                 // Ground friction: gradual deceleration (no insta-stop).
                 new_vel.x *= 1.0 - GROUND_FRICTION * dt;
                 new_vel.z *= 1.0 - GROUND_FRICTION * dt;
-                if new_vel.x.abs() < STOP_THRESHOLD { new_vel.x = 0.0; }
-                if new_vel.z.abs() < STOP_THRESHOLD { new_vel.z = 0.0; }
+                if new_vel.x.abs() < STOP_THRESHOLD {
+                    new_vel.x = 0.0;
+                }
+                if new_vel.z.abs() < STOP_THRESHOLD {
+                    new_vel.z = 0.0;
+                }
             }
         } else {
             // Air: much weaker control, no friction.
@@ -239,12 +242,10 @@ pub fn movement_system(world: &mut World, dt: f32) {
         },
         aabb_base.half.z,
     );
-    let mut new_pos = transform.pos;
     let mut landed = false;
 
-    if let Some(phys) = &physics {
+    let new_pos = if let Some(phys) = &physics {
         let res = voxel_physics::swept_aabb(&phys.0, transform.pos, aabb_half, new_vel * dt);
-        new_pos = res.new_pos;
         // Zero velocity on blocked axes.
         if res.hit[0] || res.hit[1] {
             new_vel.x = 0.0;
@@ -257,27 +258,38 @@ pub fn movement_system(world: &mut World, dt: f32) {
         }
         landed = !state.on_ground && res.on_ground;
         state.on_ground = res.on_ground;
+        res.new_pos
     } else {
         // No physics world: move freely.
-        new_pos = transform.pos + new_vel * dt;
-    }
+        transform.pos + new_vel * dt
+    };
 
     if landed {
         // Calculate fall damage based on peak fall speed.
         // The formula mirrors Minecraft: damage = fall_distance - 3
         // We approximate fall_distance from peak speed using: v^2 = 2*g*d => d = v^2/(2*g)
-        let game_mode = world.get::<GameMode>(player_entity).copied().unwrap_or(GameMode::Survival);
+        let game_mode = world
+            .get::<GameMode>(player_entity)
+            .copied()
+            .unwrap_or(GameMode::Survival);
         if game_mode.takes_fall_damage() {
             let fall_speed = state.fall_speed_peak.abs();
             let fall_distance = (fall_speed * fall_speed) / (2.0 * GRAVITY);
             let damage = (fall_distance - 3.0).max(0.0);
             if damage > 0.0 {
-                log::debug!("Fall damage: distance={:.1}, damage={:.1}", fall_distance, damage);
+                log::debug!(
+                    "Fall damage: distance={:.1}, damage={:.1}",
+                    fall_distance,
+                    damage
+                );
                 if let Some(dq) = world.resource_mut::<DamageQueue>() {
-                    dq.push(player_entity, DamageEvent {
-                        source: DamageSource::Fall(fall_distance),
-                        amount: damage,
-                    });
+                    dq.push(
+                        player_entity,
+                        DamageEvent {
+                            source: DamageSource::Fall(fall_distance),
+                            amount: damage,
+                        },
+                    );
                 }
             }
         }

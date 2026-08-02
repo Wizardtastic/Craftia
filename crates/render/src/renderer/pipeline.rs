@@ -137,7 +137,11 @@ pub(super) fn create_render_pass(
         .format(color_format)
         .samples(msaa_samples)
         .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(if msaa { vk::AttachmentStoreOp::DONT_CARE } else { vk::AttachmentStoreOp::STORE })
+        .store_op(if msaa {
+            vk::AttachmentStoreOp::DONT_CARE
+        } else {
+            vk::AttachmentStoreOp::STORE
+        })
         .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
         .initial_layout(vk::ImageLayout::UNDEFINED)
@@ -441,8 +445,9 @@ fn create_render_pass_depth_resolve(
         .map_err(|e| anyhow!("create_render_pass2 (depth resolve): {e:?}"))
 }
 
-
-pub(super) fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -514,7 +519,10 @@ pub(super) fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::D
         .map_err(|e| anyhow!("create_descriptor_set_layout: {e:?}"))
 }
 
-pub(super) fn create_descriptor_pool(device: &ash::Device, max_sets: usize) -> Result<vk::DescriptorPool> {
+pub(super) fn create_descriptor_pool(
+    device: &ash::Device,
+    max_sets: usize,
+) -> Result<vk::DescriptorPool> {
     let pool_sizes = [
         // 6 chunk UBOs (camera + fog + shadow + material table + reflection
         // + tile_remap) per frame set. The extra UBO is the set-1 tile_remap
@@ -747,17 +755,15 @@ pub(super) fn create_pipeline_layout(
     tile_remap_set_layout: vk::DescriptorSetLayout,
 ) -> Result<vk::PipelineLayout> {
     let push_range = vk::PushConstantRange::default()
-        .stage_flags(
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-        )
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
         .size(96); // vec4 + mat4 + vec4 (origin, view_proj, time)
-    // TWO set layouts: `chunk_set_layout` (camera, fog, atlas, shadow,
-    // material table, scene-opaque color/depth, reflection) and
-    // `tile_remap_set_layout` (TileRemap UBO consumed by the chunk frag at
-    // `layout(set = 1, binding = 0) uniform TileRemap`). The chunk pipeline
-    // layout MUST include both — without tile_remap at set 1 binding 0,
-    // `vkCreateGraphicsPipelines` fails VUID-07988 on chunk.frag.
+                   // TWO set layouts: `chunk_set_layout` (camera, fog, atlas, shadow,
+                   // material table, scene-opaque color/depth, reflection) and
+                   // `tile_remap_set_layout` (TileRemap UBO consumed by the chunk frag at
+                   // `layout(set = 1, binding = 0) uniform TileRemap`). The chunk pipeline
+                   // layout MUST include both — without tile_remap at set 1 binding 0,
+                   // `vkCreateGraphicsPipelines` fails VUID-07988 on chunk.frag.
     let set_layouts = [chunk_set_layout, tile_remap_set_layout];
     let push_ranges = [push_range];
     let create_info = vk::PipelineLayoutCreateInfo::default()
@@ -937,7 +943,9 @@ pub(crate) fn spirv_to_u32(bytes: &[u8]) -> Vec<u32> {
     out
 }
 
-pub(super) fn create_ui_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_ui_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -1118,8 +1126,8 @@ pub(super) fn create_ui_pipeline(
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
 
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(msaa_samples);
+    let multisampling =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
 
     // No depth test/write for UI — it draws on top of everything.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
@@ -1171,7 +1179,9 @@ pub(super) fn create_ui_pipeline(
 
 // ── Sky pipeline helpers ─────────────────────────────────────────────────
 
-pub(super) fn create_sky_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_sky_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let bindings = [vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
@@ -1254,8 +1264,8 @@ pub(super) fn create_sky_pipeline(
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
 
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(msaa_samples);
+    let multisampling =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
 
     // Sky pass: depth test LESS_OR_EQUAL (so it draws at depth=1, behind everything),
     // no depth write (so chunks can overwrite it).
@@ -1389,8 +1399,8 @@ pub(super) fn create_panorama_pipeline(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(msaa_samples);
+    let multisampling =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
     // Same depth settings as sky: draws behind everything.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
@@ -1887,7 +1897,9 @@ pub(super) fn create_post_pipeline(
     Ok(pipelines.into_iter().next().unwrap())
 }
 
-pub(super) fn create_post_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_post_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -2099,7 +2111,9 @@ pub(super) fn create_particle_pipeline(
 /// Layout for the particle-only descriptor set (set 1, binding 0). Holds the
 /// depth attachment as an input attachment — the fragment shader fetches it
 /// via `subpassLoad` to compute the soft-fade.
-pub(super) fn create_particle_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_particle_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let binding = vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
@@ -2125,9 +2139,7 @@ pub(super) fn create_particle_pipeline_layout(
     particle_set_layout: vk::DescriptorSetLayout,
 ) -> Result<vk::PipelineLayout> {
     let push_range = vk::PushConstantRange::default()
-        .stage_flags(
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-        )
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
         .size(96);
     let set_layouts = [chunk_set_layout, particle_set_layout];
@@ -2142,7 +2154,10 @@ pub(super) fn create_particle_pipeline_layout(
 /// Pool + set allocation for the per-frame particle input attachment.
 /// Separate pool (no UBOs/samplers needed) — INPUT_ATTACHMENT type is enough.
 #[allow(dead_code)]
-pub(super) fn create_particle_descriptor_pool(device: &ash::Device, max_sets: usize) -> Result<vk::DescriptorPool> {
+pub(super) fn create_particle_descriptor_pool(
+    device: &ash::Device,
+    max_sets: usize,
+) -> Result<vk::DescriptorPool> {
     let pool_sizes = [vk::DescriptorPoolSize {
         ty: vk::DescriptorType::INPUT_ATTACHMENT,
         descriptor_count: max_sets as u32,
@@ -2252,8 +2267,8 @@ pub(super) fn create_occlusion_pipeline(
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
 
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(msaa_samples);
+    let multisampling =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
 
     // Depth test + write: standard LESS comparison.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()

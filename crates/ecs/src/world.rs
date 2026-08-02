@@ -178,25 +178,20 @@ impl World {
         // through `ensure_registered`), so install the short name here too.
         // For components this is redundant with `ensure_registered`, but
         // harmless — the entry already existed.
-        self.name_fns.entry(TypeId::of::<T>()).or_insert(name_of::<T>);
+        self.name_fns
+            .entry(TypeId::of::<T>())
+            .or_insert(name_of::<T>);
     }
 
     /// Look up the short name for a registered type id. Falls back to
     /// `"<unknown>"` if the type was never registered.
     pub fn name_for(&self, tid: TypeId) -> &'static str {
-        self.name_fns
-            .get(&tid)
-            .map(|f| f())
-            .unwrap_or("<unknown>")
+        self.name_fns.get(&tid).map(|f| f()).unwrap_or("<unknown>")
     }
 
     /// Format a component value through its registered `Debug` formatter.
     /// Returns `None` if no formatter is registered for `type_id`.
-    pub fn format_component(
-        &self,
-        type_id: TypeId,
-        value: &dyn Any,
-    ) -> Option<String> {
+    pub fn format_component(&self, type_id: TypeId, value: &dyn Any) -> Option<String> {
         self.debug_formatters.get(&type_id).map(|fmt| fmt(value))
     }
 

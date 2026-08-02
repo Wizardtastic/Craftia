@@ -114,17 +114,23 @@ pub fn load_texture_pack(zip_path: &Path, base_textures_dir: &Path) -> Result<Te
     }
 
     // Create extraction directory.
-    let extract_dir = base_textures_dir
-        .join(".texture_packs")
-        .join(&pack_name);
+    let extract_dir = base_textures_dir.join(".texture_packs").join(&pack_name);
 
     // Clean previous extraction if it exists.
     if extract_dir.exists() {
-        std::fs::remove_dir_all(&extract_dir)
-            .with_context(|| format!("failed to clean old extraction at {}", extract_dir.display()))?;
+        std::fs::remove_dir_all(&extract_dir).with_context(|| {
+            format!(
+                "failed to clean old extraction at {}",
+                extract_dir.display()
+            )
+        })?;
     }
-    std::fs::create_dir_all(&extract_dir)
-        .with_context(|| format!("failed to create extraction dir at {}", extract_dir.display()))?;
+    std::fs::create_dir_all(&extract_dir).with_context(|| {
+        format!(
+            "failed to create extraction dir at {}",
+            extract_dir.display()
+        )
+    })?;
 
     // Open the zip archive.
     let file = std::fs::File::open(zip_path)
@@ -217,7 +223,11 @@ pub fn load_texture_pack(zip_path: &Path, base_textures_dir: &Path) -> Result<Te
         .map(parse_pack_metadata)
         .unwrap_or_default();
     let metadata = PackMetadata {
-        name: if metadata.name.is_empty() { pack_name.clone() } else { metadata.name },
+        name: if metadata.name.is_empty() {
+            pack_name.clone()
+        } else {
+            metadata.name
+        },
         tile_count: mapping.len(),
         ..metadata
     };
@@ -248,8 +258,9 @@ pub fn load_texture_pack(zip_path: &Path, base_textures_dir: &Path) -> Result<Te
 /// Unload a texture pack: remove the extracted files.
 pub fn unload_texture_pack(pack: &TexturePack) -> Result<()> {
     if pack.extract_dir.exists() {
-        std::fs::remove_dir_all(&pack.extract_dir)
-            .with_context(|| format!("failed to remove pack dir: {}", pack.extract_dir.display()))?;
+        std::fs::remove_dir_all(&pack.extract_dir).with_context(|| {
+            format!("failed to remove pack dir: {}", pack.extract_dir.display())
+        })?;
         log::info!("unloaded texture pack '{}'", pack.name);
     }
     Ok(())
@@ -320,8 +331,6 @@ pub fn merge_texture_pack_mappings(
     merged
 }
 
-
-
 /// Discover all `.zip` files in a directory, sorted by filename for deterministic
 /// load order. Returns paths to valid zip files.
 pub fn discover_texture_packs(packs_dir: &Path) -> Vec<PathBuf> {
@@ -333,12 +342,7 @@ pub fn discover_texture_packs(packs_dir: &Path) -> Vec<PathBuf> {
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .map_or(false, |ext| ext == "zip")
-        })
+        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "zip"))
         .map(|entry| entry.path())
         .collect();
 
@@ -361,10 +365,7 @@ pub fn load_all_texture_packs(
         match load_texture_pack(zip_path, base_textures_dir) {
             Ok(pack) => packs.push(pack),
             Err(e) => {
-                log::warn!(
-                    "failed to load texture pack {}: {e}",
-                    zip_path.display()
-                );
+                log::warn!("failed to load texture pack {}: {e}", zip_path.display());
             }
         }
     }
@@ -433,10 +434,26 @@ fn parse_pack_metadata(content: &str) -> PackMetadata {
     };
     let pack = value.get("pack").and_then(|v| v.as_table());
     PackMetadata {
-        name: pack.and_then(|t| t.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        description: pack.and_then(|t| t.get("description")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        version: pack.and_then(|t| t.get("version")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        author: pack.and_then(|t| t.get("author")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        name: pack
+            .and_then(|t| t.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        description: pack
+            .and_then(|t| t.get("description"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        version: pack
+            .and_then(|t| t.get("version"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        author: pack
+            .and_then(|t| t.get("author"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         tile_count: 0,
     }
 }
@@ -468,7 +485,11 @@ fn parse_pack_animations(content: &str) -> Vec<PackAnimationDef> {
         let frames: Vec<u32> = entry
             .get("frames")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_integer().map(|i| i as u32)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_integer().map(|i| i as u32))
+                    .collect()
+            })
             .unwrap_or_default();
         let frame_duration = entry
             .get("duration")
@@ -496,7 +517,7 @@ mod tests {
         let mut zip = zip::ZipWriter::new(file);
 
         for (filename, content) in files {
-            let options = zip::write::SimpleFileOptions::default()
+            let options = zip::write::FileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
             zip.start_file(*filename, options).unwrap();
             zip.write_all(content).unwrap();
@@ -516,16 +537,23 @@ mod tests {
         let png_data = vec![0u8; 1024]; // fake PNG data
         let toml_data = b"[tiles]\n1 = \"custom_stone.png\"\n2 = \"custom_dirt.png\"\n";
 
-        let zip_path = create_test_zip(&tmp, "test_pack", &[
-            ("textures.toml", toml_data),
-            ("custom_stone.png", &png_data),
-            ("custom_dirt.png", &png_data),
-        ]);
+        let zip_path = create_test_zip(
+            &tmp,
+            "test_pack",
+            &[
+                ("textures.toml", toml_data),
+                ("custom_stone.png", &png_data),
+                ("custom_dirt.png", &png_data),
+            ],
+        );
 
         let pack = load_texture_pack(&zip_path, &tmp).unwrap();
         assert_eq!(pack.name, "test_pack");
         assert_eq!(pack.mapping().len(), 2);
-        assert_eq!(pack.mapping().get(&1), Some(&"custom_stone.png".to_string()));
+        assert_eq!(
+            pack.mapping().get(&1),
+            Some(&"custom_stone.png".to_string())
+        );
         assert_eq!(pack.mapping().get(&2), Some(&"custom_dirt.png".to_string()));
 
         // Cleanup.
@@ -546,6 +574,8 @@ mod tests {
             name: "test".to_string(),
             extract_dir: PathBuf::new(),
             mapping: pack_mapping,
+            metadata: PackMetadata::default(),
+            animations: Vec::new(),
         };
 
         let merged = merge_texture_pack_mappings(&base, &[&pack]);

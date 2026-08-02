@@ -56,13 +56,19 @@ impl ShardedChunks {
 
     /// Read-only access to the shard containing `pos`.
     #[inline]
-    pub fn read_shard(&self, pos: ChunkPos) -> parking_lot::RwLockReadGuard<'_, HashMap<ChunkPos, Chunk>> {
+    pub fn read_shard(
+        &self,
+        pos: ChunkPos,
+    ) -> parking_lot::RwLockReadGuard<'_, HashMap<ChunkPos, Chunk>> {
         self.shards[Self::shard_index(pos)].read()
     }
 
     /// Write access to the shard containing `pos`.
     #[inline]
-    pub fn write_shard(&self, pos: ChunkPos) -> parking_lot::RwLockWriteGuard<'_, HashMap<ChunkPos, Chunk>> {
+    pub fn write_shard(
+        &self,
+        pos: ChunkPos,
+    ) -> parking_lot::RwLockWriteGuard<'_, HashMap<ChunkPos, Chunk>> {
         self.shards[Self::shard_index(pos)].write()
     }
 
@@ -323,26 +329,30 @@ impl World {
         let sample_torch = {
             let arc = Arc::clone(&arc);
             move |wx: i32, wy: i32, wz: i32| arc.get_torchlight_world(wx, wy, wz)
-        };            let mut cross_updates = Vec::new();
-            crate::light::compute_all(
-                &mut chunk_copy,
-                &reg,
-                sun_dir,
-                &sample_block,
-                &sample_torch,
-                &mut |pos, level, color| cross_updates.push((pos, level, color)),
-            );
+        };
+        let mut cross_updates = Vec::new();
+        crate::light::compute_all(
+            &mut chunk_copy,
+            &reg,
+            sun_dir,
+            &sample_block,
+            &sample_torch,
+            &mut |pos, level, color| cross_updates.push((pos, level, color)),
+        );
 
-            for (pos, level, color) in cross_updates {
-                self.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
-                self.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
-            }
+        for (pos, level, color) in cross_updates {
+            self.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
+            self.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
+        }
 
-            let mut chunks = self.chunks.write_shard(cp);
+        let mut chunks = self.chunks.write_shard(cp);
         if let Some(chunk) = chunks.get_mut(&cp) {
             std::mem::swap(&mut chunk.sunlight, &mut chunk_copy.sunlight);
             std::mem::swap(&mut chunk.torchlight, &mut chunk_copy.torchlight);
-            std::mem::swap(&mut chunk.torchlight_color, &mut chunk_copy.torchlight_color);
+            std::mem::swap(
+                &mut chunk.torchlight_color,
+                &mut chunk_copy.torchlight_color,
+            );
             chunk.dirty = true;
             chunk.light_dirty = true;
         }
@@ -614,7 +624,10 @@ impl World {
         let lz = z - origin.z;
 
         if level > 0 {
-            let water_id = self.reg.id_of("water").expect("water block must be registered");
+            let water_id = self
+                .reg
+                .id_of("water")
+                .expect("water block must be registered");
             let current = chunk.get(lx, ly, lz);
             if current.is_air() || self.reg.is_liquid(current) {
                 if current != water_id {

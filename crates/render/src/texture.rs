@@ -365,10 +365,7 @@ pub fn dispatch_image_layout_transition(
             vk::PipelineStageFlags::TRANSFER,
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
         ),
-        (
-            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            L::SHADER_READ_ONLY_OPTIMAL,
-        ) => (
+        (L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, L::SHADER_READ_ONLY_OPTIMAL) => (
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
                 | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             vk::AccessFlags::SHADER_READ,
@@ -376,10 +373,7 @@ pub fn dispatch_image_layout_transition(
                 | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
             vk::PipelineStageFlags::FRAGMENT_SHADER,
         ),
-        (
-            L::SHADER_READ_ONLY_OPTIMAL,
-            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        ) => (
+        (L::SHADER_READ_ONLY_OPTIMAL, L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL) => (
             vk::AccessFlags::SHADER_READ,
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             vk::PipelineStageFlags::FRAGMENT_SHADER,
@@ -394,10 +388,7 @@ pub fn dispatch_image_layout_transition(
         ),
         // Depth attachment -> transfer source (scene_opaque_depth copy for the
         // water/glass SSR ray-march, right after the main render pass ends).
-        (
-            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            L::TRANSFER_SRC_OPTIMAL,
-        ) => (
+        (L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, L::TRANSFER_SRC_OPTIMAL) => (
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
                 | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             vk::AccessFlags::TRANSFER_READ,
@@ -408,10 +399,7 @@ pub fn dispatch_image_layout_transition(
         // Transfer source -> depth attachment (restore after the copy so the
         // later SSAO transition + next frame's render pass see the layout they
         // expect).
-        (
-            L::TRANSFER_SRC_OPTIMAL,
-            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        ) => (
+        (L::TRANSFER_SRC_OPTIMAL, L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL) => (
             vk::AccessFlags::TRANSFER_READ,
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
                 | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
@@ -513,24 +501,78 @@ mod tests {
     #[test]
     fn known_transitions_all_dispatched() {
         let pairs = [
-            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
-            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
-            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
-            (vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-            (vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
-            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
-            (vk::ImageLayout::PRESENT_SRC_KHR, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-            (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR),
-            (vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-            (vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-            (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-            (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-            (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::PRESENT_SRC_KHR,
+            ),
+            (
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            (
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ),
         ];
         for (old, new) in pairs {
             assert!(
@@ -573,7 +615,10 @@ mod tests {
         // guard across the call self-deadlocks (this test hung forever on the
         // first `cargo test --workspace` run until the drop was added).
         drop(set);
-        let pair_b = (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::UNDEFINED);
+        let pair_b = (
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageLayout::UNDEFINED,
+        );
         check_and_log_unhandled(pair_b.0, pair_b.1);
         let set = UNHANDLED_LOGGED
             .lock()

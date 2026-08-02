@@ -53,7 +53,8 @@ pub struct GraphicsSettings {
 
     pub exposure: f32,
 
-    pub vignette_strength: f32,    /// Directory containing PNG texture overrides (filenames `<tile_index>.png`).
+    pub vignette_strength: f32,
+    /// Directory containing PNG texture overrides (filenames `<tile_index>.png`).
     /// If `None` or the directory doesn't exist, the procedural atlas is used.
     pub textures_dir: Option<String>,
     /// Directory containing texture pack `.zip` files.
@@ -578,7 +579,8 @@ fn parse_key(name: &str) -> Option<winit::keyboard::KeyCode> {
 
 pub struct DebugSettings {
     pub show_overlay: bool,
-}impl Default for GraphicsSettings {
+}
+impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
             width: 1280,

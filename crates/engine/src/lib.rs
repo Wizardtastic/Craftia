@@ -1,4 +1,4 @@
-//! `voxel-engine` ΓÇö application shell.
+//! `voxel-engine` — application shell.
 //!
 //! Owns the winit window, the Vulkan [`Renderer`], the shared [`World`], the
 //! background [`ChunkStreamer`], and the gameplay state ([`Player`], [`Hotbar`],
@@ -49,15 +49,15 @@ mod ui;
 /// routed. The flow is:
 ///
 /// ```text
-/// TitleScreen ΓöÇΓöÇSingleplayerΓöÇΓöÇΓåÆ WorldSelect ΓöÇΓöÇPick WorldΓöÇΓöÇΓåÆ Playing
+/// TitleScreen ──Singleplayer──ΓåÆ WorldSelect ──Pick World──ΓåÆ Playing
 ///      Γöé                            Γöé
-///      Γö£ΓöÇΓöÇOptionsΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓåÆ SettingsMenu ΓåÉΓöÇΓöÇΓöÉ
-///      ΓööΓöÇΓöÇQuitΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓåÆ exit            Γöé
+///      Γö£──Options──────ΓåÆ SettingsMenu ΓåÉ──ΓöÉ
+///      Γöö──Quit─────────ΓåÆ exit            Γöé
 ///                                        Γöé
-/// Playing ΓöÇΓöÇEscapeΓöÇΓöÇΓåÆ PauseMenu ΓöÇΓöÇBack to GameΓöÇΓöÇΓåÆ Playing
-///                             Γö£ΓöÇΓöÇOptionsΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓåÆ SettingsMenu
-///                             Γö£ΓöÇΓöÇSave & Quit to TitleΓöÇΓöÇΓåÆ TitleScreen
-///                             ΓööΓöÇΓöÇQuit GameΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓåÆ exit
+/// Playing ──Escape──ΓåÆ PauseMenu ──Back to Game──ΓåÆ Playing
+///                             Γö£──Options──────────────ΓåÆ SettingsMenu
+///                             Γö£──Save & Quit to Title──ΓåÆ TitleScreen
+///                             Γöö──Quit Game─────────────ΓåÆ exit
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GameState {
@@ -357,8 +357,6 @@ pub(crate) struct GamePlayState {
     // Visual polish state
     pub looked_at_block: Option<[i32; 3]>,
     pub mining_crack: Option<([i32; 3], u8)>,
-    #[allow(dead_code)]
-    pub mining_swing_timer: Option<f32>,
     pub crosshair_mode: CrosshairMode,
     // Creative inventory
     pub creative_items: Vec<CreativeItem>,
@@ -429,7 +427,6 @@ impl GamePlayState {
             creative_scroll: 0,
             looked_at_block: None,
             mining_crack: None,
-            mining_swing_timer: None,
             crosshair_mode: CrosshairMode::Default,
         }
     }
@@ -770,7 +767,7 @@ impl EngineApp {
     fn new(config: EngineConfig) -> Result<Self> {
         let world = World::new_with_path(config.seed, config.assets_path.as_deref());
         // Find a land spawn (above sea level) using the height function directly
-        // ΓÇö no chunk loading needed. Falls back to a high spawn at origin.
+        // — no chunk loading needed. Falls back to a high spawn at origin.
         let (sx, sy, sz) = world.terrain().find_spawn();
         let spawn = config
             .spawn
@@ -1100,8 +1097,10 @@ impl ApplicationHandler for EngineApp {
                 Ok(r) => {
                     self.render.window_size = (r.extent().width, r.extent().height);
                     // Populate texture pack manager from initial renderer pack info.
-                    self.texture_pack_manager.loaded_packs = r.pack_infos().iter().map(|p| {
-                        crate::TexturePackInfo {
+                    self.texture_pack_manager.loaded_packs = r
+                        .pack_infos()
+                        .iter()
+                        .map(|p| crate::TexturePackInfo {
                             name: p.name.clone(),
                             description: p.description.clone(),
                             version: p.version.clone(),
@@ -1109,8 +1108,8 @@ impl ApplicationHandler for EngineApp {
                             tile_count: p.tile_count,
                             animation_count: p.animation_count,
                             enabled: p.enabled,
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     self.render.renderer = Some(r);
                 }
                 Err(e) => {
@@ -1138,7 +1137,7 @@ impl ApplicationHandler for EngineApp {
             }
         }
 
-        // Start on the title screen ΓÇö don't lock cursor or start sim yet.
+        // Start on the title screen — don't lock cursor or start sim yet.
         // The chunk streamer runs in the background so terrain is ready
         // when the player clicks "Play".
         self.input.running = true;
@@ -1153,7 +1152,12 @@ impl ApplicationHandler for EngineApp {
         let textures_dir = self.config.render.textures_dir.clone();
         let texture_packs_dir = self.config.render.texture_packs_dir.clone();
         let config_path = self.config.config_path.clone();
-        self.hot_reload = Some(FileWatcher::new(shader_dir, textures_dir, texture_packs_dir, config_path));
+        self.hot_reload = Some(FileWatcher::new(
+            shader_dir,
+            textures_dir,
+            texture_packs_dir,
+            config_path,
+        ));
         log::info!(
             "file-watcher: active (config = {})",
             self.config.config_path.display()
@@ -1595,7 +1599,7 @@ impl ApplicationHandler for EngineApp {
                             }
                         }
                     }
-                    // Hotbar slot selection (Digit1-9) ΓÇö always hardcoded.
+                    // Hotbar slot selection (Digit1-9) — always hardcoded.
                     if pressed {
                         let slot = match code {
                             KeyCode::Digit1 => Some(0),
@@ -1827,7 +1831,7 @@ impl ApplicationHandler for EngineApp {
                 }
             }
             WindowEvent::Focused(false)
-                // Auto-pause when the window loses focus ΓÇö but not in capture
+                // Auto-pause when the window loses focus — but not in capture
                 // mode (headless verification), where the window may not have focus.
                 if self.gameplay.game_state == GameState::Playing
                     && self.config.capture_after_frames.is_none() =>
@@ -1881,13 +1885,13 @@ mod eol_invariant {
     //! Walk every `crates/**/*.rs` file (excluding `target/`) and assert:
     //!   * valid UTF-8 (catches Windows-cp1252 leaks like `0x97` em-dash
     //!     that rustc's UTF-8 reader rejects at parse time)
-    //!   * no bare `\r` byte (catches CRLF re-introduction ΓÇö Rust raw
+    //!   * no bare `\r` byte (catches CRLF re-introduction — Rust raw
     //!     strings `r"\r"` reject bare CRs at parse time)
     //!
     //! Policy is enforced at three layers:
     //!   1. `.gitattributes` (`eol=lf` on git checkout)
     //!   2. `.editorconfig` (`end_of_line = lf` at editor save time)
-    //!   3. **this test** ΓÇö runs as part of `cargo test --workspace`
+    //!   3. **this test** — runs as part of `cargo test --workspace`
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -1934,7 +1938,7 @@ mod eol_invariant {
     // do NOT switch back to legacy `\u2014` without re-validating
     // against rustc 1.96. The `mod eol_invariant` `//!` doc-comment
     // above intentionally uses raw UTF-8 em-dash bytes instead of
-    // `\u{2014}` ΓÇö doc comments don't trigger the panic-string parse
+    // `\u{2014}` — doc comments don't trigger the panic-string parse
     // state, so either form works there; lazy uniformity didn't seem
     // worth a forced refactor. `docs/notes/u2014_repro.md` records the
     // 8-case empirical matrix that drove this form choice.

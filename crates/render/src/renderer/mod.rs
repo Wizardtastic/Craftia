@@ -21,8 +21,8 @@ mod pipeline;
 mod swapchain;
 
 use device::QueueFamilies;
-use pipeline::{CameraUbo, FogUbo, ShadowUbo, SkyUbo};
 pub(crate) use pipeline::spirv_to_u32;
+use pipeline::{CameraUbo, FogUbo, ShadowUbo, SkyUbo};
 use swapchain::create_framebuffer_with;
 
 use crate::MaterialTable;
@@ -38,16 +38,16 @@ use glam::{Mat4, Vec3};
 use parking_lot::RwLock;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
-use std::path::{Path};
+use std::path::Path;
 
 use voxel_core::{
     math::{chunk_origin, ChunkPos},
     Camera, Frustum,
 };
 
-use crate::buffer::{GpuBuffer, GpuImage};
 use crate::alloc::Alloc;
-use crate::atlas::{build_atlas_with_textures, build_atlas_with_packs};
+use crate::atlas::{build_atlas_with_packs, build_atlas_with_textures};
+use crate::buffer::{GpuBuffer, GpuImage};
 use crate::texture::{begin_one_time, end_and_submit, transition_image_layout, AtlasTexture};
 use crate::ui::UiDrawData;
 
@@ -605,7 +605,10 @@ pub struct PackInfo {
 fn load_pack_mapping(
     textures_dir: &Path,
     texture_packs_dir: Option<&Path>,
-) -> (Option<std::collections::HashMap<u32, String>>, Vec<PackInfo>) {
+) -> (
+    Option<std::collections::HashMap<u32, String>>,
+    Vec<PackInfo>,
+) {
     let packs_dir = match texture_packs_dir {
         Some(d) if d.is_dir() => d,
         Some(d) => {
@@ -619,15 +622,18 @@ fn load_pack_mapping(
     };
     match voxel_asset_pipeline::texture_pack::load_all_texture_packs(packs_dir, textures_dir) {
         Ok((merged, packs)) => {
-            let pack_infos: Vec<PackInfo> = packs.iter().map(|p| PackInfo {
-                name: p.metadata().name.clone(),
-                description: p.metadata().description.clone(),
-                version: p.metadata().version.clone(),
-                author: p.metadata().author.clone(),
-                tile_count: p.metadata().tile_count,
-                animation_count: p.animations().len(),
-                enabled: true,
-            }).collect();
+            let pack_infos: Vec<PackInfo> = packs
+                .iter()
+                .map(|p| PackInfo {
+                    name: p.metadata().name.clone(),
+                    description: p.metadata().description.clone(),
+                    version: p.metadata().version.clone(),
+                    author: p.metadata().author.clone(),
+                    tile_count: p.metadata().tile_count,
+                    animation_count: p.animations().len(),
+                    enabled: true,
+                })
+                .collect();
             if !packs.is_empty() {
                 log::info!(
                     "loaded {} texture pack(s) with {} overridden tile(s)",
@@ -635,7 +641,11 @@ fn load_pack_mapping(
                     merged.len()
                 );
             }
-            let mapping = if merged.is_empty() { None } else { Some(merged) };
+            let mapping = if merged.is_empty() {
+                None
+            } else {
+                Some(merged)
+            };
             (mapping, pack_infos)
         }
         Err(e) => {
@@ -697,13 +707,18 @@ impl Renderer {
         // The textures directory must exist and contain a textures.toml
         // config. If it doesn't, all tiles show the blue+black error pattern.
         let (pack_mapping, initial_pack_infos) = load_pack_mapping(
-            config.textures_dir.as_deref().unwrap_or_else(|| Path::new("")),
+            config
+                .textures_dir
+                .as_deref()
+                .unwrap_or_else(|| Path::new("")),
             config.texture_packs_dir.as_deref(),
         );
         let atlas_pixels = match config.textures_dir.as_deref() {
-            Some(dir) if dir.is_dir() => {
-                build_atlas_with_packs(dir, pack_mapping.as_ref(), config.texture_packs_dir.as_deref())
-            }
+            Some(dir) if dir.is_dir() => build_atlas_with_packs(
+                dir,
+                pack_mapping.as_ref(),
+                config.texture_packs_dir.as_deref(),
+            ),
             _ => {
                 log::warn!(
                     "no textures_dir configured or directory not found — all tiles will show error pattern"
@@ -738,14 +753,12 @@ impl Renderer {
 
         // --- descriptor set layout + pool + fog UBO ---
         let descriptor_set_layout = pipeline::create_descriptor_set_layout(&device)?;
-        let tile_remap_set_layout =
-            pipeline::create_tile_remap_descriptor_set_layout(&device)?;
+        let tile_remap_set_layout = pipeline::create_tile_remap_descriptor_set_layout(&device)?;
         // `max_sets = FRAMES_IN_FLIGHT * 2`: each frame in flight now has
         // TWO descriptor sets — the chunk material set (binding 0..8) and
         // the new tile_remap set (set 1 binding 0). Both are allocated from
         // the same pool.
-        let descriptor_pool =
-            pipeline::create_descriptor_pool(&device, FRAMES_IN_FLIGHT * 2)?;
+        let descriptor_pool = pipeline::create_descriptor_pool(&device, FRAMES_IN_FLIGHT * 2)?;
         let tile_remap_descriptor_sets = pipeline::allocate_descriptor_sets(
             &device,
             descriptor_pool,
@@ -776,41 +789,43 @@ impl Renderer {
         // Flush the init write so the first frame sees valid fog data.
         if let Err(e) = fog_ubo.flush_whole(&device) {
             log::warn!("fog_ubo init flush failed: {e}");
-        }            // Tile material lookup table: the descriptor binding 5 the chunk
-            // shader uses for leaves SSS, wet-edge tint, sun caustics, and (later)
-            // glass tinted absorption. Host-visible; the engine pushes a fresh
-            // table each frame via `set_tile_material_table`.
-            let tile_material_ubo = GpuBuffer::host_visible(
-                &device,
-                &alloc,
-                MaterialTable::SIZE_BYTES as vk::DeviceSize,
-                vk::BufferUsageFlags::UNIFORM_BUFFER,
-                "tile_material_ubo",
-            )?;
-            // Deliberately NOT seeding the UBO here. The first frame's flush
-            // will write whatever the engine pushed (defaulting to
-            // MaterialTable::empty() if nothing was pushed yet). This avoids
-            // the "init seeds zeros + first flush overwrites" double-upload
-            // on frame 0.
+        } // Tile material lookup table: the descriptor binding 5 the chunk
+          // shader uses for leaves SSS, wet-edge tint, sun caustics, and (later)
+          // glass tinted absorption. Host-visible; the engine pushes a fresh
+          // table each frame via `set_tile_material_table`.
+        let tile_material_ubo = GpuBuffer::host_visible(
+            &device,
+            &alloc,
+            MaterialTable::SIZE_BYTES as vk::DeviceSize,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            "tile_material_ubo",
+        )?;
+        // Deliberately NOT seeding the UBO here. The first frame's flush
+        // will write whatever the engine pushed (defaulting to
+        // MaterialTable::empty() if nothing was pushed yet). This avoids
+        // the "init seeds zeros + first flush overwrites" double-upload
+        // on frame 0.
 
         // --- render pass ---
         // We need the swapchain before framebuffers, and the render pass before
         // the pipeline. Build swapchain first.
-        let (swapchain, swapchain_images, swapchain_format, swapchain_extent) = swapchain::create_swapchain(
-            &device,
-            &swapchain_device,
-            &surface_instance,
-            physical_device,
-            surface,
-            config.vsync,
-        )?;
+        let (swapchain, swapchain_images, swapchain_format, swapchain_extent) =
+            swapchain::create_swapchain(
+                &device,
+                &swapchain_device,
+                &surface_instance,
+                physical_device,
+                surface,
+                config.vsync,
+            )?;
         let swapchain_image_views =
             swapchain::create_image_views(&device, &swapchain_images, swapchain_format)?;
 
         let depth_format = device::find_depth_format(&instance, physical_device);
 
         // Resolve the requested MSAA sample count against what the device supports.
-        let msaa_samples = init::resolve_msaa_samples(&instance, physical_device, config.msaa_samples);
+        let msaa_samples =
+            init::resolve_msaa_samples(&instance, physical_device, config.msaa_samples);
         if msaa_samples != vk::SampleCountFlags::TYPE_1 {
             log::info!("MSAA {:?} enabled", msaa_samples);
         }
@@ -898,8 +913,7 @@ impl Renderer {
         // sets (allocated just below) can reference the set layout, and so
         // `create_particle_pipeline` later in this function can reference the
         // pipeline layout.
-        let particle_depth_set_layout =
-            pipeline::create_particle_descriptor_set_layout(&device)?;
+        let particle_depth_set_layout = pipeline::create_particle_descriptor_set_layout(&device)?;
         let particle_pipeline_layout = pipeline::create_particle_pipeline_layout(
             &device,
             descriptor_set_layout,
@@ -938,18 +952,16 @@ impl Renderer {
         let particle_depth_pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(FRAMES_IN_FLIGHT as u32)
             .pool_sizes(&particle_depth_pool_sizes);
-        let particle_depth_descriptor_pool = unsafe {
-            device.create_descriptor_pool(&particle_depth_pool_info, None)
-        }
-        .map_err(|e| anyhow!("create_particle_depth_descriptor_pool: {e:?}"))?;
+        let particle_depth_descriptor_pool =
+            unsafe { device.create_descriptor_pool(&particle_depth_pool_info, None) }
+                .map_err(|e| anyhow!("create_particle_depth_descriptor_pool: {e:?}"))?;
         let particle_depth_set_layouts_ref = [particle_depth_set_layout];
         let particle_depth_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(particle_depth_descriptor_pool)
             .set_layouts(&particle_depth_set_layouts_ref);
-        let particle_depth_descriptor_sets = unsafe {
-            device.allocate_descriptor_sets(&particle_depth_alloc_info)
-        }
-        .map_err(|e| anyhow!("allocate_particle_depth_descriptor_sets: {e:?}"))?;
+        let particle_depth_descriptor_sets =
+            unsafe { device.allocate_descriptor_sets(&particle_depth_alloc_info) }
+                .map_err(|e| anyhow!("allocate_particle_depth_descriptor_sets: {e:?}"))?;
         // Use MSAA depth view for particle input when MSAA is active.
         let particle_depth_view = if msaa_samples != vk::SampleCountFlags::TYPE_1 {
             msaa_depth_img.as_ref().unwrap().view
@@ -1035,8 +1047,13 @@ impl Renderer {
         };
         let shadow_render_pass = pipeline::create_shadow_render_pass(&device, depth_format)?;
         let shadow_pipeline_layout = pipeline::create_shadow_pipeline_layout(&device)?;
-        let shadow_pipeline =
-            pipeline::create_shadow_pipeline(&device, shadow_render_pass, shadow_pipeline_layout, &shadow_vert_spirv, &shadow_frag_spirv)?;
+        let shadow_pipeline = pipeline::create_shadow_pipeline(
+            &device,
+            shadow_render_pass,
+            shadow_pipeline_layout,
+            &shadow_vert_spirv,
+            &shadow_frag_spirv,
+        )?;
         let shadow_image = GpuImage::depth_array(
             &device,
             &alloc,
@@ -1046,7 +1063,9 @@ impl Renderer {
             "shadow_map",
         )?;
         let shadow_layer_views: Vec<vk::ImageView> = (0..4u32)
-            .map(|i| pipeline::create_shadow_layer_view(&device, shadow_image.image, depth_format, i))
+            .map(|i| {
+                pipeline::create_shadow_layer_view(&device, shadow_image.image, depth_format, i)
+            })
             .collect::<Result<Vec<_>>>()?;
         let shadow_sampler = unsafe {
             device.create_sampler(
@@ -1328,12 +1347,20 @@ impl Renderer {
             .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
         let ui_descriptor_pool = unsafe { device.create_descriptor_pool(&ui_pool_info, None) }
             .map_err(|e| anyhow!("create_ui_descriptor_pool: {e:?}"))?;
-        let ui_descriptor_set =
-            pipeline::allocate_ui_descriptor_set(&device, ui_descriptor_pool, ui_descriptor_set_layout)?;
+        let ui_descriptor_set = pipeline::allocate_ui_descriptor_set(
+            &device,
+            ui_descriptor_pool,
+            ui_descriptor_set_layout,
+        )?;
 
         // Create a placeholder minimap texture (256×256, will be uploaded later).
         let minimap_texture = crate::dynamic_texture::DynamicAtlasTexture::new(
-            &device, &alloc, command_pool, graphics_queue, 256, 256,
+            &device,
+            &alloc,
+            command_pool,
+            graphics_queue,
+            256,
+            256,
         )?;
 
         pipeline::update_ui_descriptor_set(
@@ -1346,8 +1373,16 @@ impl Renderer {
             minimap_texture.view,
             minimap_texture.sampler,
         );
-        let ui_pipeline_layout = pipeline::create_ui_pipeline_layout(&device, ui_descriptor_set_layout)?;
-        let ui_pipeline = pipeline::create_ui_pipeline(&device, render_pass, ui_pipeline_layout, &ui_vert_spirv, &ui_frag_spirv, msaa_samples)?;
+        let ui_pipeline_layout =
+            pipeline::create_ui_pipeline_layout(&device, ui_descriptor_set_layout)?;
+        let ui_pipeline = pipeline::create_ui_pipeline(
+            &device,
+            render_pass,
+            ui_pipeline_layout,
+            &ui_vert_spirv,
+            &ui_frag_spirv,
+            msaa_samples,
+        )?;
 
         // Persistent host-visible buffers for UI vertices/indices (re-uploaded
         // each frame). 256 KB each is way more than a simple HUD needs.
@@ -1404,13 +1439,24 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&sky_buf_infos)];
         unsafe { device.update_descriptor_sets(&sky_writes, &[]) };
-        let sky_pipeline_layout = pipeline::create_sky_pipeline_layout(&device, sky_descriptor_set_layout)?;
-        let sky_pipeline = pipeline::create_sky_pipeline(&device, render_pass, sky_pipeline_layout, &sky_vert_spirv, &sky_frag_spirv, msaa_samples)?;
+        let sky_pipeline_layout =
+            pipeline::create_sky_pipeline_layout(&device, sky_descriptor_set_layout)?;
+        let sky_pipeline = pipeline::create_sky_pipeline(
+            &device,
+            render_pass,
+            sky_pipeline_layout,
+            &sky_vert_spirv,
+            &sky_frag_spirv,
+            msaa_samples,
+        )?;
 
         // Panorama pipeline (title screen cubemap)
-        let panorama_vert_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/panorama.vert.spv")).to_vec();
-        let panorama_frag_spirv: Vec<u8> = include_bytes!(concat!(env!("OUT_DIR"), "/panorama.frag.spv")).to_vec();
-        let panorama_descriptor_set_layout = pipeline::create_panorama_descriptor_set_layout(&device)?;
+        let panorama_vert_spirv: Vec<u8> =
+            include_bytes!(concat!(env!("OUT_DIR"), "/panorama.vert.spv")).to_vec();
+        let panorama_frag_spirv: Vec<u8> =
+            include_bytes!(concat!(env!("OUT_DIR"), "/panorama.frag.spv")).to_vec();
+        let panorama_descriptor_set_layout =
+            pipeline::create_panorama_descriptor_set_layout(&device)?;
         let panorama_pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: 1,
@@ -1419,8 +1465,9 @@ impl Renderer {
             .pool_sizes(&panorama_pool_sizes)
             .max_sets(1)
             .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
-        let panorama_descriptor_pool = unsafe { device.create_descriptor_pool(&panorama_pool_info, None) }
-            .map_err(|e| anyhow!("create_panorama_descriptor_pool: {e:?}"))?;
+        let panorama_descriptor_pool =
+            unsafe { device.create_descriptor_pool(&panorama_pool_info, None) }
+                .map_err(|e| anyhow!("create_panorama_descriptor_pool: {e:?}"))?;
         let panorama_layouts = [panorama_descriptor_set_layout];
         let panorama_alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(panorama_descriptor_pool)
@@ -1431,7 +1478,13 @@ impl Renderer {
 
         // Try to load panorama cubemap from assets/textures/panorama/.
         let panorama_dir = std::path::Path::new("assets/textures/panorama");
-        let panorama = crate::panorama::Panorama::load(&device, &alloc, command_pool, graphics_queue, panorama_dir);
+        let panorama = crate::panorama::Panorama::load(
+            &device,
+            &alloc,
+            command_pool,
+            graphics_queue,
+            panorama_dir,
+        );
 
         // Create a 1x1 placeholder cubemap if panorama didn't load (so the
         // descriptor set always has a valid image view bound). The
@@ -1451,7 +1504,11 @@ impl Renderer {
             let placeholder_create = vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(vk::Format::R8G8B8A8_UNORM)
-                .extent(vk::Extent3D { width: 1, height: 1, depth: 1 })
+                .extent(vk::Extent3D {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                })
                 .mip_levels(1)
                 .array_layers(6)
                 .samples(vk::SampleCountFlags::TYPE_1)
@@ -1462,22 +1519,35 @@ impl Renderer {
             let placeholder_img = unsafe { device.create_image(&placeholder_create, None) }
                 .map_err(|e| anyhow!("panorama placeholder image: {e:?}"))?;
             let req = unsafe { device.get_image_memory_requirements(placeholder_img) };
-            let placeholder_alloc = alloc.allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
-                name: "panorama_placeholder",
-                requirements: req,
-                location: MemoryLocation::GpuOnly,
-                linear: false,
-                allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
-            })?;
+            let placeholder_alloc =
+                alloc.allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
+                    name: "panorama_placeholder",
+                    requirements: req,
+                    location: MemoryLocation::GpuOnly,
+                    linear: false,
+                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+                })?;
             unsafe {
-                device.bind_image_memory(placeholder_img, placeholder_alloc.memory(), placeholder_alloc.offset())
+                device
+                    .bind_image_memory(
+                        placeholder_img,
+                        placeholder_alloc.memory(),
+                        placeholder_alloc.offset(),
+                    )
                     .map_err(|e| anyhow!("panorama placeholder bind: {e:?}"))?;
             }
             // Transition to SHADER_READ.
             let cmd_ph = begin_one_time(&device, command_pool)?;
-            transition_image_layout(&device, cmd_ph, placeholder_img,
-                vk::ImageLayout::UNDEFINED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::ImageAspectFlags::COLOR, 1, 6);
+            transition_image_layout(
+                &device,
+                cmd_ph,
+                placeholder_img,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageAspectFlags::COLOR,
+                1,
+                6,
+            );
             end_and_submit(&device, command_pool, graphics_queue, cmd_ph)?;
 
             let view_info = vk::ImageViewCreateInfo::default()
@@ -1486,8 +1556,10 @@ impl Renderer {
                 .format(vk::Format::R8G8B8A8_UNORM)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0, level_count: 1,
-                    base_array_layer: 0, layer_count: 6,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 6,
                 });
             let placeholder_view = unsafe { device.create_image_view(&view_info, None) }
                 .map_err(|e| anyhow!("panorama placeholder view: {e:?}"))?;
@@ -1522,15 +1594,50 @@ impl Renderer {
             .image_info(&panorama_img_infos)];
         unsafe { device.update_descriptor_sets(&panorama_writes, &[]) };
 
-        let panorama_pipeline_layout = pipeline::create_panorama_pipeline_layout(&device, panorama_descriptor_set_layout)?;
-        let panorama_pipeline = pipeline::create_panorama_pipeline(&device, render_pass, panorama_pipeline_layout, &panorama_vert_spirv, &panorama_frag_spirv, msaa_samples)?;
+        let panorama_pipeline_layout =
+            pipeline::create_panorama_pipeline_layout(&device, panorama_descriptor_set_layout)?;
+        let panorama_pipeline = pipeline::create_panorama_pipeline(
+            &device,
+            render_pass,
+            panorama_pipeline_layout,
+            &panorama_vert_spirv,
+            &panorama_frag_spirv,
+            msaa_samples,
+        )?;
 
         // Entity pipeline (shares chunk descriptor set layout).
-        let entity_pipeline_layout = crate::entity::create_entity_pipeline_layout(&device, descriptor_set_layout)?;
-        let entity_pipeline = crate::entity::create_entity_pipeline(&device, render_pass, entity_pipeline_layout, &entity_vert_spirv, &entity_frag_spirv, msaa_samples)?;
-        let entity_vbo = GpuBuffer::host_visible(&device, &alloc, 64 * 1024, vk::BufferUsageFlags::VERTEX_BUFFER, "entity_vbo")?;
-        let entity_ibo = GpuBuffer::host_visible(&device, &alloc, 64 * 1024, vk::BufferUsageFlags::INDEX_BUFFER, "entity_ibo")?;
-        let entity_held_pipeline = crate::entity::create_held_item_pipeline(&device, render_pass, entity_pipeline_layout, &entity_vert_spirv, &entity_frag_spirv, msaa_samples)?;
+        let entity_pipeline_layout =
+            crate::entity::create_entity_pipeline_layout(&device, descriptor_set_layout)?;
+        let entity_pipeline = crate::entity::create_entity_pipeline(
+            &device,
+            render_pass,
+            entity_pipeline_layout,
+            &entity_vert_spirv,
+            &entity_frag_spirv,
+            msaa_samples,
+        )?;
+        let entity_vbo = GpuBuffer::host_visible(
+            &device,
+            &alloc,
+            64 * 1024,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "entity_vbo",
+        )?;
+        let entity_ibo = GpuBuffer::host_visible(
+            &device,
+            &alloc,
+            64 * 1024,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            "entity_ibo",
+        )?;
+        let entity_held_pipeline = crate::entity::create_held_item_pipeline(
+            &device,
+            render_pass,
+            entity_pipeline_layout,
+            &entity_vert_spirv,
+            &entity_frag_spirv,
+            msaa_samples,
+        )?;
 
         // ── Particle pipeline (subpass 1) ──
         // Uses the dedicated particle pipeline layout created earlier in this
@@ -1548,7 +1655,8 @@ impl Renderer {
         // cap so we never overflow. Host-visible (no staging needed; we
         // rebuild contents each frame and the GPU reads on the same frame).
         let particle_instance_size: vk::DeviceSize = (crate::particle::MAX_PARTICLES
-            * std::mem::size_of::<crate::particle::ParticleInstance>()) as vk::DeviceSize;
+            * std::mem::size_of::<crate::particle::ParticleInstance>())
+            as vk::DeviceSize;
         let particle_instance_vbo = GpuBuffer::host_visible(
             &device,
             &alloc,
@@ -1557,12 +1665,30 @@ impl Renderer {
             "particle_instance_vbo",
         )?;
         let overlay_pipeline_layout = crate::overlay::create_overlay_pipeline_layout(&device)?;
-        let overlay_pipeline = crate::overlay::create_overlay_pipeline(&device, render_pass, overlay_pipeline_layout, &overlay_vert_spirv, &overlay_frag_spirv, msaa_samples)?;
-        let overlay_vbo = GpuBuffer::host_visible(&device, &alloc, 8192 * 16, vk::BufferUsageFlags::VERTEX_BUFFER, "overlay_vbo")?;
+        let overlay_pipeline = crate::overlay::create_overlay_pipeline(
+            &device,
+            render_pass,
+            overlay_pipeline_layout,
+            &overlay_vert_spirv,
+            &overlay_frag_spirv,
+            msaa_samples,
+        )?;
+        let overlay_vbo = GpuBuffer::host_visible(
+            &device,
+            &alloc,
+            8192 * 16,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "overlay_vbo",
+        )?;
 
         // -- Occlusion culling init --
         let occlusion_pipeline = pipeline::create_occlusion_pipeline(
-            &device, render_pass, pipeline_layout, &aabb_vert_spirv, &aabb_frag_spirv, msaa_samples,
+            &device,
+            render_pass,
+            pipeline_layout,
+            &aabb_vert_spirv,
+            &aabb_frag_spirv,
+            msaa_samples,
         )?;
         let aabb_index_buffer = pipeline::create_aabb_index_buffer(&device, &alloc)?;
 
@@ -1583,14 +1709,17 @@ impl Renderer {
                 used_queries: Vec::new(),
             });
         }
-        log::info!("occlusion culling: {} queries per frame", MAX_OCCLUSION_QUERIES);
+        log::info!(
+            "occlusion culling: {} queries per frame",
+            MAX_OCCLUSION_QUERIES
+        );
 
         // â”€â”€ Post pass init â”€â”€
         let post_render_pass = pipeline::create_post_render_pass(&device, swapchain_format)?;
         let post_descriptor_set_layout = pipeline::create_post_descriptor_set_layout(&device)?;
         let post_pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: swapchain_images.len() as u32 * 2,  // scene_color + depth (SSAO)
+            descriptor_count: swapchain_images.len() as u32 * 2, // scene_color + depth (SSAO)
         }];
         let post_pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&post_pool_sizes)
@@ -1676,7 +1805,13 @@ impl Renderer {
         }
         let post_pipeline_layout =
             pipeline::create_post_pipeline_layout(&device, post_descriptor_set_layout)?;
-        let post_pipeline = pipeline::create_post_pipeline(&device, post_render_pass, post_pipeline_layout, &post_vert_spirv, &post_frag_spirv)?;
+        let post_pipeline = pipeline::create_post_pipeline(
+            &device,
+            post_render_pass,
+            post_pipeline_layout,
+            &post_vert_spirv,
+            &post_frag_spirv,
+        )?;
         let post_framebuffers: Vec<vk::Framebuffer> = swapchain_image_views
             .iter()
             .map(|&view| {
@@ -1695,11 +1830,7 @@ impl Renderer {
         // Initial reset for the timestamp pool — required before the first
         // vkGetQueryPoolResults call (VUID-vkGetQueryPoolResults-None-09401).
         unsafe {
-            device.reset_query_pool(
-                query_pool,
-                0,
-                GPU_TIMESTAMP_COUNT * FRAMES_IN_FLIGHT as u32,
-            )
+            device.reset_query_pool(query_pool, 0, GPU_TIMESTAMP_COUNT * FRAMES_IN_FLIGHT as u32)
         };
 
         // Capture config fields referenced *after* the `config,` shorthand
@@ -1710,8 +1841,14 @@ impl Renderer {
         // `device`/`alloc` (moved into Self below) are still borrowable.
         let gpu_driven = if config.gpu_driven {
             match indirect::GpuDriven::new(
-                &device, &alloc, render_pass, descriptor_set_layout, msaa_samples,
-                config.gpu_meshing, command_pool, graphics_queue,
+                &device,
+                &alloc,
+                render_pass,
+                descriptor_set_layout,
+                msaa_samples,
+                config.gpu_meshing,
+                command_pool,
+                graphics_queue,
             ) {
                 Ok(g) => Some(g),
                 Err(e) => {
@@ -1757,15 +1894,21 @@ impl Renderer {
             tile_remap_set_layout,
             command_pool,
             atlas,
-            chunk_vert_spirv, chunk_frag_spirv,
+            chunk_vert_spirv,
+            chunk_frag_spirv,
             tile_material_ubo,
             pending_material_table: MaterialTable::empty(),
             material_table_dirty: true,
-            ui_vert_spirv, ui_frag_spirv,
-            sky_vert_spirv, sky_frag_spirv,
-            shadow_vert_spirv, shadow_frag_spirv,
-            post_vert_spirv, post_frag_spirv,
-            entity_vert_spirv, entity_frag_spirv,
+            ui_vert_spirv,
+            ui_frag_spirv,
+            sky_vert_spirv,
+            sky_frag_spirv,
+            shadow_vert_spirv,
+            shadow_frag_spirv,
+            post_vert_spirv,
+            post_frag_spirv,
+            entity_vert_spirv,
+            entity_frag_spirv,
             fog_ubo,
             ui_pipeline,
             ui_pipeline_layout,
@@ -1903,19 +2046,23 @@ impl Renderer {
     /// the chunk + UI descriptor sets in place. Safe to call repeatedly;
     /// failures leave the existing atlas untouched.
     pub fn reload_atlas(&mut self) -> Result<()> {
-        unsafe { self.device.device_wait_idle()?; }
+        unsafe {
+            self.device.device_wait_idle()?;
+        }
         let dir: &Path = self
             .config
             .textures_dir
             .as_deref()
             .filter(|d| d.is_dir())
             .unwrap_or_else(|| Path::new(""));
-        let (pack_mapping, pack_infos) = load_pack_mapping(
+        let (pack_mapping, pack_infos) =
+            load_pack_mapping(dir, self.config.texture_packs_dir.as_deref());
+        self.loaded_pack_infos = pack_infos;
+        let atlas_pixels = build_atlas_with_packs(
             dir,
+            pack_mapping.as_ref(),
             self.config.texture_packs_dir.as_deref(),
         );
-        self.loaded_pack_infos = pack_infos;
-        let atlas_pixels = build_atlas_with_packs(dir, pack_mapping.as_ref(), self.config.texture_packs_dir.as_deref());
         let new_atlas = AtlasTexture::new(
             &self.device,
             &self.alloc,
@@ -1966,7 +2113,9 @@ impl Renderer {
     /// require a full re-init (vsync, validation, swapchain dimensions) are
     /// logged but not changed - those need a restart.
     pub fn reload_config(&mut self, new_config: &RendererConfig) -> Result<()> {
-        unsafe { self.device.device_wait_idle()?; }
+        unsafe {
+            self.device.device_wait_idle()?;
+        }
         let textures_changed = new_config.textures_dir != self.config.textures_dir;
         let packs_changed = new_config.texture_packs_dir != self.config.texture_packs_dir;
         let fog_changed = new_config.fog_color != self.config.fog_color
@@ -2015,7 +2164,9 @@ impl Renderer {
         let src = dir.join(name);
         let bytes = crate::hot_reload::compile_shader(&src)
             .with_context(|| format!("reload_shader({name})"))?;
-        unsafe { self.device.device_wait_idle()?; }
+        unsafe {
+            self.device.device_wait_idle()?;
+        }
         match name {
             "chunk.vert" => {
                 self.chunk_vert_spirv = bytes;
@@ -2060,9 +2211,7 @@ impl Renderer {
             _ => Err(anyhow!("reload_shader: unknown shader family for {name}")),
         }
         .map(|_| {
-            log::info!(
-                "reload_shader({name}) ok: pipeline(s) recreated; expect 1 frame stutter"
-            );
+            log::info!("reload_shader({name}) ok: pipeline(s) recreated; expect 1 frame stutter");
         })
     }
 
@@ -2070,7 +2219,8 @@ impl Renderer {
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline(self.wireframe_pipeline, None);
-            self.device.destroy_pipeline(self.transparent_pipeline, None);
+            self.device
+                .destroy_pipeline(self.transparent_pipeline, None);
         }
         self.pipeline = vk::Pipeline::null();
         self.wireframe_pipeline = vk::Pipeline::null();
@@ -2275,7 +2425,6 @@ impl Renderer {
             self.material_table_dirty = false;
         }
 
-
         // Fog UBO
         let (fog_color, ambient_val) = if self.sky_underwater {
             ([0.05, 0.15, 0.35], self.sky_ambient * 0.6)
@@ -2323,8 +2472,18 @@ impl Renderer {
         // reflected rays; near/far come from `proj_params` (set via
         // `set_proj_params` each frame by the engine).
         let refl_data = pipeline::ReflectionUbo {
-            sky_horizon: [self.sky_horizon[0], self.sky_horizon[1], self.sky_horizon[2], 1.0],
-            sky_zenith: [self.sky_zenith[0], self.sky_zenith[1], self.sky_zenith[2], 1.0],
+            sky_horizon: [
+                self.sky_horizon[0],
+                self.sky_horizon[1],
+                self.sky_horizon[2],
+                1.0,
+            ],
+            sky_zenith: [
+                self.sky_zenith[0],
+                self.sky_zenith[1],
+                self.sky_zenith[2],
+                1.0,
+            ],
             sun_dir_str: [
                 self.sun_dir[0],
                 self.sun_dir[1],
@@ -2363,12 +2522,10 @@ impl Renderer {
     /// Upload new RGBA pixel data to the minimap GPU texture.
     /// `data.len()` must equal `width * height * 4` (currently 256×256 = 262144 bytes).
     pub fn upload_minimap_texture(&mut self, data: &[u8]) {
-        if let Err(e) = self.minimap_texture.upload(
-            data,
-            &self.device,
-            self.command_pool,
-            self.graphics_queue,
-        ) {
+        if let Err(e) =
+            self.minimap_texture
+                .upload(data, &self.device, self.command_pool, self.graphics_queue)
+        {
             log::warn!("upload_minimap_texture: {e}");
         }
     }
@@ -2438,7 +2595,9 @@ impl Renderer {
                     // primary cmds still in RECORDING after `begin_command_buffer`.
                     // An un-endable cmd is reset to INITIAL via pool reset.
                     let _ = unsafe { device.end_command_buffer(cmd) };
-                    unsafe { device.free_command_buffers(pool, &[cmd]); }
+                    unsafe {
+                        device.free_command_buffers(pool, &[cmd]);
+                    }
                     continue;
                 }
             };
@@ -2447,7 +2606,9 @@ impl Renderer {
                 log::error!("staging vertex upload: {e}");
                 staging.destroy(device, alloc);
                 let _ = unsafe { device.end_command_buffer(cmd) };
-                unsafe { device.free_command_buffers(pool, &[cmd]); }
+                unsafe {
+                    device.free_command_buffers(pool, &[cmd]);
+                }
                 continue;
             }
             // Copy indices after vertices in the staging buffer. We bypass
@@ -2465,7 +2626,9 @@ impl Renderer {
                         log::error!("staging map: {e}");
                         staging.destroy(device, alloc);
                         let _ = unsafe { device.end_command_buffer(cmd) };
-                        unsafe { device.free_command_buffers(pool, &[cmd]); }
+                        unsafe {
+                            device.free_command_buffers(pool, &[cmd]);
+                        }
                         continue;
                     }
                 };
@@ -2487,7 +2650,9 @@ impl Renderer {
                     log::error!("vbo alloc: {e}");
                     staging.destroy(device, alloc);
                     let _ = unsafe { device.end_command_buffer(cmd) };
-                    unsafe { device.free_command_buffers(pool, &[cmd]); }
+                    unsafe {
+                        device.free_command_buffers(pool, &[cmd]);
+                    }
                     continue;
                 }
             };
@@ -2504,7 +2669,9 @@ impl Renderer {
                     staging.destroy(device, alloc);
                     vbo.destroy(device, alloc);
                     let _ = unsafe { device.end_command_buffer(cmd) };
-                    unsafe { device.free_command_buffers(pool, &[cmd]); }
+                    unsafe {
+                        device.free_command_buffers(pool, &[cmd]);
+                    }
                     continue;
                 }
             };
@@ -2693,12 +2860,20 @@ impl Renderer {
     /// border). Dispatches the compute mesher and inserts the result into the
     /// mega VBO/IBO. No-op (returns false) if GPU meshing is disabled.
     pub fn upload_chunk_gpu_mesh(
-        &mut self, pos: voxel_core::ChunkPos, pass: MeshPass, voxels: &[u16],
+        &mut self,
+        pos: voxel_core::ChunkPos,
+        pass: MeshPass,
+        voxels: &[u16],
     ) -> bool {
         if let Some(gpu) = self.gpu_driven.as_mut() {
             return gpu.upload_chunk_gpu_mesh(
-                &self.device, &self.alloc, self.command_pool, self.graphics_queue,
-                pos, pass, voxels,
+                &self.device,
+                &self.alloc,
+                self.command_pool,
+                self.graphics_queue,
+                pos,
+                pass,
+                voxels,
             );
         }
         false
@@ -2738,11 +2913,7 @@ impl Renderer {
             return;
         }
         unsafe {
-            device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.overlay_pipeline,
-            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.overlay_pipeline);
             let vbo = [self.overlay_vbo.buffer];
             device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
             let push = crate::overlay::OverlayPushConstants {
@@ -2856,8 +3027,7 @@ impl Renderer {
                             // handles before passing to Vulkan FFI.
                             let cmd_handle = *cmd;
                             let fence_handle = *fence;
-                            if let Err(e) =
-                                device.wait_for_fences(&[fence_handle], true, u64::MAX)
+                            if let Err(e) = device.wait_for_fences(&[fence_handle], true, u64::MAX)
                             {
                                 log::warn!(
                                     "pending destroy: wait_for_fences(upload) failed: {e:?}"
@@ -2900,7 +3070,14 @@ impl Renderer {
         let frame_idx = self.frame_counter % FRAMES_IN_FLIGHT;
         // Copy out the per-frame handles (all `Copy`) so we don't hold an
         // immutable borrow of `self.frames` across the mutable UBO update below.
-        let (cmd, in_flight_fence, image_available, render_finished, descriptor_set, tile_remap_descriptor_set) = {
+        let (
+            cmd,
+            in_flight_fence,
+            image_available,
+            render_finished,
+            descriptor_set,
+            tile_remap_descriptor_set,
+        ) = {
             let f = &self.frames[frame_idx];
             (
                 f.cmd,
@@ -2938,36 +3115,37 @@ impl Renderer {
             // frame whose timestamps to read, and querying uninitialised
             // pool slots trips VUID-vkGetQueryPoolResults-None-09401 even
             // when the pool was host-reset at startup.
-            let prev_offset = (((frame_idx + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT) as u32) * GPU_TIMESTAMP_COUNT;
+            let prev_offset = (((frame_idx + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT) as u32)
+                * GPU_TIMESTAMP_COUNT;
             if frame_idx > 0 {
                 let mut timestamps = [0u64; GPU_TIMESTAMP_COUNT as usize];
-            // WAIT flag: blocks the CPU until the GPU has finished processing
-            // the previous frame's cmd_reset_query_pool + timestamps. Without
-            // it, frame N's readback can race the GPU and trip
-            // VUID-vkGetQueryPoolResults-None-09401 ("query not reset") on
-            // the first query of the batch.
-            let read_ok = unsafe {
-                self.device.get_query_pool_results(
-                    self.query_pool,
-                    prev_offset,
-                    &mut timestamps,
-                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
-                )
-            };
-            if let Ok(()) = read_ok {
-                let ns_to_ms = self.timestamp_period / 1_000_000.0;
-                let t = &timestamps;
-                self.timings = GpuTimings {
-                    shadow_ms: (t[1] - t[0]) as f32 * ns_to_ms,
-                    sky_ms: (t[2] - t[1]) as f32 * ns_to_ms,
-                    opaque_ms: (t[3] - t[2]) as f32 * ns_to_ms,
-                    transparent_ms: (t[4] - t[3]) as f32 * ns_to_ms,
-                    ui_ms: (t[5] - t[4]) as f32 * ns_to_ms,
-                    post_ms: (t[7] - t[6]) as f32 * ns_to_ms,
-                    frame_ms: (t[7] - t[0]) as f32 * ns_to_ms,
+                // WAIT flag: blocks the CPU until the GPU has finished processing
+                // the previous frame's cmd_reset_query_pool + timestamps. Without
+                // it, frame N's readback can race the GPU and trip
+                // VUID-vkGetQueryPoolResults-None-09401 ("query not reset") on
+                // the first query of the batch.
+                let read_ok = unsafe {
+                    self.device.get_query_pool_results(
+                        self.query_pool,
+                        prev_offset,
+                        &mut timestamps,
+                        vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                    )
                 };
-            }
-            // On error (queries not yet available), keep previous timings.
+                if let Ok(()) = read_ok {
+                    let ns_to_ms = self.timestamp_period / 1_000_000.0;
+                    let t = &timestamps;
+                    self.timings = GpuTimings {
+                        shadow_ms: (t[1] - t[0]) as f32 * ns_to_ms,
+                        sky_ms: (t[2] - t[1]) as f32 * ns_to_ms,
+                        opaque_ms: (t[3] - t[2]) as f32 * ns_to_ms,
+                        transparent_ms: (t[4] - t[3]) as f32 * ns_to_ms,
+                        ui_ms: (t[5] - t[4]) as f32 * ns_to_ms,
+                        post_ms: (t[7] - t[6]) as f32 * ns_to_ms,
+                        frame_ms: (t[7] - t[0]) as f32 * ns_to_ms,
+                    };
+                }
+                // On error (queries not yet available), keep previous timings.
             }
         }
 
@@ -3029,7 +3207,13 @@ impl Renderer {
         // â”€â”€ Shadow pass: render chunk depth from the light's perspective â”€â”€
         self.record_shadow_pass(device, cmd, Some(query_offset + 1));
 
-        self.record_main_pass_setup(device, cmd, image_index, descriptor_set, tile_remap_descriptor_set);
+        self.record_main_pass_setup(
+            device,
+            cmd,
+            image_index,
+            descriptor_set,
+            tile_remap_descriptor_set,
+        );
 
         // Sky or panorama pass: draw background before chunks.
         if show_panorama && self.panorama.loaded {
@@ -3051,8 +3235,6 @@ impl Renderer {
                 Some(query_offset + 2),
             );
         }
-
-
 
         // Chunk passes: Phase-1 GPU-driven indirect path or legacy per-chunk loop.
         if let Some(gpu) = self.gpu_driven.as_mut() {
@@ -3186,15 +3368,18 @@ impl Renderer {
         // DEPTH_STENCIL_ATTACHMENT_OPTIMAL").
         if let Some(ref depth_img) = self.depth {
             crate::texture::transition_image_layout(
-                device, cmd, depth_img.image,
+                device,
+                cmd,
+                depth_img.image,
                 vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::ImageAspectFlags::DEPTH,
-                1, 1,
+                1,
+                1,
             );
         }
 
-                self.record_post_pass(device, cmd, image_index, Some(query_offset + 7));
+        self.record_post_pass(device, cmd, image_index, Some(query_offset + 7));
         unsafe {
             device.end_command_buffer(cmd)?;
         }
@@ -3280,7 +3465,13 @@ impl Renderer {
         // â”€â”€ Shadow pass (capture) â”€â”€
         self.record_shadow_pass(device, cmd, None);
 
-        self.record_main_pass_setup(device, cmd, image_index, self.frames[0].descriptor_set, self.frames[0].tile_remap_descriptor_set);
+        self.record_main_pass_setup(
+            device,
+            cmd,
+            image_index,
+            self.frames[0].descriptor_set,
+            self.frames[0].tile_remap_descriptor_set,
+        );
 
         // Sky or panorama pass (capture).
         if show_panorama && self.panorama.loaded {
@@ -3299,9 +3490,28 @@ impl Renderer {
         // Chunk passes: Phase-1 GPU-driven indirect path or legacy per-chunk loop.
         let chunk_ds = self.frames[0].descriptor_set;
         if let Some(gpu) = self.gpu_driven.as_mut() {
-            gpu.record(&self.device, cmd, chunk_ds, &vp_cols, game_time, camera.pos, self.query_pool, None, None);
+            gpu.record(
+                &self.device,
+                cmd,
+                chunk_ds,
+                &vp_cols,
+                game_time,
+                camera.pos,
+                self.query_pool,
+                None,
+                None,
+            );
         } else {
-            self.record_chunk_passes(&self.device, cmd, &frustum, &vp_cols, game_time, None, None, camera.pos);
+            self.record_chunk_passes(
+                &self.device,
+                cmd,
+                &frustum,
+                &vp_cols,
+                game_time,
+                None,
+                None,
+                camera.pos,
+            );
         }
 
         // â”€â”€ UI overlay pass â”€â”€
@@ -3573,7 +3783,12 @@ impl Renderer {
 
     /// Reset the occlusion query pool for the current frame and clear the
     /// used_queries list. Called at the start of command recording.
-    fn reset_occlusion_queries(&self, device: &ash::Device, cmd: vk::CommandBuffer, frame_idx: usize) {
+    fn reset_occlusion_queries(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        frame_idx: usize,
+    ) {
         if !self.occlusion_culling_enabled {
             return;
         }
@@ -3658,7 +3873,8 @@ impl Renderer {
         // across frames, which is required for correct readback mapping.
         if occlusion_enabled {
             let mut occ = self.occlusion_state.write();
-            let used: std::collections::HashSet<u32> = occ.values().map(|s| s.query_index).collect();
+            let used: std::collections::HashSet<u32> =
+                occ.values().map(|s| s.query_index).collect();
             let mut next_idx = 0u32;
             for (pos, _, _, _) in &opaque_draws {
                 if !occ.contains_key(pos) {
@@ -3666,50 +3882,51 @@ impl Renderer {
                         next_idx += 1;
                     }
                     if next_idx < MAX_OCCLUSION_QUERIES {
-                        occ.insert(*pos, OcclusionState {
-                            query_index: next_idx,
-                            was_visible: true,
-                            consecutive_invisible: 0,
-                        });
+                        occ.insert(
+                            *pos,
+                            OcclusionState {
+                                query_index: next_idx,
+                                was_visible: true,
+                                consecutive_invisible: 0,
+                            },
+                        );
                         next_idx += 1;
                     }
                 }
             }
         }
 
-
-        let issue_draw =
-            |cmd: vk::CommandBuffer,
-             pos: ChunkPos,
-             vbo_buf: vk::Buffer,
-             ibo_buf: vk::Buffer,
-             index_count: u32| {
-                let origin = chunk_origin(pos);
-                let mut push = [0f32; 24];
-                push[0] = origin.x as f32;
-                push[1] = origin.y as f32;
-                push[2] = origin.z as f32;
-                push[4..20].copy_from_slice(vp_cols);
-                push[20] = game_time;
-                unsafe {
-                    device.cmd_push_constants(
-                        cmd,
-                        self.pipeline_layout,
-                        // `self.pipeline_layout` declares the push-constant range
-                        // as VERTEX|FRAGMENT (96 B, layout.rs `create_pipeline_layout`),
-                        // so the call site must echo both stages or validation
-                        // reports VUID-VkCmdPushConstants-offset-01796 ("missing
-                        // stageFlags from the overlapping VkPushConstantRange").
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                        0,
-                        bytemuck::bytes_of(&push),
-                    );
-                    let vbo = [vbo_buf];
-                    device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
-                    device.cmd_bind_index_buffer(cmd, ibo_buf, 0, vk::IndexType::UINT32);
-                    device.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
-                }
-            };
+        let issue_draw = |cmd: vk::CommandBuffer,
+                          pos: ChunkPos,
+                          vbo_buf: vk::Buffer,
+                          ibo_buf: vk::Buffer,
+                          index_count: u32| {
+            let origin = chunk_origin(pos);
+            let mut push = [0f32; 24];
+            push[0] = origin.x as f32;
+            push[1] = origin.y as f32;
+            push[2] = origin.z as f32;
+            push[4..20].copy_from_slice(vp_cols);
+            push[20] = game_time;
+            unsafe {
+                device.cmd_push_constants(
+                    cmd,
+                    self.pipeline_layout,
+                    // `self.pipeline_layout` declares the push-constant range
+                    // as VERTEX|FRAGMENT (96 B, layout.rs `create_pipeline_layout`),
+                    // so the call site must echo both stages or validation
+                    // reports VUID-VkCmdPushConstants-offset-01796 ("missing
+                    // stageFlags from the overlapping VkPushConstantRange").
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck::bytes_of(&push),
+                );
+                let vbo = [vbo_buf];
+                device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
+                device.cmd_bind_index_buffer(cmd, ibo_buf, 0, vk::IndexType::UINT32);
+                device.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
+            }
+        };
 
         // ── Opaque pass ──
         if occlusion_enabled {
@@ -3724,8 +3941,7 @@ impl Renderer {
                 let should_draw_mesh = match state {
                     None => true, // New chunk, no query yet -> draw full mesh
                     Some(s) => {
-                        s.was_visible
-                            || s.consecutive_invisible < OCCLUSION_INVISIBLE_THRESHOLD
+                        s.was_visible || s.consecutive_invisible < OCCLUSION_INVISIBLE_THRESHOLD
                     }
                 };
 
@@ -3763,11 +3979,7 @@ impl Renderer {
                     if qi < MAX_OCCLUSION_QUERIES {
                         frame.used_queries.push(qi);
                         let origin = chunk_origin(pos);
-                        let min = Vec3::new(
-                            origin.x as f32,
-                            origin.y as f32,
-                            origin.z as f32,
-                        );
+                        let min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
                         let max = min + Vec3::splat(voxel_core::CHUNK_SIZE as f32);
                         // Push constants: min.xyz in first vec4, VP matrix, max.xyz in last vec4.
                         let mut push = [0f32; 24];
@@ -3873,11 +4085,7 @@ impl Renderer {
 
         // Bind entity pipeline and VBO.
         unsafe {
-            device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.entity_pipeline,
-            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.entity_pipeline);
             let vbo = [self.entity_vbo.buffer];
             device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
         }
@@ -3955,7 +4163,10 @@ impl Renderer {
         push[19] = 0.0;
 
         let pipeline_layout = self.particle_pipeline_layout;
-        let depth_set = match self.particle_depth_descriptor_sets.get(frame_idx % FRAMES_IN_FLIGHT) {
+        let depth_set = match self
+            .particle_depth_descriptor_sets
+            .get(frame_idx % FRAMES_IN_FLIGHT)
+        {
             Some(&set) => set,
             None => return, // Descriptor sets not ready yet, skip particle rendering.
         };
@@ -3963,11 +4174,7 @@ impl Renderer {
         let vbos = [self.entity_vbo.buffer, self.particle_instance_vbo.buffer];
         let offsets = [0u64, 0u64];
         unsafe {
-            device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.particle_pipeline,
-            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.particle_pipeline);
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -4254,8 +4461,8 @@ impl Renderer {
             // VUID-vkCmdDrawIndexed-pDescriptorSets-04616 ("set 1 out of bounds
             // for the number of sets bound").
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.active_pipeline());
-            let tile_remap_ds = self.frames[self.frame_counter % FRAMES_IN_FLIGHT]
-                .tile_remap_descriptor_set;
+            let tile_remap_ds =
+                self.frames[self.frame_counter % FRAMES_IN_FLIGHT].tile_remap_descriptor_set;
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -4313,11 +4520,7 @@ impl Renderer {
         unsafe {
             device.cmd_set_viewport(cmd, 0, &[vp]);
             device.cmd_set_scissor(cmd, 0, &[scissor]);
-            device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.panorama_pipeline,
-            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.panorama_pipeline);
             device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -4344,11 +4547,7 @@ impl Renderer {
             }
 
             // Restore chunk pipeline.
-            device.cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.active_pipeline(),
-            );
+            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.active_pipeline());
             // Bind both chunk descriptor sets: set 0 (chunk material UBO group)
             // and set 1 (tile_remap UBO). The chunk material pipeline statically
             // references both layouts — binding only set 0 trips the
@@ -4691,14 +4890,15 @@ impl Renderer {
                 .destroy_swapchain(self.swapchain, None);
         }
 
-        let (swapchain, swapchain_images, swapchain_format, swapchain_extent) = swapchain::create_swapchain(
-            &self.device,
-            &self.swapchain_device,
-            &self.surface_instance,
-            self.physical_device,
-            self.surface,
-            self.config.vsync,
-        )?;
+        let (swapchain, swapchain_images, swapchain_format, swapchain_extent) =
+            swapchain::create_swapchain(
+                &self.device,
+                &self.swapchain_device,
+                &self.surface_instance,
+                self.physical_device,
+                self.surface,
+                self.config.vsync,
+            )?;
         let swapchain_image_views =
             swapchain::create_image_views(&self.device, &swapchain_images, swapchain_format)?;
         let depth_format = device::find_depth_format(&self.instance, self.physical_device);
@@ -4752,7 +4952,7 @@ impl Renderer {
             )?;
             offscreen_images.push(img);
         }
-                let offscreen_framebuffers = if self.msaa_samples != vk::SampleCountFlags::TYPE_1 {
+        let offscreen_framebuffers = if self.msaa_samples != vk::SampleCountFlags::TYPE_1 {
             let msaa_c = self.msaa_color.as_ref().unwrap();
             let msaa_d = self.msaa_depth.as_ref().unwrap();
             let depth_resolve_active = self.depth_resolve_active;
@@ -4828,7 +5028,12 @@ impl Renderer {
                 1,
                 1,
             );
-            end_and_submit(&self.device, self.command_pool, self.graphics_queue, cmd_init)?;
+            end_and_submit(
+                &self.device,
+                self.command_pool,
+                self.graphics_queue,
+                cmd_init,
+            )?;
         }
         self.scene_opaque_color = scene_opaque_color;
         self.scene_opaque_depth = scene_opaque_depth;
@@ -4878,11 +5083,7 @@ impl Renderer {
         };
         self.depth = Some(depth);
         for &set in &self.particle_depth_descriptor_sets {
-            pipeline::update_particle_descriptor_set(
-                &self.device,
-                set,
-                particle_depth_view,
-            );
+            pipeline::update_particle_descriptor_set(&self.device, set, particle_depth_view);
         }
         self.offscreen_images = offscreen_images;
         self.offscreen_framebuffers = offscreen_framebuffers;
@@ -5027,7 +5228,7 @@ impl Renderer {
             device.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
         }
     }
-/// Slice 2 helper: copy the just-rendered main-pass color into the
+    /// Slice 2 helper: copy the just-rendered main-pass color into the
     /// `scene_opaque_color` sidecar that `TRANSLUCENT_ABSORB` reads via
     /// descriptor binding 6.
     fn record_scene_opaque_copy(
@@ -5044,45 +5245,68 @@ impl Renderer {
         };
         unsafe {
             crate::texture::transition_image_layout(
-                device, cmd, offscreen.image,
+                device,
+                cmd,
+                offscreen.image,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                vk::ImageAspectFlags::COLOR, 1, 1,
+                vk::ImageAspectFlags::COLOR,
+                1,
+                1,
             );
             crate::texture::transition_image_layout(
-                device, cmd, self.scene_opaque_color.image,
+                device,
+                cmd,
+                self.scene_opaque_color.image,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::ImageAspectFlags::COLOR, 1, 1,
+                vk::ImageAspectFlags::COLOR,
+                1,
+                1,
             );
             let copy = vk::ImageCopy::default()
                 .src_subresource(vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0, base_array_layer: 0, layer_count: 1,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
                 })
                 .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                 .dst_subresource(vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0, base_array_layer: 0, layer_count: 1,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
                 })
                 .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                 .extent(extent3d);
             device.cmd_copy_image(
-                cmd, offscreen.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                self.scene_opaque_color.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                cmd,
+                offscreen.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.scene_opaque_color.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &[copy],
             );
             crate::texture::transition_image_layout(
-                device, cmd, self.scene_opaque_color.image,
+                device,
+                cmd,
+                self.scene_opaque_color.image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::ImageAspectFlags::COLOR, 1, 1,
+                vk::ImageAspectFlags::COLOR,
+                1,
+                1,
             );
             crate::texture::transition_image_layout(
-                device, cmd, offscreen.image,
+                device,
+                cmd,
+                offscreen.image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::ImageAspectFlags::COLOR, 1, 1,
+                vk::ImageAspectFlags::COLOR,
+                1,
+                1,
             );
         }
 
@@ -5099,45 +5323,68 @@ impl Renderer {
             if let Some(ref depth_img) = self.depth {
                 unsafe {
                     crate::texture::transition_image_layout(
-                        device, cmd, depth_img.image,
+                        device,
+                        cmd,
+                        depth_img.image,
                         vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        vk::ImageAspectFlags::DEPTH, 1, 1,
+                        vk::ImageAspectFlags::DEPTH,
+                        1,
+                        1,
                     );
                     crate::texture::transition_image_layout(
-                        device, cmd, self.scene_opaque_depth.image,
+                        device,
+                        cmd,
+                        self.scene_opaque_depth.image,
                         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        vk::ImageAspectFlags::DEPTH, 1, 1,
+                        vk::ImageAspectFlags::DEPTH,
+                        1,
+                        1,
                     );
                     let depth_copy = vk::ImageCopy::default()
                         .src_subresource(vk::ImageSubresourceLayers {
                             aspect_mask: vk::ImageAspectFlags::DEPTH,
-                            mip_level: 0, base_array_layer: 0, layer_count: 1,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
                         })
                         .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                         .dst_subresource(vk::ImageSubresourceLayers {
                             aspect_mask: vk::ImageAspectFlags::DEPTH,
-                            mip_level: 0, base_array_layer: 0, layer_count: 1,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
                         })
                         .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                         .extent(extent3d);
                     device.cmd_copy_image(
-                        cmd, depth_img.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        self.scene_opaque_depth.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        cmd,
+                        depth_img.image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        self.scene_opaque_depth.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                         &[depth_copy],
                     );
                     crate::texture::transition_image_layout(
-                        device, cmd, self.scene_opaque_depth.image,
+                        device,
+                        cmd,
+                        self.scene_opaque_depth.image,
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        vk::ImageAspectFlags::DEPTH, 1, 1,
+                        vk::ImageAspectFlags::DEPTH,
+                        1,
+                        1,
                     );
                     crate::texture::transition_image_layout(
-                        device, cmd, depth_img.image,
+                        device,
+                        cmd,
+                        depth_img.image,
                         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                         vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                        vk::ImageAspectFlags::DEPTH, 1, 1,
+                        vk::ImageAspectFlags::DEPTH,
+                        1,
+                        1,
                     );
                 }
             }
@@ -5160,7 +5407,11 @@ impl Renderer {
         tile_remap_descriptor_set: vk::DescriptorSet,
         cam_pos: glam::Vec3,
     ) {
-        let any_transparent = self.chunks.read().iter().any(|(_, b)| b.transparent.is_some());
+        let any_transparent = self
+            .chunks
+            .read()
+            .iter()
+            .any(|(_, b)| b.transparent.is_some());
         if !any_transparent {
             // No transparent draws this frame. The scene_opaque copy restored
             // the offscreen image to COLOR_ATTACHMENT_OPTIMAL in anticipation
@@ -5210,7 +5461,9 @@ impl Renderer {
         }
         draws.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
 
-        let clear_values = [vk::ClearValue { color: vk::ClearColorValue { float32: [0.0; 4] } }];
+        let clear_values = [vk::ClearValue {
+            color: vk::ClearColorValue { float32: [0.0; 4] },
+        }];
         let rp_begin = vk::RenderPassBeginInfo::default()
             .render_pass(self.transparent_render_pass)
             .framebuffer(self.transparent_framebuffers[image_index as usize])
@@ -5226,35 +5479,58 @@ impl Renderer {
         // positive-height viewport rendered all transparent geometry
         // vertically mirrored against the projection matrix.
         let vp = vk::Viewport {
-            x: 0.0, y: self.swapchain_extent.height as f32,
+            x: 0.0,
+            y: self.swapchain_extent.height as f32,
             width: self.swapchain_extent.width as f32,
             height: -(self.swapchain_extent.height as f32),
-            min_depth: 0.0, max_depth: 1.0,
+            min_depth: 0.0,
+            max_depth: 1.0,
         };
-        let sc = vk::Rect2D { offset: vk::Offset2D::default(), extent: self.swapchain_extent };
+        let sc = vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent: self.swapchain_extent,
+        };
         unsafe {
             device.cmd_begin_render_pass(cmd, &rp_begin, vk::SubpassContents::INLINE);
             device.cmd_set_viewport(cmd, 0, &[vp]);
             device.cmd_set_scissor(cmd, 0, &[sc]);
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.transparent_pipeline);
+            device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.transparent_pipeline,
+            );
             device.cmd_bind_descriptor_sets(
-                cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0,
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
                 // Two-set bind: `transparent_pipeline` is created against the
                 // chunk material layout (which now has set 1 = tile_remap
                 // from cluster A), and `chunk.frag`'s `tile_remap` UBO read
                 // would otherwise fail with VUID-08600. Same one-shot bind
                 // pattern used in `record_main_pass_setup`.
-                &[descriptor_set, tile_remap_descriptor_set], &[],
+                &[descriptor_set, tile_remap_descriptor_set],
+                &[],
             );
             for (origin, vbo_buffer, ibo_buffer, index_count, _dist_sq) in draws.iter() {
                 let mut pc = [0.0f32; 24];
-                pc[0] = origin.x; pc[1] = origin.y; pc[2] = origin.z; pc[3] = 0.0;
-                if vp_cols.len() >= 16 { pc[4..20].copy_from_slice(&vp_cols[..16]); }
-                pc[20] = game_time; pc[21] = 0.0; pc[22] = 0.0; pc[23] = 0.0;
+                pc[0] = origin.x;
+                pc[1] = origin.y;
+                pc[2] = origin.z;
+                pc[3] = 0.0;
+                if vp_cols.len() >= 16 {
+                    pc[4..20].copy_from_slice(&vp_cols[..16]);
+                }
+                pc[20] = game_time;
+                pc[21] = 0.0;
+                pc[22] = 0.0;
+                pc[23] = 0.0;
                 device.cmd_push_constants(
-                    cmd, self.pipeline_layout,
+                    cmd,
+                    self.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0, bytemuck::cast_slice(&pc),
+                    0,
+                    bytemuck::cast_slice(&pc),
                 );
                 let vbo = [*vbo_buffer];
                 device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
@@ -5264,10 +5540,9 @@ impl Renderer {
             device.cmd_end_render_pass(cmd);
         }
     }
-
 }
 
-    impl Drop for Renderer {
+impl Drop for Renderer {
     fn drop(&mut self) {
         // Wait for the GPU to finish, then drain any pending cmd+fence
         // pairs while the handles are still valid. `device_wait_idle`
@@ -5349,7 +5624,8 @@ impl Renderer {
         self.overlay_vbo.destroy_in_place(device, &self.alloc);
 
         // Particle instance VBO (the source of the leak shown in the warning).
-        self.particle_instance_vbo.destroy_in_place(device, &self.alloc);
+        self.particle_instance_vbo
+            .destroy_in_place(device, &self.alloc);
 
         // Panorama cubemap image/view/sampler.
         self.panorama.destroy(device, &self.alloc);
@@ -5363,7 +5639,9 @@ impl Renderer {
 
         // Post-processing pass resources.
         for &fb in &self.post_framebuffers {
-            unsafe { device.destroy_framebuffer(fb, None); }
+            unsafe {
+                device.destroy_framebuffer(fb, None);
+            }
         }
         self.post_framebuffers.clear();
         unsafe {
@@ -5385,7 +5663,9 @@ impl Renderer {
         }
 
         // Shadow sampler.
-        unsafe { device.destroy_sampler(self.shadow_sampler, None); }
+        unsafe {
+            device.destroy_sampler(self.shadow_sampler, None);
+        }
 
         // Shadow resources.
         for &fb in &self.shadow_framebuffers {
@@ -5410,18 +5690,21 @@ impl Renderer {
         unsafe {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            device.destroy_query_pool(self.query_pool, None);/*SLICE2_DROP*/
+            device.destroy_query_pool(self.query_pool, None); /*SLICE2_DROP*/
             // --- Slice 2 cleanup: scene_opaque_color + transparent render pass (framebuffers first, then render_pass, sampler, image) ---
             for fb in self.transparent_framebuffers.drain(..) {
                 device.destroy_framebuffer(fb, None);
             }
             device.destroy_render_pass(self.transparent_render_pass, None);
             device.destroy_sampler(self.scene_opaque_sampler, None);
-            self.scene_opaque_color.destroy_in_place(&self.device, &self.alloc);
+            self.scene_opaque_color
+                .destroy_in_place(&self.device, &self.alloc);
             // --- Slice 3 (reflections) cleanup ---
             device.destroy_sampler(self.scene_depth_sampler, None);
-            self.scene_opaque_depth.destroy_in_place(&self.device, &self.alloc);
-            self.reflection_ubo.destroy_in_place(&self.device, &self.alloc);
+            self.scene_opaque_depth
+                .destroy_in_place(&self.device, &self.alloc);
+            self.reflection_ubo
+                .destroy_in_place(&self.device, &self.alloc);
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline(self.wireframe_pipeline, None);
             device.destroy_pipeline(self.transparent_pipeline, None);
@@ -5437,12 +5720,12 @@ impl Renderer {
             device.destroy_pipeline(self.entity_held_pipeline, None);
             device.destroy_pipeline(self.overlay_pipeline, None);
 
-        // Occlusion culling cleanup.
-        self.device.destroy_pipeline(self.occlusion_pipeline, None);
-        self.aabb_index_buffer.destroy_in_place(device, &self.alloc);
-        for frame in self.occlusion_frames.get_mut().drain(..) {
-            self.device.destroy_query_pool(frame.query_pool, None);
-        }
+            // Occlusion culling cleanup.
+            self.device.destroy_pipeline(self.occlusion_pipeline, None);
+            self.aabb_index_buffer.destroy_in_place(device, &self.alloc);
+            for frame in self.occlusion_frames.get_mut().drain(..) {
+                self.device.destroy_query_pool(frame.query_pool, None);
+            }
 
             // Particle subpass resources.
             // Sets owned by `particle_depth_descriptor_pool` are freed when
@@ -5471,4 +5754,3 @@ impl Renderer {
         }
     }
 }
-

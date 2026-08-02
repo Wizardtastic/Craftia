@@ -50,28 +50,30 @@ impl Panorama {
         for name in &names {
             let path = dir.join(name);
             match std::fs::read(&path) {
-                Ok(bytes) => match image::load_from_memory(&bytes) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        let w = rgba.width();
-                        let h = rgba.height();
-                        if face_width == 0 {
-                            face_width = w;
-                            face_height = h;
-                        } else if w != face_width || h != face_height {
-                            log::warn!(
+                Ok(bytes) => {
+                    match image::load_from_memory(&bytes) {
+                        Ok(img) => {
+                            let rgba = img.to_rgba8();
+                            let w = rgba.width();
+                            let h = rgba.height();
+                            if face_width == 0 {
+                                face_width = w;
+                                face_height = h;
+                            } else if w != face_width || h != face_height {
+                                log::warn!(
                                 "panorama: {} has size {}x{}, expected {}x{} — skipping panorama",
                                 name, w, h, face_width, face_height
                             );
+                                return Self::empty(device);
+                            }
+                            faces.push(rgba.into_raw());
+                        }
+                        Err(e) => {
+                            log::warn!("panorama: failed to decode {name}: {e}");
                             return Self::empty(device);
                         }
-                        faces.push(rgba.into_raw());
                     }
-                    Err(e) => {
-                        log::warn!("panorama: failed to decode {name}: {e}");
-                        return Self::empty(device);
-                    }
-                },
+                }
                 Err(_) => {
                     log::debug!("panorama: {path:?} not found, skipping panorama");
                     return Self::empty(device);
@@ -126,7 +128,8 @@ impl Panorama {
             }
         };
         unsafe {
-            if let Err(e) = device.bind_image_memory(image, allocation.memory(), allocation.offset())
+            if let Err(e) =
+                device.bind_image_memory(image, allocation.memory(), allocation.offset())
             {
                 log::warn!("panorama: bind failed: {e}");
                 alloc.free(allocation);

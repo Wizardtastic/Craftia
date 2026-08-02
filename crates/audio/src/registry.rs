@@ -30,7 +30,11 @@ impl SoundRegistry {
             return Self { sounds };
         }
         Self::load_recursive(audio_dir, audio_dir, &mut sounds);
-        log::info!("Loaded {} sounds from {}", sounds.len(), audio_dir.display());
+        log::info!(
+            "Loaded {} sounds from {}",
+            sounds.len(),
+            audio_dir.display()
+        );
         Self { sounds }
     }
 

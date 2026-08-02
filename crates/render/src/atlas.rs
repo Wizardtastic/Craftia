@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 use image::imageops::FilterType;
 use voxel_core::ATLAS_TILE_SIZE;
 
-/// Atlas side length in tiles (16x16 = 256 tiles). Single source of truth.
-pub use voxel_core::ATLAS_TILES;
 /// Atlas side length in pixels.
 pub use voxel_core::ATLAS_PIXELS;
+/// Atlas side length in tiles (16x16 = 256 tiles). Single source of truth.
+pub use voxel_core::ATLAS_TILES;
 
 /// A finished atlas: RGBA8 pixels + mip chain ready to upload to a Vulkan image.
 pub struct Atlas {
@@ -140,11 +140,7 @@ fn fill_error_tile(atlas: &mut [u8], tile: u32) {
     for ty in 0..ATLAS_TILE_SIZE {
         for tx in 0..ATLAS_TILE_SIZE {
             let checker = ((tx / 2) + (ty / 2)) % 2 == 0;
-            let (r, g, b) = if checker {
-                (0, 60, 220)
-            } else {
-                (0, 0, 0)
-            };
+            let (r, g, b) = if checker { (0, 60, 220) } else { (0, 0, 0) };
             let tile_x = (tile % ATLAS_TILES) * ATLAS_TILE_SIZE;
             let tile_y = (tile / ATLAS_TILES) * ATLAS_TILE_SIZE;
             let px = tile_x + tx;

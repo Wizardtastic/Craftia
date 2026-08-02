@@ -150,7 +150,13 @@ impl SurvivalInventory {
     }
 
     /// Try to merge a stack into existing stacks in the specified range.
-    fn try_merge_into(&mut self, stack: &ItemStack, start: usize, end: usize, is_hotbar: bool) -> Option<ItemStack> {
+    fn try_merge_into(
+        &mut self,
+        stack: &ItemStack,
+        start: usize,
+        end: usize,
+        is_hotbar: bool,
+    ) -> Option<ItemStack> {
         let mut remainder = *stack;
 
         for i in start..end {
@@ -177,7 +183,13 @@ impl SurvivalInventory {
     /// Places up to `MAX_STACK_SIZE` items in each empty slot and returns the
     /// leftover remainder (if any). This prevents a single slot from exceeding
     /// the max stack size when the inserted stack is larger.
-    fn try_insert_into_empty(&mut self, stack: &ItemStack, start: usize, end: usize, is_hotbar: bool) -> Option<ItemStack> {
+    fn try_insert_into_empty(
+        &mut self,
+        stack: &ItemStack,
+        start: usize,
+        end: usize,
+        is_hotbar: bool,
+    ) -> Option<ItemStack> {
         let mut remainder = *stack;
         if remainder.is_empty() {
             return None;

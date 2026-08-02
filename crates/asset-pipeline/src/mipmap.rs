@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(mips.len(), 2);
         assert_eq!(mips[0].len(), 16); // 2x2x4
         assert_eq!(mips[1].len(), 4); // 1x1x4
-        // Nearest takes top-left pixel
+                                      // Nearest takes top-left pixel
         assert_eq!(&mips[1][..4], &[255, 0, 0, 255]);
     }
 

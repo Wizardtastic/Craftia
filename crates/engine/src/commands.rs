@@ -4,7 +4,7 @@
 //! destination for `/`-prefixed chat commands. Each volume-producing
 //! command routes through the [`Self::run_volume`] helper, which opens
 //! a Feature 1 `UndoRedoState` batch, streams edits through the matching
-//! `World` volume method, and commits ΓÇö so thousands of `set_block`
+//! `World` volume method, and commits — so thousands of `set_block`
 //! calls collapse to one undo step.
 
 use voxel_core::BlockId;
@@ -687,7 +687,7 @@ impl crate::EngineApp {
             CommandResult::Unknown(msg) => {
                 self.gameplay.chat.push_message(msg);
             }
-            _ => unreachable!("Feature 4 added variants ΓÇö dispatcher must match them all"),
+            _ => unreachable!("Feature 4 added variants — dispatcher must match them all"),
         }
     }
 
@@ -724,7 +724,7 @@ impl crate::EngineApp {
             .push_message(format!("{label} {block_name}: {count} blocks"));
     }
 
-    /// Replace variant of [`Self::run_volume`] ΓÇö needs lookup of two
+    /// Replace variant of [`Self::run_volume`] — needs lookup of two
     /// block names (target + replacement) before opening the batch, so a
     /// single-name helper doesn't fit cleanly.
     fn run_volume_replace<F>(&mut self, target: &str, replacement: &str, op: F)
@@ -746,7 +746,7 @@ impl crate::EngineApp {
         };
         if target_id == replace_id {
             self.gameplay.chat.push_message(format!(
-                "/replace: target '{target}' == replacement '{replacement}' ΓÇö no-op"
+                "/replace: target '{target}' == replacement '{replacement}' — no-op"
             ));
             return;
         }

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use crate::mipmap::generate_mip_chain;
 use crate::texture_pack;
-use voxel_core::{ATLAS_PIXELS, ATLAS_TILE_SIZE, ATLAS_TILES};
+use voxel_core::{ATLAS_PIXELS, ATLAS_TILES, ATLAS_TILE_SIZE};
 
 /// Magic bytes identifying the cache format.
 const MAGIC: &[u8; 20] = b"VOXEL_ASSET_CACHE_v1";
@@ -78,8 +78,8 @@ struct ManifestEntry {
 
 /// Compute BLAKE3 hash of a file's contents.
 fn hash_file(path: &Path) -> Result<[u8; 32]> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("hash_file: read {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("hash_file: read {}", path.display()))?;
     Ok(blake3::hash(&bytes).into())
 }
 
@@ -134,7 +134,10 @@ fn cache_path(textures_dir: &Path) -> PathBuf {
 }
 
 /// Read and validate an existing cache file. Returns None if missing or invalid.
-fn read_cache(textures_dir: &Path, expected_composite: &[u8; 32]) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
+fn read_cache(
+    textures_dir: &Path,
+    expected_composite: &[u8; 32],
+) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
     let path = cache_path(textures_dir);
     let bytes = std::fs::read(&path).ok()?;
 
@@ -288,7 +291,10 @@ pub fn process_assets_with_packs(
     if let Some(pdir) = packs_dir {
         if let Ok(entries) = texture_pack::hash_pack_files(pdir) {
             for (path_hash, content_hash) in entries {
-                manifest.push(ManifestEntry { path_hash, content_hash });
+                manifest.push(ManifestEntry {
+                    path_hash,
+                    content_hash,
+                });
             }
         }
     }
@@ -308,7 +314,10 @@ pub fn process_assets_with_packs(
     }
 
     // Cache miss: build atlas from scratch.
-    log::info!("asset cache miss — rebuilding atlas from {} tiles", mapping.len());
+    log::info!(
+        "asset cache miss — rebuilding atlas from {} tiles",
+        mapping.len()
+    );
     let atlas = crate::atlas::build_atlas(textures_dir, &mapping);
     let mip_chain = generate_mip_chain(&atlas, ATLAS_PIXELS, ATLAS_PIXELS);
 
@@ -414,10 +423,7 @@ mod tests {
 
     #[test]
     fn roundtrip_cache_format() {
-        let mip_chain = vec![
-            vec![1u8, 2, 3, 4],
-            vec![5u8, 6, 7, 8],
-        ];
+        let mip_chain = vec![vec![1u8, 2, 3, 4], vec![5u8, 6, 7, 8]];
         let entries = vec![ManifestEntry {
             path_hash: [1u8; 32],
             content_hash: [2u8; 32],

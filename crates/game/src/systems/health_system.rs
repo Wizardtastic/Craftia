@@ -6,24 +6,33 @@
 //! 3. Ticks down invulnerability timers
 //! 4. Fires `DeathEvent` when health reaches zero
 
-use voxel_ecs::World;
-use voxel_combat::{DamageQueue, Health, DeathEvent};
-use voxel_gamemode::GameMode;
 use crate::systems::hunger_system::GameTimeResource;
+use voxel_combat::{DamageQueue, DeathEvent, Health};
+use voxel_ecs::World;
+use voxel_gamemode::GameMode;
 
 /// Health system entry point. Called each fixed timestep.
 pub fn health_system(world: &mut World, _dt: f32) {
     // Read current game time from ECS resource.
-    let game_time = world.resource::<GameTimeResource>().map(|r| r.0).unwrap_or(0.0);
+    let game_time = world
+        .resource::<GameTimeResource>()
+        .map(|r| r.0)
+        .unwrap_or(0.0);
 
     // Drain all pending damage events.
-    let events = world.resource_mut::<DamageQueue>().map(|q| q.drain()).unwrap_or_default();
+    let events = world
+        .resource_mut::<DamageQueue>()
+        .map(|q| q.drain())
+        .unwrap_or_default();
 
     for (entity_opt, event) in events {
         let Some(entity) = entity_opt else { continue };
 
         // Get the game mode for this entity (defaults to Survival if missing).
-        let game_mode = world.get::<GameMode>(entity).copied().unwrap_or(GameMode::Survival);
+        let game_mode = world
+            .get::<GameMode>(entity)
+            .copied()
+            .unwrap_or(GameMode::Survival);
 
         // Skip damage if the game mode doesn't allow it.
         if !game_mode.can_take_damage() {
@@ -31,7 +40,9 @@ pub fn health_system(world: &mut World, _dt: f32) {
         }
 
         // Get the health component.
-        let Some(health) = world.get_mut::<Health>(entity) else { continue };
+        let Some(health) = world.get_mut::<Health>(entity) else {
+            continue;
+        };
 
         // Check invulnerability (unless the source ignores it).
         if health.is_invulnerable() && !event.source.ignores_invulnerability() {
@@ -48,10 +59,13 @@ pub fn health_system(world: &mut World, _dt: f32) {
 
             // Store the death event on the entity for the engine to pick up.
             // We'll use a simple approach: set a DeathEvent component.
-            world.set(entity, DeathEvent {
-                source: event.source,
-                message,
-            });
+            world.set(
+                entity,
+                DeathEvent {
+                    source: event.source,
+                    message,
+                },
+            );
         }
     }
 

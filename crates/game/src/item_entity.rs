@@ -4,8 +4,8 @@
 //! They have physics, can merge with nearby items of the same type,
 //! and despawn after a timeout.
 
-use serde::{Deserialize, Serialize};
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 use voxel_core::BlockId;
 use voxel_ecs::{Entity, World};
 

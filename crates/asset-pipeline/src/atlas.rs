@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use image::imageops::FilterType;
-use voxel_core::{ATLAS_PIXELS, ATLAS_TILE_SIZE, ATLAS_TILES};
+use voxel_core::{ATLAS_PIXELS, ATLAS_TILES, ATLAS_TILE_SIZE};
 
 /// Build the atlas RGBA8 buffer from a textures directory and tile mapping.
 /// Returns the raw RGBA8 pixel data (ATLAS_PIXELS x ATLAS_PIXELS x 4 bytes).

@@ -1,5 +1,5 @@
-use ash::vk;
 use anyhow::{anyhow, Result};
+use ash::vk;
 
 pub(super) fn create_swapchain(
     _device: &ash::Device,

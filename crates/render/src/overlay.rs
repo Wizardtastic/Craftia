@@ -58,9 +58,7 @@ impl OverlayData {
 }
 
 /// Create the overlay pipeline layout.
-pub fn create_overlay_pipeline_layout(
-    device: &ash::Device,
-) -> Result<vk::PipelineLayout> {
+pub fn create_overlay_pipeline_layout(device: &ash::Device) -> Result<vk::PipelineLayout> {
     let push_range = vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX)
         .offset(0)

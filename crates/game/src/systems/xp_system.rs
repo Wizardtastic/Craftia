@@ -110,12 +110,16 @@ pub fn xp_collection_system(world: &mut voxel_ecs::World, _dt: f32) {
         None => return,
     };
 
-    let player_pos = world.get::<Transform>(player_entity)
+    let player_pos = world
+        .get::<Transform>(player_entity)
         .map(|t| t.pos)
         .unwrap_or(glam::Vec3::ZERO);
 
     // Get or create experience component.
-    let mut experience = world.get::<Experience>(player_entity).copied().unwrap_or_default();
+    let mut experience = world
+        .get::<Experience>(player_entity)
+        .copied()
+        .unwrap_or_default();
 
     // Find all XP orbs in range.
     let mut orbs_to_collect = Vec::new();

@@ -81,7 +81,8 @@ impl DynamicAtlasTexture {
         );
         end_and_submit(device, pool, queue, cmd)?;
 
-        let view = crate::buffer::create_image_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
+        let view =
+            crate::buffer::create_image_view(device, image, format, vk::ImageAspectFlags::COLOR)?;
 
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::NEAREST)

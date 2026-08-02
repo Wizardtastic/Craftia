@@ -5,8 +5,8 @@
 //! 2. Drains air supply when submerged
 //! 3. Applies drowning damage directly when air is depleted (no invulnerability)
 
-use voxel_ecs::World;
 use voxel_combat::{AirSupply, Health};
+use voxel_ecs::World;
 use voxel_gamemode::GameMode;
 use voxel_hunger::Difficulty;
 
@@ -28,17 +28,26 @@ pub fn drowning_system(world: &mut World, _dt: f32) {
         None => return,
     };
 
-    let game_mode = world.get::<GameMode>(player_entity).copied().unwrap_or(GameMode::Survival);
+    let game_mode = world
+        .get::<GameMode>(player_entity)
+        .copied()
+        .unwrap_or(GameMode::Survival);
 
     // Creative/Spectator don't drown.
     if !game_mode.can_take_damage() {
         return;
     }
 
-    let difficulty = world.resource::<DifficultyResource>().map(|d| d.0).unwrap_or(Difficulty::Normal);
+    let difficulty = world
+        .resource::<DifficultyResource>()
+        .map(|d| d.0)
+        .unwrap_or(Difficulty::Normal);
 
     // Check if player's head is underwater.
-    let transform = world.get::<Transform>(player_entity).copied().unwrap_or_default();
+    let transform = world
+        .get::<Transform>(player_entity)
+        .copied()
+        .unwrap_or_default();
     let physics = world.resource::<PhysicsWorldRes>().cloned();
 
     let head_underwater = if let Some(phys) = physics {
@@ -50,8 +59,14 @@ pub fn drowning_system(world: &mut World, _dt: f32) {
     };
 
     // Get air supply and drowning state.
-    let mut air = world.get::<AirSupply>(player_entity).copied().unwrap_or_default();
-    let mut drowning = world.get::<DrowningState>(player_entity).copied().unwrap_or_default();
+    let mut air = world
+        .get::<AirSupply>(player_entity)
+        .copied()
+        .unwrap_or_default();
+    let mut drowning = world
+        .get::<DrowningState>(player_entity)
+        .copied()
+        .unwrap_or_default();
 
     if head_underwater {
         // Drain air at ~0.333/tick → 300 / 0.333 = ~900 ticks = 15 seconds at 60 tps.

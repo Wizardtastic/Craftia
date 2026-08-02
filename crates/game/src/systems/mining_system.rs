@@ -7,8 +7,8 @@
 //! 4. Breaks the block when progress reaches 1.0
 //! 5. Handles interruption (releasing mouse, changing target)
 
-use voxel_ecs::World;
 use voxel_core::BlockId;
+use voxel_ecs::World;
 use voxel_world::registry::ToolType;
 
 use crate::components::{MiningProgress, PlayerEntity, PlayerInput, PlayerLookTarget, Transform};
@@ -27,36 +27,16 @@ fn tool_speed_for_block(tool: ToolType, required: ToolType) -> f32 {
 }
 
 /// Check if the held block is the correct tool type for mining a block.
-fn held_is_correct_tool(held: BlockId, required: ToolType, registry: &voxel_world::BlockRegistry) -> bool {
+fn held_is_correct_tool(
+    held: BlockId,
+    required: ToolType,
+    registry: &voxel_world::BlockRegistry,
+) -> bool {
     if required == ToolType::None {
         return true; // any tool (or hand) works
     }
     let def = registry.get(held);
     def.required_tool == required
-}
-
-/// Calculate break time using the legacy API.
-///
-/// Existing callers do not provide held-tool metadata, so this compatibility
-/// wrapper treats the required tier as satisfied and delegates to the
-/// tier-aware implementation. New gameplay code should call
-/// [`calculate_break_time_with_tier`]. Returns -1.0 for unbreakable blocks.
-#[allow(dead_code)] // retained as a public compatibility wrapper
-pub fn calculate_break_time(
-    hardness: f32,
-    required_tool: ToolType,
-    required_tier: u8,
-    has_correct_tool: bool,
-    tool_speed: f32,
-) -> f32 {
-    calculate_break_time_with_tier(
-        hardness,
-        required_tool,
-        required_tier,
-        has_correct_tool,
-        required_tier,
-        tool_speed,
-    )
 }
 
 /// Calculate break time while enforcing the held tool's minimum tier.
@@ -110,7 +90,8 @@ pub fn evaluate_drops(
 ) -> Vec<(BlockId, u16)> {
     let mut drops = Vec::new();
 
-    for drop in &block_def.drops {        // Check condition and determine item + count range. Fortune changes
+    for drop in &block_def.drops {
+        // Check condition and determine item + count range. Fortune changes
         // the range, but must not bypass the entry's probability roll.
         let (item, min_count, max_count) = match drop.condition {
             voxel_world::registry::DropCondition::Always => {
@@ -164,8 +145,8 @@ pub fn evaluate_drops(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxel_world::registry::{BlockDef, BlockDrop, BlockKind, BlockTextures, ToolType};
     use std::sync::Arc;
+    use voxel_world::registry::{BlockDef, BlockDrop, BlockKind, BlockTextures, ToolType};
 
     fn test_block(drops: Vec<BlockDrop>) -> BlockDef {
         BlockDef {
@@ -206,7 +187,6 @@ mod tests {
         assert!((2..=5).contains(&drops[0].1));
     }
 
-    #[test]
     #[test]
     fn self_drop_condition_uses_block_id() {
         let block = test_block(vec![BlockDrop::self_drop()]);
@@ -274,7 +254,10 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
     };
 
     // Get or create mining progress component.
-    let mut mining = world.get::<MiningProgress>(player_entity).copied().unwrap_or_default();
+    let mut mining = world
+        .get::<MiningProgress>(player_entity)
+        .copied()
+        .unwrap_or_default();
 
     // If not mining (no left click), reset progress.
     if !input.mining {
@@ -286,7 +269,10 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
     }
 
     // Get the block the player is looking at from the ECS resource (updated by the engine).
-    let look_target = world.resource::<PlayerLookTarget>().copied().unwrap_or_default();
+    let look_target = world
+        .resource::<PlayerLookTarget>()
+        .copied()
+        .unwrap_or_default();
 
     // If no target block, reset mining.
     let Some(target_pos) = look_target.block else {
@@ -307,7 +293,9 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
     let Some(phys) = physics else { return };
 
     // Check if the block still exists.
-    let block_id = phys.0.get_block(target_pos[0], target_pos[1], target_pos[2]);
+    let block_id = phys
+        .0
+        .get_block(target_pos[0], target_pos[1], target_pos[2]);
     if block_id.is_air() {
         mining.reset();
         world.set(player_entity, mining);
@@ -319,7 +307,8 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
     let block_def = registry.get(block_id);
 
     // Get the player's held item to check tool type and speed.
-    let held = world.resource::<HotbarResource>()
+    let held = world
+        .resource::<HotbarResource>()
         .map(|h| h.selected_block)
         .unwrap_or(BlockId::AIR);
     let has_correct_tool = held_is_correct_tool(held, block_def.required_tool, &registry);
@@ -327,10 +316,8 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
         .resource::<HotbarResource>()
         .map(|h| h.selected_tool_tier)
         .unwrap_or(0);
-    let tool_speed = tool_speed_for_block(
-        registry.get(held).required_tool,
-        block_def.required_tool,
-    );
+    let tool_speed =
+        tool_speed_for_block(registry.get(held).required_tool, block_def.required_tool);
 
     // Calculate break time.
     let break_time = calculate_break_time_with_tier(
@@ -363,7 +350,8 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
         let drops = evaluate_drops(block_def, false, 0);
 
         // Get player position for spawning items.
-        let _player_pos = world.get::<Transform>(player_entity)
+        let _player_pos = world
+            .get::<Transform>(player_entity)
             .map(|t| t.pos)
             .unwrap_or(glam::Vec3::ZERO);
 
@@ -390,7 +378,8 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
         }
 
         // Set the block to air.
-        phys.0.set_block(target_pos[0], target_pos[1], target_pos[2], BlockId::AIR);
+        phys.0
+            .set_block(target_pos[0], target_pos[1], target_pos[2], BlockId::AIR);
 
         // Reset mining progress.
         mining.reset();

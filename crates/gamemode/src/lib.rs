@@ -139,9 +139,7 @@ impl GameMode {
     pub fn inventory_behavior(self) -> InventoryBehavior {
         match self {
             Self::Creative => InventoryBehavior::CreativeTabs,
-            Self::Survival | Self::Adventure | Self::Spectator => {
-                InventoryBehavior::SurvivalSlots
-            }
+            Self::Survival | Self::Adventure | Self::Spectator => InventoryBehavior::SurvivalSlots,
         }
     }
 
@@ -258,10 +256,22 @@ mod tests {
 
     #[test]
     fn parse_gamemode() {
-        assert_eq!(GameMode::from_str_loose("survival"), Some(GameMode::Survival));
-        assert_eq!(GameMode::from_str_loose("creative"), Some(GameMode::Creative));
-        assert_eq!(GameMode::from_str_loose("adventure"), Some(GameMode::Adventure));
-        assert_eq!(GameMode::from_str_loose("spectator"), Some(GameMode::Spectator));
+        assert_eq!(
+            GameMode::from_str_loose("survival"),
+            Some(GameMode::Survival)
+        );
+        assert_eq!(
+            GameMode::from_str_loose("creative"),
+            Some(GameMode::Creative)
+        );
+        assert_eq!(
+            GameMode::from_str_loose("adventure"),
+            Some(GameMode::Adventure)
+        );
+        assert_eq!(
+            GameMode::from_str_loose("spectator"),
+            Some(GameMode::Spectator)
+        );
         assert_eq!(GameMode::from_str_loose("surv"), Some(GameMode::Survival));
         assert_eq!(GameMode::from_str_loose("c"), Some(GameMode::Creative));
         assert_eq!(GameMode::from_str_loose("unknown"), None);

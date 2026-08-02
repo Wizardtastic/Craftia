@@ -107,20 +107,32 @@ pub enum CommandResult {
     /// `/ecs list` — return list of all entities with archetype info
     EcsList,
     /// `/ecs inspect <entity_id>` — return component dump for one entity
-    EcsInspect { entity_id: u32 },
+    EcsInspect {
+        entity_id: u32,
+    },
     /// `/ecs resources` — list all resources
     EcsResources,
     /// `/ecs resource <name>` — dump a specific resource
-    EcsResource { type_name: String },
+    EcsResource {
+        type_name: String,
+    },
     /// `/get <path>` — read a config/runtime value
-    Get { path: Vec<String> },
+    Get {
+        path: Vec<String>,
+    },
     /// `/set <path> <value>` — hot-patch a config/runtime value
-    Set { path: Vec<String>, value: String },
+    Set {
+        path: Vec<String>,
+        value: String,
+    },
     /// `/exec <filename>` — run commands from a file
     Exec(String),
     // -- Waypoint commands --
     /// `/waypoint add <name> [x y z]` — add a waypoint at position.
-    WaypointAdd { name: String, pos: Option<glam::IVec3> },
+    WaypointAdd {
+        name: String,
+        pos: Option<glam::IVec3>,
+    },
     /// `/waypoint list` — list all waypoints.
     WaypointList,
     /// `/waypoint remove <name>` — remove a waypoint by name.
@@ -615,9 +627,7 @@ impl ChatState {
                 match parts[1].as_str() {
                     "add" => {
                         if parts.len() < 3 {
-                            return CommandResult::Unknown(
-                                "/waypoint add <name> [x y z]".into(),
-                            );
+                            return CommandResult::Unknown("/waypoint add <name> [x y z]".into());
                         }
                         let name = parts[2].clone();
                         let pos = if parts.len() >= 6 {
@@ -636,17 +646,13 @@ impl ChatState {
                     "list" => CommandResult::WaypointList,
                     "remove" => {
                         if parts.len() < 3 {
-                            return CommandResult::Unknown(
-                                "/waypoint remove <name>".into(),
-                            );
+                            return CommandResult::Unknown("/waypoint remove <name>".into());
                         }
                         CommandResult::WaypointRemove(parts[2].clone())
                     }
                     "save" => CommandResult::WaypointSave,
                     "load" => CommandResult::WaypointLoad,
-                    _ => CommandResult::Unknown(
-                        "/waypoint: unknown subcommand".into(),
-                    ),
+                    _ => CommandResult::Unknown("/waypoint: unknown subcommand".into()),
                 }
             }
             cmd if cmd.starts_with('/') => CommandResult::Unknown(cmd.to_string()),
@@ -671,18 +677,13 @@ impl ChatState {
                 }
                 match parts[1].parse::<u32>() {
                     Ok(id) => CommandResult::EcsInspect { entity_id: id },
-                    Err(_) => CommandResult::Unknown(format!(
-                        "invalid entity id: {}",
-                        parts[1]
-                    )),
+                    Err(_) => CommandResult::Unknown(format!("invalid entity id: {}", parts[1])),
                 }
             }
             "resources" => CommandResult::EcsResources,
             "resource" => {
                 if parts.len() < 2 {
-                    return CommandResult::Unknown(
-                        "/ecs resource requires a type name".into(),
-                    );
+                    return CommandResult::Unknown("/ecs resource requires a type name".into());
                 }
                 CommandResult::EcsResource {
                     type_name: parts[1].clone(),

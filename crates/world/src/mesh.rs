@@ -469,7 +469,10 @@ fn can_merge_down(
     for i in 0..w {
         let a = &top[u + i];
         let b = &bot[u + i];
-        if a.block_id != b.block_id || a.block_light != b.block_light || a.light_color != b.light_color {
+        if a.block_id != b.block_id
+            || a.block_light != b.block_light
+            || a.light_color != b.light_color
+        {
             return false;
         }
         if a.ao[pairs[0].0] != b.ao[pairs[0].1] || a.ao[pairs[1].0] != b.ao[pairs[1].1] {

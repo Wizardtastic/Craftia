@@ -152,17 +152,14 @@ pub fn load_model(
                 .unwrap_or_else(|| (0..positions.len() as u32).collect());
 
             // Read joint indices (JOINTS_0) and weights (WEIGHTS_0) for skinning.
-            let joint_indices: Option<Vec<[u32; 4]>> = reader
-                .read_joints(0)
-                .map(|iter| {
-                    iter.into_u16()
-                        .map(|j| [j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32])
-                        .collect()
-                });
+            let joint_indices: Option<Vec<[u32; 4]>> = reader.read_joints(0).map(|iter| {
+                iter.into_u16()
+                    .map(|j| [j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32])
+                    .collect()
+            });
 
-            let joint_weights: Option<Vec<[f32; 4]>> = reader
-                .read_weights(0)
-                .map(|iter| iter.into_f32().collect());
+            let joint_weights: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|iter| iter.into_f32().collect());
 
             let vertex_data = ModelVertexData {
                 positions,
@@ -180,9 +177,9 @@ pub fn load_model(
                 .next()
                 .and_then(|_p| {
                     // Find the node that references this mesh.
-                    document.nodes().find(|n| {
-                        n.mesh().map(|m| m.index()) == Some(mesh.index())
-                    })
+                    document
+                        .nodes()
+                        .find(|n| n.mesh().map(|m| m.index()) == Some(mesh.index()))
                 })
                 .and_then(|n| node_to_skin[n.index()]);
 
@@ -214,7 +211,8 @@ pub fn load_model(
         let joints: Vec<usize> = skin.joints().map(|j| j.index()).collect();
 
         // Read inverse bind matrices.
-        let inverse_bind_matrices: Vec<Mat4> = if let Some(accessor) = skin.inverse_bind_matrices() {
+        let inverse_bind_matrices: Vec<Mat4> = if let Some(accessor) = skin.inverse_bind_matrices()
+        {
             let view = accessor.view().unwrap();
             let mut data = vec![0u8; accessor.count() * accessor.size()];
             let offset = view.offset() + accessor.offset();
@@ -224,7 +222,8 @@ pub fn load_model(
 
             data.chunks_exact(64)
                 .map(|chunk| {
-                    let arr: [f32; 16] = bytemuck::cast_slice(chunk).try_into().unwrap_or([0.0; 16]);
+                    let arr: [f32; 16] =
+                        bytemuck::cast_slice(chunk).try_into().unwrap_or([0.0; 16]);
                     Mat4::from_cols_array(&arr)
                 })
                 .collect()
@@ -286,11 +285,7 @@ fn upload_mesh(
     }
 
     let index_count = data.indices.len();
-    let index_bytes: Vec<u8> = data
-        .indices
-        .iter()
-        .flat_map(|i| i.to_le_bytes())
-        .collect();
+    let index_bytes: Vec<u8> = data.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
 
     // Create device-local buffers.
     let vbo = GpuBuffer::device_local(
@@ -333,7 +328,10 @@ fn upload_mesh(
     };
 
     // Staging buffer (host-visible) for the copy.
-    let skin_byte_count = skin_data.as_ref().map(|(sb, _, _, _)| sb.len()).unwrap_or(0);
+    let skin_byte_count = skin_data
+        .as_ref()
+        .map(|(sb, _, _, _)| sb.len())
+        .unwrap_or(0);
     let staging_size = (vertex_bytes.len() + index_bytes.len() + skin_byte_count) as vk::DeviceSize;
     let mut staging = GpuBuffer::host_visible(
         device,

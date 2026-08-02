@@ -31,7 +31,7 @@ pub struct EntityPushConstants {
     pub half_size: f32,       // 4 bytes
     pub billboard: u32,       // 4 bytes
     pub _pad: [u32; 2],       // 8 bytes
-    // total: 84 bytes, but we round to 80 with vec4 alignment
+                              // total: 84 bytes, but we round to 80 with vec4 alignment
 }
 
 /// Create the entity pipeline layout. Uses the same descriptor set
@@ -259,12 +259,48 @@ pub fn unit_quad_vertices() -> Vec<crate::Vertex> {
     let light = 1.0f32;
     let white = 0xFFFFFFFFu32; // white light color (no tint)
     vec![
-        crate::Vertex { pos: [-0.5, -0.5, 0.0], uv: [0.0, 1.0], light, tile, light_color: white },
-        crate::Vertex { pos: [ 0.5, -0.5, 0.0], uv: [1.0, 1.0], light, tile, light_color: white },
-        crate::Vertex { pos: [ 0.5,  0.5, 0.0], uv: [1.0, 0.0], light, tile, light_color: white },
-        crate::Vertex { pos: [-0.5, -0.5, 0.0], uv: [0.0, 1.0], light, tile, light_color: white },
-        crate::Vertex { pos: [ 0.5,  0.5, 0.0], uv: [1.0, 0.0], light, tile, light_color: white },
-        crate::Vertex { pos: [-0.5,  0.5, 0.0], uv: [0.0, 0.0], light, tile, light_color: white },
+        crate::Vertex {
+            pos: [-0.5, -0.5, 0.0],
+            uv: [0.0, 1.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [0.5, -0.5, 0.0],
+            uv: [1.0, 1.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [0.5, 0.5, 0.0],
+            uv: [1.0, 0.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [-0.5, -0.5, 0.0],
+            uv: [0.0, 1.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [0.5, 0.5, 0.0],
+            uv: [1.0, 0.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [-0.5, 0.5, 0.0],
+            uv: [0.0, 0.0],
+            light,
+            tile,
+            light_color: white,
+        },
     ]
 }
 
@@ -480,7 +516,9 @@ pub fn create_joint_descriptor_set_layout(device: &ash::Device) -> Result<vk::De
 
 /// Create the descriptor set layout for the tile remap UBO.
 /// Set 1, binding 0: TileRemap (256 × u32 = 1024 bytes).
-pub fn create_tile_remap_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub fn create_tile_remap_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let binding = vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)

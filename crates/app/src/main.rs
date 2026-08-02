@@ -124,10 +124,7 @@ struct SharedTeeWriter(Arc<Mutex<TeeWriter>>);
 
 impl Write for SharedTeeWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("log file mutex poisoned")
-            .write(buf)
+        self.0.lock().expect("log file mutex poisoned").write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -461,7 +458,9 @@ mod tests {
                 .truncate(true)
                 .open(path)
                 .unwrap();
-            let mut w = TeeWriter { file: Mutex::new(f) };
+            let mut w = TeeWriter {
+                file: Mutex::new(f),
+            };
             writeln!(w, "{}", line).unwrap();
             w.flush().unwrap();
         };
@@ -469,7 +468,10 @@ mod tests {
 
         // Launch #2: rotate, write a new latest.log.
         assert!(rotate_previous_log(&latest, &previous).unwrap());
-        assert!(!latest.exists(), "after rotate, latest.log should not exist");
+        assert!(
+            !latest.exists(),
+            "after rotate, latest.log should not exist"
+        );
         assert!(previous.exists(), "after rotate, previous.log must exist");
         assert_eq!(
             std::fs::read_to_string(&previous).unwrap(),

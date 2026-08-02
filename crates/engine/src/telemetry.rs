@@ -1,6 +1,6 @@
-﻿//! Telemetry collector: central ring-buffer store of metric samples,
+//! Telemetry collector: central ring-buffer store of metric samples,
 //! collected once per frame. Separate from ProfilerState (which focuses
-//! on GPU/CPU timings) ΓÇö this handles all metrics the dashboard displays.
+//! on GPU/CPU timings) — this handles all metrics the dashboard displays.
 
 use std::collections::VecDeque;
 use std::time::Instant;

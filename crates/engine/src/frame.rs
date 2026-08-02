@@ -81,8 +81,10 @@ impl crate::EngineApp {
                             match r.reload_atlas() {
                                 Ok(()) => {
                                     // Sync pack info from renderer to engine UI manager.
-                                    self.texture_pack_manager.loaded_packs = r.pack_infos().iter().map(|p| {
-                                        crate::TexturePackInfo {
+                                    self.texture_pack_manager.loaded_packs = r
+                                        .pack_infos()
+                                        .iter()
+                                        .map(|p| crate::TexturePackInfo {
                                             name: p.name.clone(),
                                             description: p.description.clone(),
                                             version: p.version.clone(),
@@ -90,8 +92,8 @@ impl crate::EngineApp {
                                             tile_count: p.tile_count,
                                             animation_count: p.animation_count,
                                             enabled: p.enabled,
-                                        }
-                                    }).collect();
+                                        })
+                                        .collect();
                                     self.gameplay.chat.push_message("[atlas] reloaded".into());
                                 }
                                 Err(e) => {
@@ -175,7 +177,7 @@ impl crate::EngineApp {
                         //    keep the older per-field mirrors in sync so
                         //    downstream code that reads them continues to
                         //    work. `self.config.seed` is intentionally NOT
-                        //    mirrored ΓÇö a worker holds the original startup
+                        //    mirrored — a worker holds the original startup
                         //    seed for terrain generation.
                         if new_settings.world != self.config.world {
                             let new_load = new_settings.world.load_radius.max(0) as u32;
@@ -455,7 +457,7 @@ impl crate::EngineApp {
         // the streamer for remeshing.
         let water_affected =
             if self.gameplay.game_state == crate::GameState::Playing && self.input.spawned {
-                // Check if player is dead ΓÇö if so, skip input and unlock cursor.
+                // Check if player is dead — if so, skip input and unlock cursor.
                 let is_dead = self
                     .simulation
                     .ecs_world()
@@ -477,7 +479,7 @@ impl crate::EngineApp {
                     let affected = self.simulation.tick_fixed(frame_dt);
                     affected
                 } else if self.gameplay.block_picker_open {
-                    // Block picker (creative inventory) is open ΓÇö no movement, no mouse look.
+                    // Block picker (creative inventory) is open — no movement, no mouse look.
                     if self.input.cursor_locked {
                         self.unlock_cursor();
                     }
@@ -555,7 +557,7 @@ impl crate::EngineApp {
                     }
                 }
             } else {
-                // Pinned entity despawned ΓÇö clear the pin so the camera
+                // Pinned entity despawned — clear the pin so the camera
                 // doesn't get stuck locked to a freed entity handle.
                 self.gameplay.pinned_entity = None;
                 self.gameplay
@@ -656,7 +658,7 @@ impl crate::EngineApp {
                                 self.gameplay.map.framebuffer.len()
                             );
                         } else {
-                            // No samples yet ΓÇö stay dirty so we retry next interval.
+                            // No samples yet — stay dirty so we retry next interval.
                             self.gameplay.map.dirty = true;
                             log::debug!("minimap: no samples at ({}, {}), retrying", px, pz);
                         }

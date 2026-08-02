@@ -2,8 +2,8 @@
 //! component on the player entity. Runs each tick so the renderer can
 //! read HeldBlock.tile for first-person held item rendering.
 
-use voxel_ecs::World;
 use voxel_core::BlockId;
+use voxel_ecs::World;
 
 use crate::components::{HeldBlock, PlayerEntity};
 

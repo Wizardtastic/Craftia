@@ -1,4 +1,4 @@
-﻿//! US QWERTY key-to-character lookup used by the chat input.
+//! US QWERTY key-to-character lookup used by the chat input.
 //!
 //! Kept separate so `lib.rs` doesn't have to scroll through a 50-line
 //! const table every time it focuses on the application loop.
@@ -64,7 +64,7 @@ const PHYSICAL_KEY_CHARS: &[(KeyCode, char)] = &[
 /// keys that don't produce a printable character (arrow keys, function keys,
 /// modifiers, etc.).
 pub(crate) fn physical_key_to_char(code: KeyCode) -> Option<char> {
-    // Linear search ΓÇö the table is ~45 entries and `KeyCode` is not
+    // Linear search — the table is ~45 entries and `KeyCode` is not
     // `Ord`, so a perfect-hash or sorted-table approach would need
     // additional scaffolding. Linear is plenty fast here.
     PHYSICAL_KEY_CHARS

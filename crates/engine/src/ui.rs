@@ -1322,7 +1322,7 @@ impl crate::EngineApp {
         let w = w as f32;
         let h = h as f32;
 
-        // ΓöÇΓöÇ Recompute layout (must match draw_block_picker) ΓöÇΓöÇ
+        // ── Recompute layout (must match draw_block_picker) ──
         let slot_size = 40.0f32;
         let slot_gap = 3.0f32;
         let cols = 9usize;
@@ -1393,7 +1393,7 @@ impl crate::EngineApp {
         let mx = self.gameplay.mouse_pos.0;
         let my = self.gameplay.mouse_pos.1;
 
-        // ΓöÇΓöÇ Check tab clicks ΓöÇΓöÇ
+        // ── Check tab clicks ──
         let tab_w = 40.0f32;
         let tab_gap = 2.0f32;
         let tab_row_w = tab_count as f32 * tab_w + (tab_count - 1) as f32 * tab_gap;
@@ -1418,7 +1418,7 @@ impl crate::EngineApp {
             }
         }
 
-        // ΓöÇΓöÇ Check close button ΓöÇΓöÇ
+        // ── Check close button ──
         let close_x = panel_x + panel_w - panel_pad - 20.0;
         let close_y = panel_y + panel_pad;
         if mx >= close_x && mx < close_x + 20.0 && my >= close_y && my < close_y + 20.0 {
@@ -1427,7 +1427,7 @@ impl crate::EngineApp {
             return;
         }
 
-        // ΓöÇΓöÇ Check item grid clicks ΓöÇΓöÇ
+        // ── Check item grid clicks ──
         let mut cy = panel_y + panel_pad + titlebar_h + 6.0;
         if is_search {
             cy += search_h + 6.0;
@@ -1453,7 +1453,7 @@ impl crate::EngineApp {
             return;
         }
 
-        // ΓöÇΓöÇ Check hotbar clicks ΓöÇΓöÇ
+        // ── Check hotbar clicks ──
         cy += grid_h + panel_pad + divider_h + 6.0;
         let hotbar_x0 = panel_x + panel_pad;
         if mx >= hotbar_x0 && mx < hotbar_x0 + grid_w && my >= cy && my < cy + hotbar_h {
@@ -1675,7 +1675,7 @@ impl crate::EngineApp {
         self.lock_cursor();
     }
 
-    // ΓöÇΓöÇ Title Screen ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ── Title Screen ────────────────────────────────────────────────────
 
     fn draw_title_screen(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
         // Background: dark gradient (panorama renders behind, this is just a fallback).
@@ -1688,7 +1688,7 @@ impl crate::EngineApp {
         let btn_start_y = h * 0.38;
         let btn_x = (w - panel_w) * 0.5;
 
-        // Title ΓÇö positioned above the buttons with comfortable spacing.
+        // Title — positioned above the buttons with comfortable spacing.
         let title = "VOXEL ENGINE";
         let tw = self.render.font.text_width(title, 4.0);
         ui.text(
@@ -1729,7 +1729,7 @@ impl crate::EngineApp {
             buttons[i] = (btn_x, by, panel_w, btn_h);
         }
 
-        // "Multiplayer" is grayed out ΓÇö draw "Coming Soon" on hover.
+        // "Multiplayer" is grayed out — draw "Coming Soon" on hover.
         let mp_btn = buttons[1];
         if self.point_in_rect(
             self.gameplay.mouse_pos,
@@ -1775,7 +1775,7 @@ impl crate::EngineApp {
                 pitch: None,
                 group: voxel_audio::AudioGroup::Sfx,
             });
-            // Singleplayer ΓÇö show world selection screen.
+            // Singleplayer — show world selection screen.
             if self.point_in_rect(
                 self.gameplay.mouse_pos,
                 buttons[0].0,
@@ -1820,7 +1820,7 @@ impl crate::EngineApp {
         }
     }
 
-    // ΓöÇΓöÇ World Select ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ── World Select ────────────────────────────────────────────────────
 
     fn draw_world_select(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
         // Full-screen dimmed overlay.
@@ -2077,7 +2077,7 @@ impl crate::EngineApp {
             return;
         }
 
-        // Delete buttons ΓÇö check BEFORE row selection (delete sits inside the row rect).
+        // Delete buttons — check BEFORE row selection (delete sits inside the row rect).
         for (i, &(dx, dy, dw, dh)) in buttons.delete_buttons.iter().enumerate() {
             if self.point_in_rect(self.gameplay.mouse_pos, dx, dy, dw, dh) {
                 if i < self.gameplay.world_list.len() {
@@ -2178,50 +2178,6 @@ impl crate::EngineApp {
         }
     }
 
-    /// Create a brand-new world with a unique save directory and start playing.
-    #[allow(dead_code)]
-    fn create_and_play_world(&mut self) {
-        // Generate a unique directory name from timestamp.
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let world_name = format!("world_{}", stamp);
-        let saves_dir = std::path::PathBuf::from("saves");
-        let save_path = saves_dir.join(&world_name);
-
-        // Create the save directory.
-        if let Err(e) = std::fs::create_dir_all(&save_path) {
-            log::error!("failed to create save dir: {e}");
-            self.gameplay
-                .chat
-                .push_message(format!("Failed to create world: {e}"));
-            return;
-        }
-
-        // Pick a random seed from the current time.
-        let seed = stamp as i32;
-
-        // Write world_info.json.
-        let info = crate::save::WorldInfo::new_default(&world_name, seed);
-        let _ = crate::save::write_world_info(&save_path, &info);
-
-        // Save the initial world state.
-        if let Err(e) = voxel_world::save::save_world(&self.world_state.world, &save_path) {
-            log::error!("failed to save initial world: {e}");
-        }
-
-        log::info!(
-            "created new world '{}' with seed {} at {}",
-            world_name,
-            seed,
-            save_path.display()
-        );
-        self.gameplay.current_world_path = Some(save_path);
-        self.input.spawned = false;
-        self.enter_playing();
-    }
-
     /// Create a world from the create dialog's user input.
     pub(crate) fn create_world_from_dialog(
         &mut self,
@@ -2299,7 +2255,7 @@ impl crate::EngineApp {
         self.enter_playing();
     }
 
-    // ΓöÇΓöÇ Create World Dialog ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ── Create World Dialog ─────────────────────────────────────────────
 
     fn draw_create_world_dialog(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
         // Dimmed overlay.
@@ -2739,7 +2695,7 @@ impl crate::EngineApp {
         }
     }
 
-    // ΓöÇΓöÇ Delete Confirmation Dialog ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ── Delete Confirmation Dialog ──────────────────────────────────────
 
     fn draw_delete_confirm_dialog(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
         let Some(idx) = self.gameplay.pending_delete else {
@@ -2900,9 +2856,8 @@ impl crate::EngineApp {
         }
     }
 
-    // ΓöÇΓöÇ Settings Menu ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ── Settings Menu ───────────────────────────────────────────────────
 
-    #[allow(unused_assignments)]
     fn draw_settings_menu(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
         // Dark overlay.
         ui.quad(0.0, 0.0, w, h, [0, 0, 0, 180]);
@@ -3150,7 +3105,6 @@ impl crate::EngineApp {
             panel_w - 32.0,
             slider_idx,
         );
-        slider_idx += 1;
         sy = ny;
         sliders.push(s_rect);
 
@@ -3709,7 +3663,7 @@ impl crate::EngineApp {
 
     /// Draw the creative inventory overlay (Builder's Catalog).
     fn draw_block_picker(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
-        // ΓöÇΓöÇ Design tokens (matching the HTML mockup) ΓöÇΓöÇ
+        // ── Design tokens (matching the HTML mockup) ──
         let ink = [28, 27, 32, 255]; // #1c1b20
         let slate = [74, 73, 82, 255]; // #4a4952
         let slate_deep = [55, 54, 61, 255]; // #37363d
@@ -3725,7 +3679,7 @@ impl crate::EngineApp {
         let cols = 9usize;
         let panel_pad = 12.0f32;
 
-        // ΓöÇΓöÇ Tab definitions ΓöÇΓöÇ
+        // ── Tab definitions ──
         let tabs = [
             "Blocks",
             "Nature",
@@ -3738,7 +3692,7 @@ impl crate::EngineApp {
         ];
         let tab_count = tabs.len();
 
-        // ΓöÇΓöÇ Filter items by active tab ΓöÇΓöÇ
+        // ── Filter items by active tab ──
         let active_tab = self.gameplay.creative_tab;
         let is_search = active_tab == tab_count - 1; // last tab is search
         let filtered_items: Vec<&crate::CreativeItem> = if is_search {
@@ -3768,7 +3722,7 @@ impl crate::EngineApp {
         let rows = item_count.div_ceil(cols);
         let visible_rows = rows.min(5); // Show max 5 rows, scroll for more
 
-        // ΓöÇΓöÇ Panel dimensions ΓöÇΓöÇ
+        // ── Panel dimensions ──
         let grid_w = cols as f32 * (slot_size + slot_gap) - slot_gap;
         let panel_w = grid_w + panel_pad * 2.0;
         let tab_height = 32.0f32;
@@ -3792,10 +3746,10 @@ impl crate::EngineApp {
         let panel_x = (w - panel_w) * 0.5;
         let panel_y = (h - panel_h) * 0.5 - 10.0;
 
-        // ΓöÇΓöÇ Dim background ΓöÇΓöÇ
+        // ── Dim background ──
         ui.quad(0.0, 0.0, w, h, [0, 0, 0, 160]);
 
-        // ΓöÇΓöÇ Tab row (above panel) ΓöÇΓöÇ
+        // ── Tab row (above panel) ──
         let tab_w = 40.0f32;
         let tab_gap = 2.0f32;
         let tab_row_w = tab_count as f32 * tab_w + (tab_count - 1) as f32 * tab_gap;
@@ -3879,7 +3833,7 @@ impl crate::EngineApp {
             }
         }
 
-        // ΓöÇΓöÇ Panel background ΓöÇΓöÇ
+        // ── Panel background ──
         // Gradient approximation: use the mid-slate color
         ui.quad(panel_x, panel_y, panel_w, panel_h, slate);
         // Border
@@ -3896,7 +3850,7 @@ impl crate::EngineApp {
 
         let mut cy = panel_y + panel_pad;
 
-        // ΓöÇΓöÇ Title bar ΓöÇΓöÇ
+        // ── Title bar ──
         let category_label = if is_search {
             "Search"
         } else {
@@ -3933,7 +3887,7 @@ impl crate::EngineApp {
         );
         cy += titlebar_h + 6.0;
 
-        // ΓöÇΓöÇ Search row (only when search tab active) ΓöÇΓöÇ
+        // ── Search row (only when search tab active) ──
         if is_search {
             ui.quad(panel_x + panel_pad, cy, grid_w, search_h, slot_bg);
             ui.rect_border(panel_x + panel_pad, cy, grid_w, search_h, 1.0, ink);
@@ -3953,7 +3907,7 @@ impl crate::EngineApp {
             cy += search_h + 6.0;
         }
 
-        // ΓöÇΓöÇ Item grid ΓöÇΓöÇ
+        // ── Item grid ──
         let grid_x0 = panel_x + panel_pad;
         let grid_y0 = cy;
         let mut hovered_item_name: Option<&str> = None;
@@ -4013,7 +3967,7 @@ impl crate::EngineApp {
             );
         }
 
-        // ΓöÇΓöÇ Tooltip (shown when hovering over an item) ΓöÇΓöÇ
+        // ── Tooltip (shown when hovering over an item) ──
         if let (Some(name), Some(cat)) = (hovered_item_name, hovered_item_cat) {
             let tooltip_pad = 8.0f32;
             let tooltip_w = 140.0f32;
@@ -4055,12 +4009,12 @@ impl crate::EngineApp {
         }
         cy += grid_h + panel_pad;
 
-        // ΓöÇΓöÇ Divider ΓöÇΓöÇ
+        // ── Divider ──
         ui.quad(panel_x + panel_pad, cy, grid_w, divider_h, ink);
         ui.quad(panel_x + panel_pad, cy + 1.0, grid_w, 1.0, slate_light);
         cy += divider_h + 6.0;
 
-        // ΓöÇΓöÇ Hotbar (bottom section) ΓöÇΓöÇ
+        // ── Hotbar (bottom section) ──
         let hotbar_x0 = panel_x + panel_pad;
         for i in 0..9 {
             let sx = hotbar_x0 + i as f32 * (slot_size + slot_gap);
@@ -4524,7 +4478,7 @@ impl crate::EngineApp {
             2.0,
         );
 
-        // Player direction indicator ΓÇö triangle pointing in facing direction.
+        // Player direction indicator — triangle pointing in facing direction.
         let dot_x = mx + map_size * 0.5;
         let dot_y = my + map_size * 0.5;
         let dot_size = 4.0f32;
@@ -5121,7 +5075,7 @@ impl crate::EngineApp {
     }
 }
 
-// ΓöÇΓöÇ Transform helper functions (Phase 7) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Transform helper functions (Phase 7) ─────────────────────────────
 
 use glam::IVec3;
 use std::sync::Arc;

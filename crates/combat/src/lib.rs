@@ -136,14 +136,14 @@ impl DamageSource {
                 // MC formula: damage = distance - 3.0, minimum 0
                 (distance - 3.0).max(0.0)
             }
-            Self::Fire { .. } => 1.0,     // 1 heart/sec
-            Self::Lava { .. } => 4.0,     // 4 hearts/sec
-            Self::Drowning => 2.0,        // 2 hearts/sec
-            Self::Suffocation => 1.0,     // 1 heart/sec
-            Self::Cactus => 0.5,          // half heart per hit
-            Self::Void => 1000.0,         // instant kill
-            Self::Starvation => 1.0,      // 1 heart per 4 seconds
-            Self::Entity { .. } => 1.0,   // base, overridden by weapon
+            Self::Fire { .. } => 1.0,   // 1 heart/sec
+            Self::Lava { .. } => 4.0,   // 4 hearts/sec
+            Self::Drowning => 2.0,      // 2 hearts/sec
+            Self::Suffocation => 1.0,   // 1 heart/sec
+            Self::Cactus => 0.5,        // half heart per hit
+            Self::Void => 1000.0,       // instant kill
+            Self::Starvation => 1.0,    // 1 heart per 4 seconds
+            Self::Entity { .. } => 1.0, // base, overridden by weapon
             Self::Generic => 1.0,
         }
     }

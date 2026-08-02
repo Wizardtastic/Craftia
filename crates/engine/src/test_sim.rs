@@ -1,4 +1,4 @@
-﻿//! `TestSim` ΓÇö headless simulation harness for ECS integration tests.
+//! `TestSim` — headless simulation harness for ECS integration tests.
 //!
 //! Wraps [`Simulation`] with ergonomic builders and assertion helpers
 //! so `#[test]` functions can drive a fixed-timestep ECS world without

@@ -21,8 +21,8 @@ mod regen_system;
 pub mod xp_system;
 
 pub use animation_system::{
-    animation_system, AnimationDataResource, AnimChannel, AnimInterpolation, AnimPath,
-    ModelAnimationData, SkinDataResource, ModelSkinData, SkinInfo, AnimationClip,
+    animation_system, AnimChannel, AnimInterpolation, AnimPath, AnimationClip,
+    AnimationDataResource, ModelAnimationData, ModelSkinData, SkinDataResource, SkinInfo,
 };
 pub use armor_system::armor_system;
 pub use drowning_system::{drowning_system, DrowningState};

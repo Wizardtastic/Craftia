@@ -81,7 +81,7 @@ pub fn draw_right_panel(
     let mut y = panel_y;
     let lx = panel_x + 8.0;
 
-    // ΓöÇΓöÇ Tool Options header ΓöÇΓöÇ
+    // ── Tool Options header ──
     y = draw_header(
         ui,
         &format!("Tool Options \u{2014} {}", edit.active_tool_label()),
@@ -166,7 +166,7 @@ pub fn draw_right_panel(
         _ => {}
     }
 
-    // ΓöÇΓöÇ Undo/Redo section (Phase 8) ΓöÇΓöÇ
+    // ── Undo/Redo section (Phase 8) ──
     y = draw_separator(ui, panel_x, y, panel_w);
     y = draw_header(ui, "Undo / Redo", panel_x, y, panel_w, font);
     let undo_label = format!("Undo ({})", edit.history.len().saturating_sub(1));
@@ -189,7 +189,7 @@ pub fn draw_right_panel(
         action = RightPanelAction::RedoAction;
     }
 
-    // ΓöÇΓöÇ Tool Mask section ΓöÇΓöÇ
+    // ── Tool Mask section ──
     y = draw_separator(ui, panel_x, y, panel_w);
     y = draw_header(ui, "Tool Mask", panel_x, y, panel_w, font);
     let (ny, _mask_clicked) = draw_toggle_row(
@@ -208,7 +208,7 @@ pub fn draw_right_panel(
     ui.text("No mask active", lx, y + 4.0, 0.6, theme::TEXT_DIM, font);
     y += 22.0;
 
-    // ΓöÇΓöÇ Target Info section ΓöÇΓöÇ
+    // ── Target Info section ──
     y = draw_separator(ui, panel_x, y, panel_w);
     y = draw_header(ui, "Target Info", panel_x, y, panel_w, font);
 
@@ -222,7 +222,7 @@ pub fn draw_right_panel(
     y = draw_label_value(ui, "Biome", "Plains", panel_x, y, panel_w, font);
     y = draw_label_value(ui, "Light", "Sky:15 Block:0", panel_x, y, panel_w, font);
 
-    // ΓöÇΓöÇ World Properties section ΓöÇΓöÇ
+    // ── World Properties section ──
     y = draw_separator(ui, panel_x, y, panel_w);
     y = draw_header(ui, "World Properties", panel_x, y, panel_w, font);
     y = draw_slider_row(
@@ -274,7 +274,7 @@ pub fn draw_right_panel(
     }
 
     // Texture pack manager section
-    y = draw_pack_manager_section(
+    draw_pack_manager_section(
         ui,
         pack_infos,
         screen_w,
@@ -508,7 +508,7 @@ fn draw_select_options(
     font: &FontAtlas,
     mx: f32,
     my: f32,
-    action: &mut RightPanelAction,
+    _action: &mut RightPanelAction,
 ) -> f32 {
     // Selection info
     y = draw_label_value(ui, "Dimensions", &sel.dimensions_str(), x, y, w, font);
@@ -1253,21 +1253,54 @@ fn draw_pack_manager_section(
     // Section header
     ui.quad(x, y, w, header_h, theme::HEADER_BG);
     ui.quad(x, y + header_h - 1.0, w, 1.0, theme::BORDER);
-    ui.text("Texture Packs", x + 7.0, y + 3.0, 0.65, theme::TEXT_SECONDARY, font);
+    ui.text(
+        "Texture Packs",
+        x + 7.0,
+        y + 3.0,
+        0.65,
+        theme::TEXT_SECONDARY,
+        font,
+    );
 
     let mut cy = y + header_h + 4.0;
 
     if packs.is_empty() {
         // No packs loaded: show help text.
-        ui.text("Place .zip packs in", x + 7.0, cy, 0.55, theme::TEXT_DIM, font);
+        ui.text(
+            "Place .zip packs in",
+            x + 7.0,
+            cy,
+            0.55,
+            theme::TEXT_DIM,
+            font,
+        );
         cy += 13.0;
-        ui.text("texture_packs_dir to", x + 7.0, cy, 0.55, theme::TEXT_DIM, font);
+        ui.text(
+            "texture_packs_dir to",
+            x + 7.0,
+            cy,
+            0.55,
+            theme::TEXT_DIM,
+            font,
+        );
         cy += 13.0;
-        ui.text("load custom textures.", x + 7.0, cy, 0.55, theme::TEXT_DIM, font);
+        ui.text(
+            "load custom textures.",
+            x + 7.0,
+            cy,
+            0.55,
+            theme::TEXT_DIM,
+            font,
+        );
         cy += 16.0;
         ui.text("Supported:", x + 7.0, cy, 0.55, theme::TEXT_SECONDARY, font);
         cy += 13.0;
-        for fmt in &["pack.toml (metadata)", "textures.toml (tile map)", "animations.toml (frames)", "*.png (textures)"] {
+        for fmt in &[
+            "pack.toml (metadata)",
+            "textures.toml (tile map)",
+            "animations.toml (frames)",
+            "*.png (textures)",
+        ] {
             ui.text(fmt, x + 14.0, cy, 0.48, theme::TEXT_DIM, font);
             cy += 12.0;
         }
@@ -1276,7 +1309,11 @@ fn draw_pack_manager_section(
         for pack in packs {
             // Enable/disable indicator
             let icon = if pack.enabled { "\u{25CF}" } else { "\u{25CB}" };
-            let icon_color = if pack.enabled { theme::ACCENT } else { theme::TEXT_DIM };
+            let icon_color = if pack.enabled {
+                theme::ACCENT
+            } else {
+                theme::TEXT_DIM
+            };
             ui.text(icon, x + 5.0, cy, 0.55, icon_color, font);
             ui.text(&pack.name, x + 16.0, cy, 0.60, theme::TEXT_PRIMARY, font);
             cy += 14.0;
@@ -1306,12 +1343,12 @@ fn draw_pack_manager_section(
 
             // Description (truncated)
             if !pack.description.is_empty() {
-            let desc: String = pack.description.chars().take(28).collect();
-            let desc = if pack.description.len() > 28 {
-                format!("{}...", desc)
-            } else {
-                desc
-            };
+                let desc: String = pack.description.chars().take(28).collect();
+                let desc = if pack.description.len() > 28 {
+                    format!("{}...", desc)
+                } else {
+                    desc
+                };
                 ui.text(&desc, x + 16.0, cy, 0.42, theme::TEXT_SECONDARY, font);
                 cy += 11.0;
             }

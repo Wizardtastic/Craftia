@@ -1,9 +1,9 @@
 //! Keyframe sampling: evaluate animation channels at a given time.
 
-use glam::{Quat, Vec3, Mat4};
+use glam::{Mat4, Quat, Vec3};
 
 use crate::data::{AnimationChannel, Interpolation, TargetedProperty};
-use crate::interpolate::{lerp4, slerp, cubic_hermite4};
+use crate::interpolate::{cubic_hermite4, lerp4, slerp};
 
 /// Sample a channel at the given time, returning the raw [f32; 4] value.
 pub fn sample_channel(channel: &AnimationChannel, time: f32) -> [f32; 4] {
@@ -42,10 +42,16 @@ pub fn sample_channel(channel: &AnimationChannel, time: f32) -> [f32; 4] {
         Interpolation::Linear => {
             // Use slerp for rotations, lerp for everything else.
             match channel.property {
-                TargetedProperty::Rotation => {
-                    slerp(channel.keyframe_values[idx], channel.keyframe_values[next_idx], t)
-                }
-                _ => lerp4(channel.keyframe_values[idx], channel.keyframe_values[next_idx], t),
+                TargetedProperty::Rotation => slerp(
+                    channel.keyframe_values[idx],
+                    channel.keyframe_values[next_idx],
+                    t,
+                ),
+                _ => lerp4(
+                    channel.keyframe_values[idx],
+                    channel.keyframe_values[next_idx],
+                    t,
+                ),
             }
         }
         Interpolation::CubicSpline => {
@@ -56,7 +62,12 @@ pub fn sample_channel(channel: &AnimationChannel, time: f32) -> [f32; 4] {
             // Approximate tangents from neighboring values.
             let m0 = if idx > 0 {
                 let prev = channel.keyframe_values[idx - 1];
-                [p0[0] - prev[0], p0[1] - prev[1], p0[2] - prev[2], p0[3] - prev[3]]
+                [
+                    p0[0] - prev[0],
+                    p0[1] - prev[1],
+                    p0[2] - prev[2],
+                    p0[3] - prev[3],
+                ]
             } else {
                 [0.0; 4]
             };
@@ -75,7 +86,11 @@ pub fn sample_channel(channel: &AnimationChannel, time: f32) -> [f32; 4] {
         }
         Interpolation::Bezier => {
             // Fallback to linear for now.
-            lerp4(channel.keyframe_values[idx], channel.keyframe_values[next_idx], t)
+            lerp4(
+                channel.keyframe_values[idx],
+                channel.keyframe_values[next_idx],
+                t,
+            )
         }
     }
 }
@@ -105,11 +120,7 @@ pub fn trs_to_matrix(translation: Vec3, rotation: Quat, scale: Vec3) -> Mat4 {
 
 /// Compute node transforms for all nodes in a clip at the given time.
 /// Returns a Vec of Mat4, one per node index.
-pub fn evaluate_clip(
-    clip: &crate::data::AnimationClip,
-    time: f32,
-    node_count: usize,
-) -> Vec<Mat4> {
+pub fn evaluate_clip(clip: &crate::data::AnimationClip, time: f32, node_count: usize) -> Vec<Mat4> {
     let mut translations = vec![Vec3::ZERO; node_count];
     let mut rotations = vec![Quat::IDENTITY; node_count];
     let mut scales = vec![Vec3::ONE; node_count];
