@@ -66,6 +66,7 @@ pub fn draw_right_panel(
     font: &FontAtlas,
     _player_pos: (f32, f32, f32),
     cursor_pos: Option<(i32, i32, i32)>,
+    pack_infos: &[crate::TexturePackInfo],
 ) -> RightPanelAction {
     let mut action = RightPanelAction::None;
     let panel_x = screen_w - theme::RIGHT_PANEL_W;
@@ -271,6 +272,18 @@ pub fn draw_right_panel(
     if chunks_clicked {
         action = RightPanelAction::ToggleShowChunks;
     }
+
+    // Texture pack manager section
+    y = draw_pack_manager_section(
+        ui,
+        pack_infos,
+        screen_w,
+        y,
+        screen_h,
+        mouse,
+        font,
+        &mut action,
+    );
 
     action
 }
@@ -1220,4 +1233,90 @@ fn draw_button_row(
     );
 
     y + theme::OPTION_ROW_H
+}
+
+/// Draw the texture pack manager section in the right panel.
+fn draw_pack_manager_section(
+    ui: &mut UiDrawData,
+    packs: &[crate::TexturePackInfo],
+    screen_w: f32,
+    y: f32,
+    _screen_h: f32,
+    _mouse: (f32, f32),
+    font: &FontAtlas,
+    _action: &mut RightPanelAction,
+) -> f32 {
+    let x = screen_w - theme::RIGHT_PANEL_W;
+    let w = theme::RIGHT_PANEL_W;
+    let header_h = theme::SECTION_HEADER_H;
+
+    // Section header
+    ui.quad(x, y, w, header_h, theme::HEADER_BG);
+    ui.quad(x, y + header_h - 1.0, w, 1.0, theme::BORDER);
+    ui.text("Texture Packs", x + 7.0, y + 3.0, 0.65, theme::TEXT_SECONDARY, font);
+
+    let mut cy = y + header_h + 4.0;
+
+    if packs.is_empty() {
+        // No packs loaded: show help text.
+        ui.text("Place .zip packs in", x + 7.0, cy, 0.55, theme::TEXT_DIM, font);
+        cy += 13.0;
+        ui.text("texture_packs_dir to", x + 7.0, cy, 0.55, theme::TEXT_DIM, font);
+        cy += 13.0;
+        ui.text("load custom textures.", x + 7.0, cy, 0.55, theme::TEXT_DIM, font);
+        cy += 16.0;
+        ui.text("Supported:", x + 7.0, cy, 0.55, theme::TEXT_SECONDARY, font);
+        cy += 13.0;
+        for fmt in &["pack.toml (metadata)", "textures.toml (tile map)", "animations.toml (frames)", "*.png (textures)"] {
+            ui.text(fmt, x + 14.0, cy, 0.48, theme::TEXT_DIM, font);
+            cy += 12.0;
+        }
+    } else {
+        // Show loaded packs with metadata.
+        for pack in packs {
+            // Enable/disable indicator
+            let icon = if pack.enabled { "\u{25CF}" } else { "\u{25CB}" };
+            let icon_color = if pack.enabled { theme::ACCENT } else { theme::TEXT_DIM };
+            ui.text(icon, x + 5.0, cy, 0.55, icon_color, font);
+            ui.text(&pack.name, x + 16.0, cy, 0.60, theme::TEXT_PRIMARY, font);
+            cy += 14.0;
+
+            // Version + author line
+            if !pack.version.is_empty() || !pack.author.is_empty() {
+                let detail = match (pack.version.is_empty(), pack.author.is_empty()) {
+                    (false, false) => format!("v{} by {}", pack.version, pack.author),
+                    (false, true) => format!("v{}", pack.version),
+                    (true, false) => format!("by {}", pack.author),
+                    (true, true) => String::new(),
+                };
+                if !detail.is_empty() {
+                    ui.text(&detail, x + 16.0, cy, 0.45, theme::TEXT_DIM, font);
+                    cy += 12.0;
+                }
+            }
+
+            // Stats line
+            let stats = if pack.animation_count > 0 {
+                format!("{} tiles, {} anims", pack.tile_count, pack.animation_count)
+            } else {
+                format!("{} tiles", pack.tile_count)
+            };
+            ui.text(&stats, x + 16.0, cy, 0.45, theme::TEXT_DIM, font);
+            cy += 12.0;
+
+            // Description (truncated)
+            if !pack.description.is_empty() {
+            let desc: String = pack.description.chars().take(28).collect();
+            let desc = if pack.description.len() > 28 {
+                format!("{}...", desc)
+            } else {
+                desc
+            };
+                ui.text(&desc, x + 16.0, cy, 0.42, theme::TEXT_SECONDARY, font);
+                cy += 11.0;
+            }
+            cy += 4.0;
+        }
+    }
+    cy
 }

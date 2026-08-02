@@ -697,6 +697,42 @@ pub fn run(config: EngineConfig) -> Result<()> {
 /// Schematic clipboard: origin corner, opposite corner, flattened block list.
 type Clipboard = ((i32, i32, i32), (i32, i32, i32), Vec<voxel_core::BlockId>);
 
+/// Manages loaded texture packs and their UI state.
+pub struct TexturePackManager {
+    /// Currently loaded texture packs (in load order).
+    pub loaded_packs: Vec<TexturePackInfo>,
+    /// Whether the pack manager panel is open.
+    pub panel_open: bool,
+}
+
+/// Info about a loaded texture pack, displayed in the UI.
+#[derive(Clone, Debug)]
+pub struct TexturePackInfo {
+    /// Display name.
+    pub name: String,
+    /// Description from pack.toml.
+    pub description: String,
+    /// Version from pack.toml.
+    pub version: String,
+    /// Author from pack.toml.
+    pub author: String,
+    /// Number of overridden tiles.
+    pub tile_count: usize,
+    /// Number of animation definitions.
+    pub animation_count: usize,
+    /// Whether this pack is currently enabled.
+    pub enabled: bool,
+}
+
+impl Default for TexturePackManager {
+    fn default() -> Self {
+        Self {
+            loaded_packs: Vec::new(),
+            panel_open: false,
+        }
+    }
+}
+
 pub(crate) struct EngineApp {
     config: EngineConfig,
     /// Render state: window, renderer, font, window size.
@@ -726,6 +762,8 @@ pub(crate) struct EngineApp {
     sysinfo: sysinfo::System,
     /// Counter to throttle sysinfo refreshes (every N frames).
     sysinfo_refresh_counter: u32,
+    /// Texture pack manager: tracks loaded packs and their metadata.
+    texture_pack_manager: TexturePackManager,
 }
 
 impl EngineApp {
@@ -845,6 +883,7 @@ impl EngineApp {
             audio: voxel_audio::AudioManager::null(),
             sysinfo: sysinfo::System::new(),
             sysinfo_refresh_counter: 0,
+            texture_pack_manager: TexturePackManager::default(),
         })
     }
 
@@ -1060,6 +1099,18 @@ impl ApplicationHandler for EngineApp {
             match Renderer::new(wh, dh, self.config.render.clone()) {
                 Ok(r) => {
                     self.render.window_size = (r.extent().width, r.extent().height);
+                    // Populate texture pack manager from initial renderer pack info.
+                    self.texture_pack_manager.loaded_packs = r.pack_infos().iter().map(|p| {
+                        crate::TexturePackInfo {
+                            name: p.name.clone(),
+                            description: p.description.clone(),
+                            version: p.version.clone(),
+                            author: p.author.clone(),
+                            tile_count: p.tile_count,
+                            animation_count: p.animation_count,
+                            enabled: p.enabled,
+                        }
+                    }).collect();
                     self.render.renderer = Some(r);
                 }
                 Err(e) => {

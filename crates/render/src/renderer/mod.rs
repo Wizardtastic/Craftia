@@ -583,15 +583,29 @@ pub struct Renderer {
     sky_ambient: f32,
     sky_underwater: bool,
     sun_dir: [f32; 3],
+    /// Metadata about loaded texture packs (for engine UI).
+    loaded_pack_infos: Vec<PackInfo>,
+}
+
+/// Information about a loaded texture pack, for display in the engine UI.
+#[derive(Clone, Debug)]
+pub struct PackInfo {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub author: String,
+    pub tile_count: usize,
+    pub animation_count: usize,
+    pub enabled: bool,
 }
 
 /// Load texture pack tile mappings from `texture_packs_dir` (if configured)
-/// and merge them with the base `textures_dir` mapping. Returns `None`
-/// when there is no packs dir or no packs were found.
+/// and merge them with the base `textures_dir` mapping. Returns `(merged_mapping, pack_infos)`
+/// where `pack_infos` contains metadata about each loaded pack for the UI.
 fn load_pack_mapping(
     textures_dir: &Path,
     texture_packs_dir: Option<&Path>,
-) -> Option<std::collections::HashMap<u32, String>> {
+) -> (Option<std::collections::HashMap<u32, String>>, Vec<PackInfo>) {
     let packs_dir = match texture_packs_dir {
         Some(d) if d.is_dir() => d,
         Some(d) => {
@@ -599,12 +613,21 @@ fn load_pack_mapping(
                 "texture_packs_dir configured but not found: {}",
                 d.display()
             );
-            return None;
+            return (None, Vec::new());
         }
-        None => return None,
+        None => return (None, Vec::new()),
     };
     match voxel_asset_pipeline::texture_pack::load_all_texture_packs(packs_dir, textures_dir) {
         Ok((merged, packs)) => {
+            let pack_infos: Vec<PackInfo> = packs.iter().map(|p| PackInfo {
+                name: p.metadata().name.clone(),
+                description: p.metadata().description.clone(),
+                version: p.metadata().version.clone(),
+                author: p.metadata().author.clone(),
+                tile_count: p.metadata().tile_count,
+                animation_count: p.animations().len(),
+                enabled: true,
+            }).collect();
             if !packs.is_empty() {
                 log::info!(
                     "loaded {} texture pack(s) with {} overridden tile(s)",
@@ -612,11 +635,12 @@ fn load_pack_mapping(
                     merged.len()
                 );
             }
-            if merged.is_empty() { None } else { Some(merged) }
+            let mapping = if merged.is_empty() { None } else { Some(merged) };
+            (mapping, pack_infos)
         }
         Err(e) => {
             log::warn!("failed to load texture packs: {e}");
-            None
+            (None, Vec::new())
         }
     }
 }
@@ -672,11 +696,17 @@ impl Renderer {
         // --- atlas texture ---
         // The textures directory must exist and contain a textures.toml
         // config. If it doesn't, all tiles show the blue+black error pattern.
+        let (pack_mapping, initial_pack_infos) = load_pack_mapping(
+            config.textures_dir.as_deref().unwrap_or_else(|| Path::new("")),
+            config.texture_packs_dir.as_deref(),
+        );
         let atlas_pixels = match config.textures_dir.as_deref() {
-            Some(dir) if dir.is_dir() => build_atlas_with_textures(dir),
+            Some(dir) if dir.is_dir() => {
+                build_atlas_with_packs(dir, pack_mapping.as_ref(), config.texture_packs_dir.as_deref())
+            }
             _ => {
                 log::warn!(
-                    "no textures_dir configured or directory not found â€” all tiles will show error pattern"
+                    "no textures_dir configured or directory not found — all tiles will show error pattern"
                 );
                 build_atlas_with_textures(Path::new(""))
             }
@@ -1841,11 +1871,17 @@ impl Renderer {
             sky_underwater: false,
             sun_dir: [0.0, 1.0, 0.0],
             pending_destruction: Vec::new(),
+            loaded_pack_infos: initial_pack_infos,
         })
     }
 
     pub fn config(&self) -> &RendererConfig {
         &self.config
+    }
+
+    /// Returns metadata about currently loaded texture packs.
+    pub fn pack_infos(&self) -> &[PackInfo] {
+        &self.loaded_pack_infos
     }
 
     /// Mark the swapchain for recreation on the next draw (call on window resize).
@@ -1874,10 +1910,11 @@ impl Renderer {
             .as_deref()
             .filter(|d| d.is_dir())
             .unwrap_or_else(|| Path::new(""));
-        let pack_mapping = load_pack_mapping(
+        let (pack_mapping, pack_infos) = load_pack_mapping(
             dir,
             self.config.texture_packs_dir.as_deref(),
         );
+        self.loaded_pack_infos = pack_infos;
         let atlas_pixels = build_atlas_with_packs(dir, pack_mapping.as_ref(), self.config.texture_packs_dir.as_deref());
         let new_atlas = AtlasTexture::new(
             &self.device,

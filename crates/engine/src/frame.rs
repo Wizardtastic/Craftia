@@ -80,6 +80,18 @@ impl crate::EngineApp {
                         if let Some(r) = self.render.renderer.as_mut() {
                             match r.reload_atlas() {
                                 Ok(()) => {
+                                    // Sync pack info from renderer to engine UI manager.
+                                    self.texture_pack_manager.loaded_packs = r.pack_infos().iter().map(|p| {
+                                        crate::TexturePackInfo {
+                                            name: p.name.clone(),
+                                            description: p.description.clone(),
+                                            version: p.version.clone(),
+                                            author: p.author.clone(),
+                                            tile_count: p.tile_count,
+                                            animation_count: p.animation_count,
+                                            enabled: p.enabled,
+                                        }
+                                    }).collect();
                                     self.gameplay.chat.push_message("[atlas] reloaded".into());
                                 }
                                 Err(e) => {

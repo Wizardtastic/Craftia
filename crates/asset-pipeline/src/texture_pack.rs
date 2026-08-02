@@ -30,6 +30,32 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+/// Metadata parsed from `pack.toml` inside a texture pack zip.
+#[derive(Clone, Debug, Default)]
+pub struct PackMetadata {
+    /// Human-readable pack name.
+    pub name: String,
+    /// Pack description.
+    pub description: String,
+    /// Semantic version string.
+    pub version: String,
+    /// Author name.
+    pub author: String,
+    /// Number of overridden tiles.
+    pub tile_count: usize,
+}
+
+/// An animated texture definition parsed from `animations.toml` in a pack.
+#[derive(Clone, Debug)]
+pub struct PackAnimationDef {
+    /// Tile index that this animation overrides.
+    pub tile_index: u32,
+    /// Frame tile indices (each entry is a tile in the atlas).
+    pub frames: Vec<u32>,
+    /// Duration per frame in seconds.
+    pub frame_duration: f32,
+}
+
 /// A loaded texture pack: owns the extracted tile→filename mapping and
 /// a temporary directory containing the extracted PNGs.
 pub struct TexturePack {
@@ -39,6 +65,10 @@ pub struct TexturePack {
     extract_dir: PathBuf,
     /// Tile index → extracted PNG filename mapping.
     mapping: HashMap<u32, String>,
+    /// Pack metadata from pack.toml (if present).
+    pub metadata: PackMetadata,
+    /// Animation definitions from animations.toml (if present).
+    pub animations: Vec<PackAnimationDef>,
 }
 
 impl TexturePack {
@@ -50,6 +80,16 @@ impl TexturePack {
     /// The directory containing the extracted PNG files.
     pub fn extract_dir(&self) -> &Path {
         &self.extract_dir
+    }
+
+    /// The pack metadata (name, description, version, author).
+    pub fn metadata(&self) -> &PackMetadata {
+        &self.metadata
+    }
+
+    /// Animation definitions for this pack.
+    pub fn animations(&self) -> &[PackAnimationDef] {
+        &self.animations
     }
 }
 
@@ -94,6 +134,8 @@ pub fn load_texture_pack(zip_path: &Path, base_textures_dir: &Path) -> Result<Te
 
     // Extract all files.
     let mut toml_content: Option<String> = None;
+    let mut pack_toml_content: Option<String> = None;
+    let mut animations_toml_content: Option<String> = None;
     let mut extracted_files: Vec<String> = Vec::new();
 
     for i in 0..archive.len() {
@@ -137,6 +179,16 @@ pub fn load_texture_pack(zip_path: &Path, base_textures_dir: &Path) -> Result<Te
             toml_content = Some(String::from_utf8_lossy(&content).to_string());
         }
 
+        // Check if this is pack.toml (at any depth).
+        if entry_name == "pack.toml" || entry_name.ends_with("/pack.toml") {
+            pack_toml_content = Some(String::from_utf8_lossy(&content).to_string());
+        }
+
+        // Check if this is animations.toml (at any depth).
+        if entry_name == "animations.toml" || entry_name.ends_with("/animations.toml") {
+            animations_toml_content = Some(String::from_utf8_lossy(&content).to_string());
+        }
+
         // Track extracted PNG files.
         if entry_name.ends_with(".png") {
             // Get just the filename (not the full path in the zip).
@@ -159,10 +211,28 @@ pub fn load_texture_pack(zip_path: &Path, base_textures_dir: &Path) -> Result<Te
         build_mapping_from_extracted(&extracted_files, &base_mapping)
     };
 
+    // Parse pack metadata.
+    let metadata = pack_toml_content
+        .as_deref()
+        .map(parse_pack_metadata)
+        .unwrap_or_default();
+    let metadata = PackMetadata {
+        name: if metadata.name.is_empty() { pack_name.clone() } else { metadata.name },
+        tile_count: mapping.len(),
+        ..metadata
+    };
+
+    // Parse animation definitions.
+    let animations = animations_toml_content
+        .as_deref()
+        .map(parse_pack_animations)
+        .unwrap_or_default();
+
     log::info!(
-        "loaded texture pack '{}' ({} tiles, extracted to {})",
+        "loaded texture pack '{}' ({} tiles, {} animations, extracted to {})",
         pack_name,
         mapping.len(),
+        animations.len(),
         extract_dir.display()
     );
 
@@ -170,6 +240,8 @@ pub fn load_texture_pack(zip_path: &Path, base_textures_dir: &Path) -> Result<Te
         name: pack_name,
         extract_dir,
         mapping,
+        metadata,
+        animations,
     })
 }
 
@@ -348,6 +420,69 @@ pub fn load_texture_config(textures_dir: &Path) -> HashMap<u32, String> {
         }
     }
     map
+}
+
+/// Parse `pack.toml` content into a `PackMetadata`.
+fn parse_pack_metadata(content: &str) -> PackMetadata {
+    let value: toml::Value = match content.parse() {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("failed to parse pack.toml: {e}");
+            return PackMetadata::default();
+        }
+    };
+    let pack = value.get("pack").and_then(|v| v.as_table());
+    PackMetadata {
+        name: pack.and_then(|t| t.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        description: pack.and_then(|t| t.get("description")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        version: pack.and_then(|t| t.get("version")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        author: pack.and_then(|t| t.get("author")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        tile_count: 0,
+    }
+}
+
+/// Parse `animations.toml` content into a list of `PackAnimationDef`.
+///
+/// Expected format:
+/// ```toml
+/// [[animation]]
+/// tile = 6          # base tile index (e.g. water)
+/// frames = [6, 41, 42, 43]  # tile indices for each frame
+/// duration = 0.5    # seconds per frame
+/// ```
+fn parse_pack_animations(content: &str) -> Vec<PackAnimationDef> {
+    let value: toml::Value = match content.parse() {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("failed to parse animations.toml: {e}");
+            return Vec::new();
+        }
+    };
+    let animations = match value.get("animation").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut defs = Vec::new();
+    for entry in animations {
+        let tile_index = entry.get("tile").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+        let frames: Vec<u32> = entry
+            .get("frames")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_integer().map(|i| i as u32)).collect())
+            .unwrap_or_default();
+        let frame_duration = entry
+            .get("duration")
+            .and_then(|v| v.as_float())
+            .unwrap_or(0.5) as f32;
+        if !frames.is_empty() {
+            defs.push(PackAnimationDef {
+                tile_index,
+                frames,
+                frame_duration,
+            });
+        }
+    }
+    defs
 }
 
 #[cfg(test)]

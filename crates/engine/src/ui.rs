@@ -225,6 +225,7 @@ impl crate::EngineApp {
                 font,
                 (player_pos.x, player_pos.y, player_pos.z),
                 cursor_pos,
+                &self.texture_pack_manager.loaded_packs,
             );
         }
         self.handle_right_panel_action(right_action);
