@@ -848,6 +848,10 @@ impl crate::EngineApp {
                 .selected_block()
                 .unwrap_or(voxel_core::BlockId::AIR);
             hotbar_res.selected_block = selected;
+            // Keep the selected tool metadata synchronized with the slot. The
+            // current default palette carries tier 0, while tool-aware callers
+            // can attach a higher tier to a selected slot explicitly.
+            hotbar_res.selected_tool_tier = self.gameplay.hotbar.selected_tool_tier();
             // Look up the tile index for the held item rendering.
             if !selected.is_air() {
                 let reg = self.world_state.world.registry();

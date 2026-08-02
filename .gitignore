@@ -16,3 +16,5 @@ assets/**/.cache/
 .idea
 .scratch
 /logs
+/PROJECT_DETAILS.md
+.mex

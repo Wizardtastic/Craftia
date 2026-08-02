@@ -144,8 +144,12 @@ fn find_glslang_validator() -> PathBuf {
             return candidate2;
         }
     }
-    // PATH fallback.
-    if let Ok(out) = Command::new("where").arg("glslangValidator").output() {
+    // PATH fallback. `where` is Windows-only, so use `which` on Unix; the
+    // previous Windows-only lookup made Linux builds panic even when
+    // glslangValidator was on PATH (e.g. installed via `apt install
+    // glslang-tools` to /usr/bin).
+    let finder = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(out) = Command::new(finder).arg("glslangValidator").output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(line) = s.lines().next() {

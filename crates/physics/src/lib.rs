@@ -259,8 +259,8 @@ pub fn intersects_solid(world: &World, pos: glam::Vec3, half: glam::Vec3) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxel_core::Ray;
-    use voxel_world::world::World;
+    use voxel_core::{ChunkPos, Ray};
+    use voxel_world::{world::World, Chunk};
 
     #[test]
     fn raycast_voxels_air() {

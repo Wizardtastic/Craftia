@@ -567,9 +567,17 @@ mod tests {
         );
         assert!(set.contains(&pair));
 
-        // A second unique pair should still be admitted.
+        // A second unique pair should still be admitted. Drop the guard
+        // BEFORE calling `check_and_log_unhandled` — that helper locks the
+        // same mutex, and std::sync::Mutex is not reentrant, so holding the
+        // guard across the call self-deadlocks (this test hung forever on the
+        // first `cargo test --workspace` run until the drop was added).
+        drop(set);
         let pair_b = (vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::UNDEFINED);
         check_and_log_unhandled(pair_b.0, pair_b.1);
+        let set = UNHANDLED_LOGGED
+            .lock()
+            .expect("UNHANDLED_LOGGED mutex poisoned in test");
         assert_eq!(set.len(), 2, "a distinct pair should be a second entry");
     }
 }

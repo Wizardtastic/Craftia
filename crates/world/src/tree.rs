@@ -456,9 +456,10 @@ mod tests {
             &noop_neighbour,
         );
         assert!(count > 0, "oak should place blocks");
-        // Should have placed wood above surface.
+        // Should have placed wood above the soil layer (test_chunk fills
+        // local y=1..=2 with dirt, and trunks only overwrite air).
         let wood = reg.id_of("wood").unwrap();
-        assert_eq!(c.get(4, 1, 4), wood, "trunk at y=1 should be wood");
+        assert_eq!(c.get(4, 3, 4), wood, "trunk should grow above the soil");
     }
 
     #[test]
@@ -530,9 +531,11 @@ mod tests {
     fn cross_chunk_uses_neighbour_set() {
         let mut c = test_chunk();
         let reg = BlockRegistry::with_builtins();
-        let mut cross_writes = Vec::new();
+        // `RefCell` keeps the closure `Fn`: `try_place_tree` expects a
+        // `&dyn Fn`, so the closure must not capture `cross_writes` by `&mut`.
+        let cross_writes = std::cell::RefCell::new(Vec::new());
         let neighbour_set = |x: i32, y: i32, z: i32, id: BlockId| {
-            cross_writes.push((x, y, z, id));
+            cross_writes.borrow_mut().push((x, y, z, id));
             true
         };
         // Place a tree near the chunk edge so some canopy spills to
@@ -544,7 +547,7 @@ mod tests {
         // Oak canopy at radius 2 from (wx=0,wz=0) should spill into
         // negative X/Z which is outside chunk origin (0, 64, 0).
         assert!(
-            !cross_writes.is_empty(),
+            !cross_writes.borrow().is_empty(),
             "canopy near chunk edge should spill cross-chunk"
         );
     }

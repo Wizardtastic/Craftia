@@ -156,6 +156,22 @@ fn query_mut_allows_mutation() {
     assert_eq!(total, 2.0);
 }
 
+#[test]
+#[should_panic(expected = "aliased")]
+fn query_rejects_shared_mutable_duplicate_component() {
+    let mut world = World::new();
+    world.spawn((Position { x: 0.0, y: 0.0 },));
+    let _ = world.query::<(&Position, &mut Position)>();
+}
+
+#[test]
+#[should_panic(expected = "duplicate mutable")]
+fn query_rejects_duplicate_mutable_component() {
+    let mut world = World::new();
+    world.spawn((Position { x: 0.0, y: 0.0 },));
+    let _ = world.query::<(&mut Position, &mut Position)>();
+}
+
 // --- Archetypes ------------------------------------------------------------
 
 #[test]
@@ -300,4 +316,64 @@ fn tuple_bundle_with_8_components() {
     assert!(world.is_alive(e));
     assert_eq!(world.get::<Position>(e), Some(&Position { x: 0.0, y: 0.0 }));
     assert_eq!(world.get::<Health>(e), Some(&Health(2)));
+}
+
+// --- Archetypes beyond the 16-component stack buffer ----------------------
+//
+// `get_or_create_archetype`/`transition` use a MAX_STACK=16 stack buffer
+// for the archetype key. Regression: sets larger than 16 must fall back to
+// the heap instead of silently dropping types (which panics later with
+// "missing column in new archetype after get_or_create").
+
+macro_rules! count_comp {
+    ($name:ident, $val:expr) => {
+        #[derive(Debug, Clone, PartialEq)]
+        struct $name(u32);
+        const _: () = ();
+    };
+}
+
+count_comp!(C0, 0);
+count_comp!(C1, 1);
+count_comp!(C2, 2);
+count_comp!(C3, 3);
+count_comp!(C4, 4);
+count_comp!(C5, 5);
+count_comp!(C6, 6);
+count_comp!(C7, 7);
+count_comp!(C8, 8);
+count_comp!(C9, 9);
+count_comp!(C10, 10);
+count_comp!(C11, 11);
+count_comp!(C12, 12);
+count_comp!(C13, 13);
+count_comp!(C14, 14);
+count_comp!(C15, 15);
+count_comp!(C16, 16);
+count_comp!(C17, 17);
+
+#[test]
+fn archetype_supports_more_than_16_components() {
+    let mut world = World::new();
+    let e = world.spawn((C0(0), C1(1), C2(2), C3(3), C4(4), C5(5), C6(6), C7(7)));
+    // Grow the archetype past the 16-component stack-buffer cap.
+    world.set(e, C8(8));
+    world.set(e, C9(9));
+    world.set(e, C10(10));
+    world.set(e, C11(11));
+    world.set(e, C12(12));
+    world.set(e, C13(13));
+    world.set(e, C14(14));
+    world.set(e, C15(15));
+    world.set(e, C16(16)); // 17th component — crosses the cap
+    world.set(e, C17(17)); // 18th
+    assert_eq!(world.get::<C16>(e), Some(&C16(16)));
+    assert_eq!(world.get::<C17>(e), Some(&C17(17)));
+    assert_eq!(world.get::<C0>(e), Some(&C0(0)));
+    // And back down again: removing a component below the cap must also
+    // transition cleanly.
+    let removed = world.remove::<C0>(e);
+    assert_eq!(removed, Some(C0(0)));
+    assert!(!world.has::<C0>(e));
+    assert!(world.has::<C17>(e));
 }

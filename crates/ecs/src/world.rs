@@ -4,6 +4,7 @@
 //! spawn/despawn/set/get API plus the resource and query entry points.
 
 use std::any::{Any, TypeId};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::archetype::{Archetype, ArchetypeId, ColumnCtor, ErasedColumn, TypedColumn};
@@ -228,31 +229,49 @@ impl World {
     /// Look up an archetype by its sorted component type set, creating
     /// it on demand. Uses a stack-allocated buffer for the common case
     /// of ≤16 component types to avoid heap allocation on every call.
+    /// Sets larger than the buffer fall back to a heap `Vec` rather than
+    /// silently dropping types (which would create an archetype missing
+    /// columns and panic later when values are pushed into it).
     fn get_or_create_archetype(&mut self, types: &[TypeId]) -> ArchetypeId {
         // Stack buffer for the sorted, deduplicated key. 16 components
         // covers virtually all real-world archetypes.
         const MAX_STACK: usize = 16;
         let mut buf: [TypeId; MAX_STACK] = [TypeId::of::<()>(); MAX_STACK];
         let mut len = 0usize;
+        let mut overflowed = false;
         for &t in types {
             if !buf[..len].contains(&t) {
                 if len < MAX_STACK {
                     buf[len] = t;
                     len += 1;
+                } else {
+                    overflowed = true;
                 }
             }
         }
-        buf[..len].sort();
-        let key_slice = &buf[..len];
 
-        if let Some(&id) = self.archetype_by_components.get(key_slice) {
+        // Rare: >16 distinct component types. Rebuild the full
+        // deduplicated, sorted key on the heap. The stack path must
+        // never silently drop types — the created archetype would lack
+        // columns for them and `transition` would panic pushing values.
+        let key: Cow<[TypeId]> = if overflowed {
+            let mut v = types.to_vec();
+            v.sort();
+            v.dedup();
+            Cow::Owned(v)
+        } else {
+            buf[..len].sort();
+            Cow::Borrowed(&buf[..len])
+        };
+
+        if let Some(&id) = self.archetype_by_components.get(key.as_ref()) {
             return id;
         }
         // Slow path: only heap-allocates on archetype creation (very rare).
-        let key_vec = key_slice.to_vec();
+        let key_vec = key.into_owned();
         let id = ArchetypeId(self.archetypes.len() as u32);
         let mut arch = Archetype::new(id);
-        let entries: Vec<(TypeId, &'static str, ColumnCtor)> = key_slice
+        let entries: Vec<(TypeId, &'static str, ColumnCtor)> = key_vec
             .iter()
             .map(|&t| (t, self.name_for(t), self.ctor_for(t)))
             .collect();
@@ -283,10 +302,14 @@ impl World {
         let old_idx = loc.index;
 
         // Compute the new archetype's component set without heap allocation.
-        // Use a fixed-size buffer for the common case (≤16 component types).
+        // Use a fixed-size buffer for the common case (≤16 component types),
+        // falling back to a heap `Vec` on overflow — never silently drop
+        // types, or the archetype would miss columns and the push below
+        // would panic ("missing column in new archetype after get_or_create").
         const MAX_STACK: usize = 16;
         let mut new_buf: [TypeId; MAX_STACK] = [TypeId::of::<()>(); MAX_STACK];
         let mut new_len = 0usize;
+        let mut overflowed = false;
 
         if old_arch_id != EntityLocation::EMPTY {
             for &t in &self.archetypes[old_arch_id as usize].component_types {
@@ -294,6 +317,8 @@ impl World {
                     if new_len < MAX_STACK {
                         new_buf[new_len] = t;
                         new_len += 1;
+                    } else {
+                        overflowed = true;
                     }
                 }
             }
@@ -303,13 +328,35 @@ impl World {
                 if new_len < MAX_STACK {
                     new_buf[new_len] = *t;
                     new_len += 1;
+                } else {
+                    overflowed = true;
                 }
             }
         }
-        new_buf[..new_len].sort();
-        let new_key_slice = &new_buf[..new_len];
 
-        let new_arch_id = self.get_or_create_archetype(new_key_slice);
+        let new_key: Cow<[TypeId]> = if overflowed {
+            // Rare: rebuild the full deduplicated, sorted set on the heap.
+            let mut v: Vec<TypeId> = Vec::with_capacity(new_len + to_add.len());
+            if old_arch_id != EntityLocation::EMPTY {
+                for &t in &self.archetypes[old_arch_id as usize].component_types {
+                    if !to_remove.contains(&t) && !v.contains(&t) {
+                        v.push(t);
+                    }
+                }
+            }
+            for (t, _) in &to_add {
+                if !v.contains(t) {
+                    v.push(*t);
+                }
+            }
+            v.sort();
+            Cow::Owned(v)
+        } else {
+            new_buf[..new_len].sort();
+            Cow::Borrowed(&new_buf[..new_len])
+        };
+
+        let new_arch_id = self.get_or_create_archetype(&new_key);
 
         // Same archetype: just overwrite the value. (Only relevant when
         // to_remove and to_add are both empty and the entity is already

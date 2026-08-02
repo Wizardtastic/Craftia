@@ -196,6 +196,8 @@ pub enum DropCondition {
     SilkTouchForbidden,
     /// Drop count scales with Fortune level.
     FortuneScaled { base: u16, max_extra: u16 },
+    /// Drop this block's own assigned registry ID.
+    SelfDrop,
 }
 
 /// A single drop entry for a block.
@@ -268,6 +270,17 @@ impl BlockDrop {
             max_count: base + max_extra,
             probability: 1.0,
             condition: DropCondition::FortuneScaled { base, max_extra },
+        }
+    }
+
+    /// Create an explicit self-drop resolved when the registry assigns an ID.
+    pub fn self_drop() -> Self {
+        Self {
+            item: BlockId::AIR,
+            min_count: 1,
+            max_count: 1,
+            probability: 1.0,
+            condition: DropCondition::SelfDrop,
         }
     }
 }
@@ -609,7 +622,7 @@ impl BlockRegistry {
                 blast_resistance: 10.0,
                 required_tool: ToolType::Axe,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None, // drops itself (wood)
                 material: BlockMaterial::default(),
             },
@@ -741,7 +754,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None, // drops itself
                 material: BlockMaterial::default(),
             },
@@ -789,7 +802,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -813,7 +826,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -837,7 +850,7 @@ impl BlockRegistry {
                 blast_resistance: 0.4,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -861,7 +874,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -885,7 +898,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -909,7 +922,7 @@ impl BlockRegistry {
                 blast_resistance: 10.0,
                 required_tool: ToolType::Axe,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -957,7 +970,7 @@ impl BlockRegistry {
                 blast_resistance: 10.0,
                 required_tool: ToolType::Axe,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -1225,8 +1238,22 @@ impl BlockRegistry {
         if def.map_color == [200, 160, 200, 255] {
             def.map_color = default_map_color(name);
         }
+        Self::resolve_self_drops(&mut def);
         self.by_name.insert(arc.to_string(), def.id);
         self.defs.push(def);
+    }
+
+    /// Rewrite explicit `SelfDrop` entries to the definition's assigned ID.
+    /// Builtin self-drops are authored before the final registry ID exists;
+    /// resolution happens only after the ID is known. An actually empty drop
+    /// table remains an explicit no-drop policy.
+    fn resolve_self_drops(def: &mut BlockDef) {
+        for drop in &mut def.drops {
+            if matches!(drop.condition, DropCondition::SelfDrop) {
+                drop.item = def.id;
+                drop.condition = DropCondition::Always;
+            }
+        }
     }
 
     /// Insert a block whose name string is already owned (used by
@@ -1238,6 +1265,7 @@ impl BlockRegistry {
         if def.map_color == [200, 160, 200, 255] {
             def.map_color = default_map_color(&name);
         }
+        Self::resolve_self_drops(&mut def);
         self.by_name.insert(name.to_string(), def.id);
         self.defs.push(def);
     }
@@ -1309,7 +1337,9 @@ fn solid_opaque(tile: u16) -> BlockDef {
         blast_resistance: 6.0,
         required_tool: ToolType::None,
         required_tier: 0,
-        drops: Vec::new(),
+        // Resolve the explicit self-drop after `add_named` assigns the
+        // definition's final registry ID.
+        drops: vec![BlockDrop::self_drop()],
         animation: None,
         material: BlockMaterial::default(),
     }
@@ -1425,6 +1455,27 @@ mod tests {
         assert!(reg.is_solid(stone));
         assert!(reg.is_opaque(stone));
         assert_eq!(reg.light_absorption(stone), 15);
+    }
+
+    #[test]
+    fn builtin_self_drops_resolve_after_id_assignment() {
+        let reg = BlockRegistry::with_builtins();
+        for name in ["wood", "torch", "poppy", "dandelion", "cactus", "birch_log", "spruce_log"] {
+            let id = reg.id_of(name).unwrap();
+            let def = reg.get(id);
+            assert!(!def.drops.is_empty(), "{name} should have an explicit drop");
+            assert!(def.drops.iter().all(|drop| !drop.item.is_air()));
+            assert_eq!(def.drops[0].item, id, "{name} should drop itself");
+        }
+    }
+
+    #[test]
+    fn builtin_empty_drop_tables_stay_empty() {
+        let reg = BlockRegistry::with_builtins();
+        for name in ["leaves", "birch_leaves", "spruce_leaves", "glass", "tall_grass"] {
+            let id = reg.id_of(name).unwrap();
+            assert!(reg.get(id).drops.is_empty(), "{name} should have no drops");
+        }
     }
 
     #[test]
