@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::mipmap::generate_mip_chain;
+use crate::texture_pack;
 use voxel_core::{ATLAS_PIXELS, ATLAS_TILE_SIZE, ATLAS_TILES};
 
 /// Magic bytes identifying the cache format.
@@ -261,7 +262,36 @@ fn write_cache(
 
 /// Process assets: check cache, rebuild if stale.
 pub fn process_assets(textures_dir: &Path) -> Result<CacheStatus> {
-    let (mapping, manifest) = build_manifest(textures_dir)?;
+    process_assets_with_packs(textures_dir, None, None)
+}
+
+/// Process assets with optional texture packs merged in.
+///
+/// When `pack_mapping` is provided, it is merged on top of the base
+/// `textures_dir` mapping so texture pack tiles override the originals.
+/// Pack zip file hashes are included in the cache manifest so pack
+/// changes trigger a rebuild.
+pub fn process_assets_with_packs(
+    textures_dir: &Path,
+    pack_mapping: Option<&HashMap<u32, String>>,
+    packs_dir: Option<&Path>,
+) -> Result<CacheStatus> {
+    let (mut mapping, mut manifest) = build_manifest(textures_dir)?;
+    // Layer texture pack tiles on top of the base mapping.
+    if let Some(packs) = pack_mapping {
+        for (tile_index, filename) in packs {
+            mapping.insert(*tile_index, filename.clone());
+        }
+    }
+    // Include texture pack zip file hashes in the manifest so the cache
+    // is invalidated when any pack changes.
+    if let Some(pdir) = packs_dir {
+        if let Ok(entries) = texture_pack::hash_pack_files(pdir) {
+            for (path_hash, content_hash) in entries {
+                manifest.push(ManifestEntry { path_hash, content_hash });
+            }
+        }
+    }
     let composite = composite_hash(&manifest);
 
     // Try cache.
@@ -312,29 +342,7 @@ pub fn check_cache(textures_dir: &Path) -> Result<bool> {
 
 /// Read textures.toml and return tile_index -> filename mapping.
 fn load_texture_config(textures_dir: &Path) -> HashMap<u32, String> {
-    let config_path = textures_dir.join("textures.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(s) => s,
-        Err(_) => return HashMap::new(),
-    };
-    let value: toml::Value = match content.parse() {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("failed to parse {}: {}", config_path.display(), e);
-            return HashMap::new();
-        }
-    };
-    let tiles = match value.get("tiles").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => return HashMap::new(),
-    };
-    let mut map = HashMap::new();
-    for (key, val) in tiles {
-        if let (Ok(index), Some(filename)) = (key.parse::<u32>(), val.as_str()) {
-            map.insert(index, filename.to_string());
-        }
-    }
-    map
+    texture_pack::load_texture_config(textures_dir)
 }
 
 // --- Binary helpers ---

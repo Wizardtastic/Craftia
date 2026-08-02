@@ -75,7 +75,8 @@ impl crate::EngineApp {
                             }
                         }
                     }
-                    voxel_render::HotReloadEvent::TextureAtlasChanged => {
+                    voxel_render::HotReloadEvent::TextureAtlasChanged
+                    | voxel_render::HotReloadEvent::TexturePackChanged => {
                         if let Some(r) = self.render.renderer.as_mut() {
                             match r.reload_atlas() {
                                 Ok(()) => {

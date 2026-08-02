@@ -1100,8 +1100,9 @@ impl ApplicationHandler for EngineApp {
         // when it is None, so a textures-only workflow works as well.
         let shader_dir = self.config.render.shader_dir.clone();
         let textures_dir = self.config.render.textures_dir.clone();
+        let texture_packs_dir = self.config.render.texture_packs_dir.clone();
         let config_path = self.config.config_path.clone();
-        self.hot_reload = Some(FileWatcher::new(shader_dir, textures_dir, config_path));
+        self.hot_reload = Some(FileWatcher::new(shader_dir, textures_dir, texture_packs_dir, config_path));
         log::info!(
             "file-watcher: active (config = {})",
             self.config.config_path.display()

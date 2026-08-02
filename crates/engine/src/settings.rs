@@ -53,12 +53,13 @@ pub struct GraphicsSettings {
 
     pub exposure: f32,
 
-    pub vignette_strength: f32,
-
-    /// Directory containing PNG texture overrides (filenames `<tile_index>.png`).
-
+    pub vignette_strength: f32,    /// Directory containing PNG texture overrides (filenames `<tile_index>.png`).
     /// If `None` or the directory doesn't exist, the procedural atlas is used.
     pub textures_dir: Option<String>,
+    /// Directory containing texture pack `.zip` files.
+    /// Texture packs override base textures on a per-tile basis.
+    /// Later packs in alphabetical order win over earlier ones.
+    pub texture_packs_dir: Option<String>,
 
     /// MSAA sample count (1, 2, 4, or 8). Set to 1 to disable MSAA.
     pub msaa_samples: u32,
@@ -589,6 +590,7 @@ pub struct DebugSettings {
             exposure: 0.6,
             vignette_strength: 0.15,
             textures_dir: None,
+            texture_packs_dir: None,
             msaa_samples: 4,
             occlusion_culling: true,
             ssao_enabled: true,
@@ -804,6 +806,11 @@ impl GameSettings {
             textures_dir: self
                 .graphics
                 .textures_dir
+                .as_ref()
+                .map(std::path::PathBuf::from),
+            texture_packs_dir: self
+                .graphics
+                .texture_packs_dir
                 .as_ref()
                 .map(std::path::PathBuf::from),
 

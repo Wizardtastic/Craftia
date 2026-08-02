@@ -50,6 +50,7 @@ parking_lot = "0.12"
 
 # --- Compression ---
 flate2 = "1"
+zip = "0.6"
 
 # --- Vulkan / windowing ---
 ash = "0.38"

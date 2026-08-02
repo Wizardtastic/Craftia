@@ -6,7 +6,7 @@
 //! On cache hit, the atlas is loaded from disk (~0ms); on miss, it is rebuilt
 //! from scratch and the cache is written for next time.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
 use voxel_core::ATLAS_TILE_SIZE;
@@ -30,7 +30,25 @@ pub struct Atlas {
 /// On cache hit, returns immediately with the cached atlas + mip chain.
 /// On cache miss, rebuilds from PNGs, generates mip chain, writes cache.
 pub fn build_atlas_with_textures(textures_dir: &Path) -> Atlas {
-    match voxel_asset_pipeline::process_assets(textures_dir) {
+    build_atlas_with_packs(textures_dir, None, None)
+}
+
+/// Build the atlas from `textures_dir`, with optional texture pack overrides.
+///
+/// When `pack_mapping` is provided, texture pack tiles override base tiles
+/// on a per-index basis. When `packs_dir` is provided, pack zip hashes are
+/// included in the cache manifest for invalidation.
+pub fn build_atlas_with_packs(
+    textures_dir: &Path,
+    pack_mapping: Option<&std::collections::HashMap<u32, String>>,
+    packs_dir: Option<&Path>,
+) -> Atlas {
+    let pipeline_result = if let Some(packs) = pack_mapping {
+        voxel_asset_pipeline::cache::process_assets_with_packs(textures_dir, Some(packs), packs_dir)
+    } else {
+        voxel_asset_pipeline::process_assets(textures_dir)
+    };
+    match pipeline_result {
         Ok(status) => {
             let width = status.width();
             let height = status.height();
@@ -59,13 +77,16 @@ pub fn build_atlas_with_textures(textures_dir: &Path) -> Atlas {
         }
         Err(e) => {
             log::warn!("asset pipeline failed: {e}, falling back to direct build");
-            build_atlas_fallback(textures_dir)
+            build_atlas_fallback(textures_dir, pack_mapping)
         }
     }
 }
 
 /// Fallback: build atlas directly without the cache (if asset pipeline fails).
-fn build_atlas_fallback(textures_dir: &Path) -> Atlas {
+fn build_atlas_fallback(
+    textures_dir: &Path,
+    pack_mapping: Option<&std::collections::HashMap<u32, String>>,
+) -> Atlas {
     use image::imageops::FilterType;
 
     let total_tiles = (ATLAS_TILES * ATLAS_TILES) as usize;
@@ -76,12 +97,26 @@ fn build_atlas_fallback(textures_dir: &Path) -> Atlas {
         fill_error_tile(&mut rgba, tile);
     }
 
-    let mapping = load_texture_config(textures_dir);
+    // Start with base mapping, then layer pack overrides.
+    let mut mapping = load_texture_config(textures_dir);
+    if let Some(packs) = pack_mapping {
+        for (tile_index, filename) in packs {
+            mapping.insert(*tile_index, filename.clone());
+        }
+    }
     for (tile_index, filename) in &mapping {
         if *tile_index >= total_tiles as u32 {
             continue;
         }
-        let png_path = textures_dir.join(filename);
+        // Try pack extract dir first, then base textures dir.
+        let pack_dir = textures_dir.join(".texture_packs");
+        let png_path = if pack_dir.join(filename).exists() {
+            // Search all subdirs of .texture_packs for this file.
+            find_in_texture_packs(&textures_dir, filename)
+                .unwrap_or_else(|| textures_dir.join(filename))
+        } else {
+            textures_dir.join(filename)
+        };
         if let Err(e) = load_png_into_atlas(&mut rgba, *tile_index, &png_path, FilterType::Nearest)
         {
             log::warn!("fallback: failed to load {}: {e}", png_path.display());
@@ -150,30 +185,34 @@ fn load_png_into_atlas(
 }
 
 fn load_texture_config(textures_dir: &Path) -> std::collections::HashMap<u32, String> {
-    use std::collections::HashMap;
-    let config_path = textures_dir.join("textures.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(s) => s,
-        Err(_) => return HashMap::new(),
-    };
-    let value: toml::Value = match content.parse() {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("failed to parse {}: {}", config_path.display(), e);
-            return HashMap::new();
-        }
-    };
-    let tiles = match value.get("tiles").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => return HashMap::new(),
-    };
-    let mut map = HashMap::new();
-    for (key, val) in tiles {
-        if let (Ok(index), Some(filename)) = (key.parse::<u32>(), val.as_str()) {
-            map.insert(index, filename.to_string());
+    voxel_asset_pipeline::texture_pack::load_texture_config(textures_dir)
+}
+
+/// Search through `.texture_packs` subdirectories for a PNG file by name.
+/// Returns the LAST match found (later packs override earlier ones,
+/// consistent with alphabetical load order).
+fn find_in_texture_packs(base_dir: &Path, filename: &str) -> Option<PathBuf> {
+    let packs_dir = base_dir.join(".texture_packs");
+    if !packs_dir.is_dir() {
+        return None;
+    }
+    // Walk each pack's extract dir looking for the file.
+    // Return the LAST match so later packs (alphabetically) win.
+    let mut entries: Vec<_> = std::fs::read_dir(&packs_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    entries.sort_by_key(|e| e.path());
+    let mut result = None;
+    for entry in entries {
+        let candidate = entry.path().join(filename);
+        if candidate.is_file() {
+            result = Some(candidate);
         }
     }
-    map
+    result
 }
 
 #[cfg(test)]

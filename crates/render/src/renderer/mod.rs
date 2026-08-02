@@ -47,7 +47,7 @@ use voxel_core::{
 
 use crate::buffer::{GpuBuffer, GpuImage};
 use crate::alloc::Alloc;
-use crate::atlas::build_atlas_with_textures;
+use crate::atlas::{build_atlas_with_textures, build_atlas_with_packs};
 use crate::texture::{begin_one_time, end_and_submit, transition_image_layout, AtlasTexture};
 use crate::ui::UiDrawData;
 
@@ -102,6 +102,9 @@ pub struct RendererConfig {
     /// Directory containing PNG texture overrides (filenames `<tile_index>.png`).
     /// If `None` or the directory doesn't exist, the procedural atlas is used.
     pub textures_dir: Option<std::path::PathBuf>,
+    /// Directory containing texture pack `.zip` files.
+    /// Texture packs override base textures on a per-tile basis.
+    pub texture_packs_dir: Option<std::path::PathBuf>,
     /// Directory containing the GLSL shader sources (`*.vert` / `*.frag`).
     /// When `None`, no shader hot-reload is performed and a fresh pipeline is
     /// compiled at startup via `build.rs` (the legacy baked-in path).
@@ -138,6 +141,7 @@ impl Default for RendererConfig {
             fog_color: [0.62, 0.80, 0.96],
             fog_distance: 320.0,
             textures_dir: None,
+            texture_packs_dir: None,
             shader_dir: None,
             particle_softness: 0.3,
             msaa_samples: 4,
@@ -579,6 +583,42 @@ pub struct Renderer {
     sky_ambient: f32,
     sky_underwater: bool,
     sun_dir: [f32; 3],
+}
+
+/// Load texture pack tile mappings from `texture_packs_dir` (if configured)
+/// and merge them with the base `textures_dir` mapping. Returns `None`
+/// when there is no packs dir or no packs were found.
+fn load_pack_mapping(
+    textures_dir: &Path,
+    texture_packs_dir: Option<&Path>,
+) -> Option<std::collections::HashMap<u32, String>> {
+    let packs_dir = match texture_packs_dir {
+        Some(d) if d.is_dir() => d,
+        Some(d) => {
+            log::warn!(
+                "texture_packs_dir configured but not found: {}",
+                d.display()
+            );
+            return None;
+        }
+        None => return None,
+    };
+    match voxel_asset_pipeline::texture_pack::load_all_texture_packs(packs_dir, textures_dir) {
+        Ok((merged, packs)) => {
+            if !packs.is_empty() {
+                log::info!(
+                    "loaded {} texture pack(s) with {} overridden tile(s)",
+                    packs.len(),
+                    merged.len()
+                );
+            }
+            if merged.is_empty() { None } else { Some(merged) }
+        }
+        Err(e) => {
+            log::warn!("failed to load texture packs: {e}");
+            None
+        }
+    }
 }
 
 impl Renderer {
@@ -1834,7 +1874,11 @@ impl Renderer {
             .as_deref()
             .filter(|d| d.is_dir())
             .unwrap_or_else(|| Path::new(""));
-        let atlas_pixels = build_atlas_with_textures(dir);
+        let pack_mapping = load_pack_mapping(
+            dir,
+            self.config.texture_packs_dir.as_deref(),
+        );
+        let atlas_pixels = build_atlas_with_packs(dir, pack_mapping.as_ref(), self.config.texture_packs_dir.as_deref());
         let new_atlas = AtlasTexture::new(
             &self.device,
             &self.alloc,
@@ -1887,18 +1931,20 @@ impl Renderer {
     pub fn reload_config(&mut self, new_config: &RendererConfig) -> Result<()> {
         unsafe { self.device.device_wait_idle()?; }
         let textures_changed = new_config.textures_dir != self.config.textures_dir;
+        let packs_changed = new_config.texture_packs_dir != self.config.texture_packs_dir;
         let fog_changed = new_config.fog_color != self.config.fog_color
             || (new_config.fog_distance - self.config.fog_distance).abs() > f32::EPSILON;
 
         self.config.fog_color = new_config.fog_color;
         self.config.fog_distance = new_config.fog_distance;
         self.config.textures_dir = new_config.textures_dir.clone();
+        self.config.texture_packs_dir = new_config.texture_packs_dir.clone();
         self.config.shader_dir = new_config.shader_dir.clone();
         self.config.clear_color = new_config.clear_color;
         self.config.validation = new_config.validation;
         self.config.vsync = new_config.vsync;
 
-        if textures_changed {
+        if textures_changed || packs_changed {
             self.reload_atlas()?;
         } else if fog_changed {
             log::info!(

@@ -11,5 +11,7 @@
 pub mod atlas;
 pub mod cache;
 pub mod mipmap;
+pub mod texture_pack;
 
 pub use cache::{check_cache, process_assets, CacheStatus};
+pub use texture_pack::{load_all_texture_packs, load_texture_pack, TexturePack};

@@ -3360,6 +3360,12 @@ impl crate::EngineApp {
                     .textures_dir
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
+                texture_packs_dir: self
+                    .config
+                    .render
+                    .texture_packs_dir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
                 msaa_samples: self.config.render.msaa_samples,
                 occlusion_culling: self.config.render.occlusion_culling,
                 ssao_enabled: self.config.ssao_enabled,
