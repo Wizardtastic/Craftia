@@ -20,3 +20,5 @@ assets/**/.cache/
 .mex
 # Local release artifacts (scripts/release.sh, scripts/package.sh)
 /dist
+/logs/latest.log
+/logs/previous.log

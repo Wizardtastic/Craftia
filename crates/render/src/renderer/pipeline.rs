@@ -105,10 +105,10 @@ pub(super) struct ReflectionUbo {
 /// attachment is appended:
 ///   3 — resolve depth (single-sample, STORE, copied to `scene_opaque_depth`
 ///       after the pass for the water/glass SSR ray-march)
-/// and both subpasses resolve their multisampled depth into it via a
-/// `VkSubpassDescriptionDepthStencilResolve` (Vulkan 1.2 core). Both subpasses
-/// get the resolve (matching the colour resolve) so `capture_frame`, which
-/// only runs subpass 0, also produces resolved depth.
+/// and subpass 0 resolves its multisampled depth into it via a
+/// `VkSubpassDescriptionDepthStencilResolve` (Vulkan 1.2 core). Subpass 1
+/// (particles) does not write depth, so only subpass 0 resolves it; this also
+/// keeps `capture_frame`, which only runs subpass 0, producing resolved depth.
 pub(super) fn create_render_pass(
     device: &ash::Device,
     color_format: vk::Format,
@@ -290,10 +290,16 @@ pub(super) fn create_render_pass(
 /// the device supports depth-stencil-resolve. Identical attachment/subpass
 /// layout to the MSAA flavour of the v1 builder, plus a 4th attachment:
 ///   3 — resolve depth (single-sample, STORE)
-/// Both subpasses resolve their multisampled depth into it via a chained
-/// `VkSubpassDescriptionDepthStencilResolve` with `depth_resolve_mode`
-/// (MIN when supported, else SAMPLE_ZERO). The resolved depth is copied to
-/// `scene_opaque_depth` after the pass for the water/glass SSR ray-march.
+/// Only subpass 0 resolves its multisampled depth into it via a chained
+/// `VkSubpassDescriptionDepthStencilResolve` (Vulkan 1.2 core). Subpass 1
+/// (particles) only reads depth as an input attachment, so it must not chain
+/// the resolve struct (and its resolved depth from subpass 0 is preserved
+/// untouched through subpass 1).
+///
+/// Subpass 0 chains a `VkSubpassDescriptionDepthStencilResolve` with
+/// `depth_resolve_mode` (MIN when supported, else SAMPLE_ZERO). The resolved
+/// depth is copied to `scene_opaque_depth` after the pass for the water/glass
+/// SSR ray-march.
 fn create_render_pass_depth_resolve(
     device: &ash::Device,
     color_format: vk::Format,
@@ -386,20 +392,16 @@ fn create_render_pass_depth_resolve(
         .attachment(2)
         .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .aspect_mask(vk::ImageAspectFlags::COLOR)];
-    let depth_resolve_ref_1 = vk::AttachmentReference2::default()
-        .attachment(3)
-        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-        .aspect_mask(vk::ImageAspectFlags::DEPTH);
-    let mut dsr_1 = vk::SubpassDescriptionDepthStencilResolve::default()
-        .depth_resolve_mode(depth_resolve_mode)
-        .stencil_resolve_mode(vk::ResolveModeFlags::NONE)
-        .depth_stencil_resolve_attachment(&depth_resolve_ref_1);
-    let mut subpass_1_desc = vk::SubpassDescription2::default()
+    // NOTE: subpass 1 (particles) reads depth as an input attachment and does
+    // NOT write it, so it has no depth-stencil attachment and must NOT chain a
+    // SubpassDescriptionDepthStencilResolve. Chaining one there makes the
+    // driver link the depth resolve onto a NULL depth-stencil attachment
+    // (NULL+0x20 write, SIGSEGV in vkCreateRenderPass2).
+    let subpass_1_desc = vk::SubpassDescription2::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_refs_1)
         .input_attachments(&input_refs_1)
         .resolve_attachments(&resolve_ref_1);
-    subpass_1_desc = subpass_1_desc.push_next(&mut dsr_1);
     let subpass_1 = subpass_1_desc;
 
     let dependencies = [
