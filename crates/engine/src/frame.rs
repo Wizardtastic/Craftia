@@ -1048,10 +1048,12 @@ impl crate::EngineApp {
                                 } => edit::terrain::apply_noise(
                                     &self.world_state.world,
                                     center,
-                                    terrain.radius,
-                                    *scale,
-                                    *amplitude,
-                                    *seed,
+                                    edit::terrain::NoiseParams {
+                                        radius: terrain.radius,
+                                        scale: *scale,
+                                        amplitude: *amplitude,
+                                        seed: *seed,
+                                    },
                                     terrain.block,
                                     &mut self.gameplay.undo_redo,
                                 ),
@@ -1402,16 +1404,16 @@ impl crate::EngineApp {
                 crate::GameState::TitleScreen | crate::GameState::WorldSelect
             );
 
-            if let Err(e) = r.draw_frame(
+            if let Err(e) = r.draw_frame(voxel_render::FrameInput {
                 camera,
-                Some(&ui),
-                self.gameplay.game_time as f32,
+                ui: Some(&ui),
+                game_time: self.gameplay.game_time as f32,
                 underwater,
-                &entity_data,
-                &held_item_data,
+                world_entities: &entity_data,
+                held_items: &held_item_data,
                 show_panorama,
-                self.gameplay.panorama_rotation,
-            ) {
+                panorama_rotation: self.gameplay.panorama_rotation,
+            }) {
                 log::error!("draw_frame: {e}");
             }
             // Collect profiler data.
@@ -1528,16 +1530,16 @@ impl crate::EngineApp {
             let ext = r.extent();
             r.set_proj_params(camera.near, camera.far, ext.width as f32, ext.height as f32);
         }
-        match r.capture_frame(
+        match r.capture_frame(voxel_render::FrameInput {
             camera,
-            Some(&ui),
-            self.gameplay.game_time as f32,
+            ui: Some(&ui),
+            game_time: self.gameplay.game_time as f32,
             underwater,
-            &[],
-            &[],
-            false,
-            0.0,
-        ) {
+            world_entities: &[],
+            held_items: &[],
+            show_panorama: false,
+            panorama_rotation: 0.0,
+        }) {
             Ok(rgba) => {
                 let (w, h) = self.render.window_size;
                 if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {

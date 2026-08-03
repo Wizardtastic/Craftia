@@ -4,7 +4,7 @@
 //! (`handle_*_click`) live here. The split keeps the frame loop in
 //! `lib.rs` focused on per-frame orchestration rather than HUD layout.
 
-use voxel_render::UiDrawData;
+use voxel_render::{GraphStyle, UiDrawData};
 
 use crate::edit;
 use crate::edit::terrain::TerrainOp;
@@ -225,20 +225,14 @@ impl crate::EngineApp {
         // Right panel (tool options + target info + world properties).
         let right_action;
         {
-            let player_pos = self
-                .simulation
-                .player_pos()
-                .unwrap_or(self.gameplay.spawn_pos);
             let cursor_pos = self.gameplay.edit.brush_center.map(|c| (c.x, c.y, c.z));
             let font = &self.render.font;
             right_action = edit::right_panel::draw_right_panel(
                 ui,
                 &mut self.gameplay.edit,
-                w,
-                h,
+                (w, h),
                 mouse,
                 font,
-                (player_pos.x, player_pos.y, player_pos.z),
                 cursor_pos,
                 &self.texture_pack_manager.loaded_packs,
             );
@@ -1184,10 +1178,7 @@ impl crate::EngineApp {
         let btn_y = h * 0.5;
         self.draw_button(
             ui,
-            btn_x,
-            btn_y,
-            btn_w,
-            btn_h,
+            (btn_x, btn_y, btn_w, btn_h),
             "RESPAWN",
             [40, 80, 40, 220],
             [60, 120, 60, 255],
@@ -1198,10 +1189,7 @@ impl crate::EngineApp {
         let btn2_y = btn_y + 60.0;
         self.draw_button(
             ui,
-            btn_x,
-            btn2_y,
-            btn_w,
-            btn_h,
+            (btn_x, btn2_y, btn_w, btn_h),
             "TITLE SCREEN",
             [80, 40, 40, 220],
             [120, 60, 60, 255],
@@ -1242,10 +1230,7 @@ impl crate::EngineApp {
         // Back to Game
         self.draw_button(
             ui,
-            btn_x,
-            btn_y0,
-            btn_w,
-            btn_h,
+            (btn_x, btn_y0, btn_w, btn_h),
             "BACK TO GAME",
             [40, 80, 40, 220],
             [60, 120, 60, 255],
@@ -1254,10 +1239,7 @@ impl crate::EngineApp {
         // Options
         self.draw_button(
             ui,
-            btn_x,
-            btn_y0 + spacing,
-            btn_w,
-            btn_h,
+            (btn_x, btn_y0 + spacing, btn_w, btn_h),
             "OPTIONS",
             [50, 50, 80, 220],
             [70, 70, 110, 255],
@@ -1266,10 +1248,7 @@ impl crate::EngineApp {
         // Save & Quit to Title
         self.draw_button(
             ui,
-            btn_x,
-            btn_y0 + spacing * 2.0,
-            btn_w,
-            btn_h,
+            (btn_x, btn_y0 + spacing * 2.0, btn_w, btn_h),
             "SAVE & QUIT",
             [80, 60, 30, 220],
             [120, 90, 40, 255],
@@ -1278,10 +1257,7 @@ impl crate::EngineApp {
         // Quit Game
         self.draw_button(
             ui,
-            btn_x,
-            btn_y0 + spacing * 3.0,
-            btn_w,
-            btn_h,
+            (btn_x, btn_y0 + spacing * 3.0, btn_w, btn_h),
             "QUIT GAME",
             [90, 30, 30, 220],
             [140, 50, 50, 255],
@@ -1303,15 +1279,13 @@ impl crate::EngineApp {
     fn draw_button(
         &self,
         ui: &mut UiDrawData,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
+        rect: (f32, f32, f32, f32),
         label: &str,
         fill_normal: [u8; 4],
         fill_hover: [u8; 4],
         border: [u8; 4],
     ) {
+        let (x, y, w, h) = rect;
         let hovered = self.point_in_rect(self.gameplay.mouse_pos, x, y, w, h);
         let fill = if hovered { fill_hover } else { fill_normal };
         ui.quad(x, y, w, h, fill);
@@ -1733,7 +1707,7 @@ impl crate::EngineApp {
         for (i, label) in btn_labels.iter().enumerate() {
             let by = btn_start_y + i as f32 * spacing;
             let (fill, hover, border) = btn_colors[i];
-            self.draw_button(ui, btn_x, by, panel_w, btn_h, label, fill, hover, border);
+            self.draw_button(ui, (btn_x, by, panel_w, btn_h), label, fill, hover, border);
             buttons[i] = (btn_x, by, panel_w, btn_h);
         }
 
@@ -2923,11 +2897,8 @@ impl crate::EngineApp {
             ui,
             "Render Distance",
             self.config.stream.load_radius as f32,
-            2.0,
-            16.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (2.0, 16.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -2947,11 +2918,8 @@ impl crate::EngineApp {
             ui,
             "Fog Distance",
             self.config.render.fog_distance,
-            100.0,
-            800.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (100.0, 800.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -2961,11 +2929,8 @@ impl crate::EngineApp {
             ui,
             "Exposure",
             self.config.exposure,
-            0.1,
-            3.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (0.1, 3.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -3005,11 +2970,8 @@ impl crate::EngineApp {
             ui,
             "SSAO Radius",
             self.config.ssao_radius,
-            0.5,
-            5.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (0.5, 5.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -3019,11 +2981,8 @@ impl crate::EngineApp {
             ui,
             "SSAO Bias",
             self.config.ssao_bias,
-            0.001,
-            0.1,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (0.001, 0.1),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -3033,11 +2992,8 @@ impl crate::EngineApp {
             ui,
             "SSAO Strength",
             self.config.ssao_strength,
-            0.0,
-            3.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (0.0, 3.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -3055,11 +3011,8 @@ impl crate::EngineApp {
             ui,
             "MSAA Samples",
             msaa_val,
-            0.0,
-            3.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (0.0, 3.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -3074,11 +3027,8 @@ impl crate::EngineApp {
             ui,
             "Mouse Sensitivity",
             self.config.player.mouse_sensitivity * 1000.0,
-            0.5,
-            10.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (0.5, 10.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -3088,11 +3038,8 @@ impl crate::EngineApp {
             ui,
             "Walk Speed",
             self.config.player.walk_speed,
-            1.0,
-            10.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (1.0, 10.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         slider_idx += 1;
@@ -3102,11 +3049,8 @@ impl crate::EngineApp {
             ui,
             "Fly Speed",
             self.config.player.fly_speed,
-            5.0,
-            50.0,
-            lx,
-            sy,
-            panel_w - 32.0,
+            (5.0, 50.0),
+            (lx, sy, panel_w - 32.0),
             slider_idx,
         );
         sy = ny;
@@ -3123,8 +3067,8 @@ impl crate::EngineApp {
             ("Block Picker", &self.config.keybinds.block_picker),
             ("Edit Mode", &self.config.keybinds.edit_mode),
         ];
-        for (i, (label, key)) in keybinds.iter().enumerate() {
-            sy = self.draw_keybind_row(ui, label, key, i, lx, sy, panel_w - 32.0);
+        for (label, key) in keybinds.iter() {
+            sy = self.draw_keybind_row(ui, label, key, lx, sy);
         }
 
         // Apply / Defaults buttons
@@ -3405,13 +3349,12 @@ impl crate::EngineApp {
         ui: &mut UiDrawData,
         label: &str,
         value: f32,
-        min: f32,
-        max: f32,
-        x: f32,
-        y: f32,
-        w: f32,
+        range: (f32, f32),
+        rect: (f32, f32, f32),
         is_dragging: bool,
     ) -> f32 {
+        let (min, max) = range;
+        let (x, y, w) = rect;
         let bar_x = x + w * 0.55;
         let bar_w = w * 0.35;
         let bar_h = 8.0;
@@ -3564,15 +3507,14 @@ impl crate::EngineApp {
         ui: &mut UiDrawData,
         label: &str,
         value: f32,
-        min: f32,
-        max: f32,
-        x: f32,
-        y: f32,
-        w: f32,
+        range: (f32, f32),
+        rect: (f32, f32, f32),
         slider_index: usize,
     ) -> (f32, crate::SliderWidget) {
+        let (min, max) = range;
+        let (x, y, w) = rect;
         let is_dragging = self.gameplay.settings_slider_dragging == Some(slider_index);
-        let next_y = self.draw_setting_slider(ui, label, value, min, max, x, y, w, is_dragging);
+        let next_y = self.draw_setting_slider(ui, label, value, range, rect, is_dragging);
         let bar_x = x + w * 0.55;
         let bar_w = w * 0.35;
         let bar_y = y + 4.0;
@@ -3603,16 +3545,7 @@ impl crate::EngineApp {
         )
     }
 
-    fn draw_keybind_row(
-        &self,
-        ui: &mut UiDrawData,
-        label: &str,
-        key: &str,
-        _index: usize,
-        x: f32,
-        y: f32,
-        _w: f32,
-    ) -> f32 {
+    fn draw_keybind_row(&self, ui: &mut UiDrawData, label: &str, key: &str, x: f32, y: f32) -> f32 {
         ui.text(
             label,
             x,
@@ -4233,24 +4166,22 @@ impl crate::EngineApp {
         let cpu_samples = collector.extract_f32(crate::telemetry::MetricSelector::CpuFrameMs, 300);
         let gpu_samples = collector.extract_f32(crate::telemetry::MetricSelector::GpuFrameMs, 300);
         ui.area_graph(
-            graph_x,
-            graph_y,
-            graph_w,
-            graph_h,
+            (graph_x, graph_y, graph_w, graph_h),
             &cpu_samples,
-            Some(0.0),
-            Some(50.0),
-            [80, 200, 80, 60],
+            GraphStyle {
+                min_y: Some(0.0),
+                max_y: Some(50.0),
+                color: [80, 200, 80, 60],
+            },
         );
         ui.line_graph(
-            graph_x,
-            graph_y,
-            graph_w,
-            graph_h,
+            (graph_x, graph_y, graph_w, graph_h),
             &gpu_samples,
-            Some(0.0),
-            Some(50.0),
-            [200, 200, 80, 200],
+            GraphStyle {
+                min_y: Some(0.0),
+                max_y: Some(50.0),
+                color: [200, 200, 80, 200],
+            },
         );
 
         let stack_y = graph_y + graph_h + 24.0;
@@ -4296,14 +4227,13 @@ impl crate::EngineApp {
         let alloc_samples =
             collector.extract_f32(crate::telemetry::MetricSelector::GpuAllocatedMb, 300);
         ui.area_graph(
-            graph_x,
-            mem_y,
-            graph_w,
-            mem_h,
+            (graph_x, mem_y, graph_w, mem_h),
             &alloc_samples,
-            Some(0.0),
-            Some(256.0),
-            [80, 180, 220, 100],
+            GraphStyle {
+                min_y: Some(0.0),
+                max_y: Some(256.0),
+                color: [80, 180, 220, 100],
+            },
         );
 
         let chunk_y = mem_y + mem_h + 24.0;
@@ -4319,24 +4249,22 @@ impl crate::EngineApp {
         let loaded = collector.extract_f32(crate::telemetry::MetricSelector::ChunksLoaded, 300);
         let gpu_chunks = collector.extract_f32(crate::telemetry::MetricSelector::ChunksGpu, 300);
         ui.line_graph(
-            graph_x,
-            chunk_y,
-            graph_w,
-            chunk_h,
+            (graph_x, chunk_y, graph_w, chunk_h),
             &loaded,
-            None,
-            None,
-            [80, 200, 80, 200],
+            GraphStyle {
+                min_y: None,
+                max_y: None,
+                color: [80, 200, 80, 200],
+            },
         );
         ui.line_graph(
-            graph_x,
-            chunk_y,
-            graph_w,
-            chunk_h,
+            (graph_x, chunk_y, graph_w, chunk_h),
             &gpu_chunks,
-            None,
-            None,
-            [200, 200, 80, 200],
+            GraphStyle {
+                min_y: None,
+                max_y: None,
+                color: [200, 200, 80, 200],
+            },
         );
 
         let stats_y = chunk_y + chunk_h + 16.0;

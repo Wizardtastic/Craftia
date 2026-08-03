@@ -26,9 +26,9 @@ pub mod ui;
 
 pub use atlas::{build_atlas_with_textures, Atlas};
 pub use hot_reload::{compile_shader, FileWatcher, HotReloadEvent};
-pub use renderer::{ChunkUpload, GpuTimings, MeshPass, Renderer, RendererConfig};
+pub use renderer::{ChunkUpload, FrameInput, GpuTimings, MeshPass, Renderer, RendererConfig};
 pub use texture::AtlasTexture;
-pub use ui::{FontAtlas, UiDrawData, UiVertex};
+pub use ui::{FontAtlas, GraphStyle, UiDrawData, UiVertex};
 
 use bytemuck::{Pod, Zeroable};
 

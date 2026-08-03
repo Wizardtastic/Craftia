@@ -67,16 +67,16 @@ pub fn build_atlas(textures_dir: &Path, mapping: &HashMap<u32, String>) -> Vec<u
 }
 
 /// Write a pixel into a tile at tile-local (tx, ty).
-fn put(atlas: &mut [u8], tile: u32, tx: u32, ty: u32, r: u8, g: u8, b: u8, a: u8) {
+fn put(atlas: &mut [u8], tile: u32, tx: u32, ty: u32, color: [u8; 4]) {
     let tile_x = (tile % ATLAS_TILES) * ATLAS_TILE_SIZE;
     let tile_y = (tile / ATLAS_TILES) * ATLAS_TILE_SIZE;
     let px = tile_x + tx;
     let py = tile_y + ty;
     let idx = ((py * ATLAS_PIXELS + px) * 4) as usize;
-    atlas[idx] = r;
-    atlas[idx + 1] = g;
-    atlas[idx + 2] = b;
-    atlas[idx + 3] = a;
+    atlas[idx] = color[0];
+    atlas[idx + 1] = color[1];
+    atlas[idx + 2] = color[2];
+    atlas[idx + 3] = color[3];
 }
 
 /// Fill a tile with the blue+black checkerboard error pattern.
@@ -89,7 +89,7 @@ fn fill_error_tile(atlas: &mut [u8], tile: u32) {
             } else {
                 (0, 0, 0) // black
             };
-            put(atlas, tile, tx, ty, r, g, b, 255);
+            put(atlas, tile, tx, ty, [r, g, b, 255]);
         }
     }
 }

@@ -134,6 +134,12 @@ impl ChunkMesher {
         bundle.transparent.vertices.reserve(nac);
         bundle.transparent.indices.reserve(nac * 2);
         let origin = chunk_origin(chunk.pos);
+        let ctx = MeshCtx {
+            chunk,
+            reg,
+            origin,
+            sample: &sample,
+        };
 
         for ly in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
@@ -157,30 +163,20 @@ impl ChunkMesher {
                             }
                             emit_water_block(
                                 &mut bundle,
-                                chunk,
-                                reg,
-                                &sample,
+                                &ctx,
                                 &sample_water,
                                 &sample_loaded,
-                                lx,
-                                ly,
-                                lz,
+                                (lx, ly, lz),
                                 def,
                                 wl,
-                                origin,
                             );
                         }
                         _ if def.name.as_ref() == "cactus" => {
                             emit_cactus_block(
                                 &mut bundle,
-                                chunk,
-                                reg,
-                                &sample,
-                                lx,
-                                ly,
-                                lz,
+                                &ctx,
+                                (lx, ly, lz),
                                 def,
-                                origin,
                                 sun_dir,
                             );
                         }
@@ -205,26 +201,13 @@ impl ChunkMesher {
                         *cell = build_mask_cell(
                             face,
                             slice,
-                            u as i32,
-                            v as i32,
-                            chunk,
-                            reg,
-                            &sample,
+                            (u as i32, v as i32),
+                            &ctx,
                             &sample_loaded,
-                            origin,
                         );
                     }
                 }
-                greedy_emit(
-                    &mut bundle,
-                    &mask,
-                    face,
-                    slice,
-                    chunk,
-                    reg,
-                    directional,
-                    origin,
-                );
+                greedy_emit(&mut bundle, &mask, face, slice, reg, directional);
                 for cell in mask.iter_mut().flat_map(|r| r.iter_mut()) {
                     *cell = EMPTY_CELL;
                 }
@@ -243,23 +226,30 @@ fn mask_to_block(face: Face, slice: i32, u: i32, v: i32) -> (i32, i32, i32) {
     }
 }
 
+/// Shared sampling context for meshing a chunk: the chunk being meshed, its
+/// world-space origin, the block registry, and the cross-chunk neighbour
+/// sampler. Bundled so the face-emission helpers stay callable.
+struct MeshCtx<'a> {
+    chunk: &'a Chunk,
+    reg: &'a BlockRegistry,
+    origin: glam::IVec3,
+    sample: &'a dyn Fn(i32, i32, i32) -> BlockId,
+}
+
 fn build_mask_cell(
     face: Face,
     slice: i32,
-    u: i32,
-    v: i32,
-    chunk: &Chunk,
-    reg: &BlockRegistry,
-    sample: &impl Fn(i32, i32, i32) -> BlockId,
-    sample_loaded: &impl Fn(i32, i32, i32) -> bool,
-    origin: glam::IVec3,
+    pos: (i32, i32),
+    ctx: &MeshCtx<'_>,
+    sample_loaded: &dyn Fn(i32, i32, i32) -> bool,
 ) -> MaskCell {
+    let (u, v) = pos;
     let (lx, ly, lz) = mask_to_block(face, slice, u, v);
-    let id = chunk.get(lx, ly, lz);
+    let id = ctx.chunk.get(lx, ly, lz);
     if id.is_air() {
         return EMPTY_CELL;
     }
-    let def = reg.get(id);
+    let def = ctx.reg.get(id);
     if !def.is_rendered()
         || def.kind == BlockKind::Liquid
         || def.kind == BlockKind::Foliage
@@ -267,10 +257,11 @@ fn build_mask_cell(
     {
         return EMPTY_CELL;
     }
+    let origin = ctx.origin;
     let wx = origin.x + lx;
     let wy = origin.y + ly;
     let wz = origin.z + lz;
-    if !should_emit_face(face, lx, ly, lz, chunk, reg, sample, sample_loaded) {
+    if !should_emit_face(face, (lx, ly, lz), ctx, sample_loaded) {
         return EMPTY_CELL;
     }
     let n = face.normal();
@@ -281,11 +272,11 @@ fn build_mask_cell(
         && (0..CHUNK_SIZE).contains(&nly)
         && (0..CHUNK_SIZE).contains(&nlz)
     {
-        chunk.get(nlx, nly, nlz)
+        ctx.chunk.get(nlx, nly, nlz)
     } else {
-        sample(wx + n.x, wy + n.y, wz + n.z)
+        (ctx.sample)(wx + n.x, wy + n.y, wz + n.z)
     };
-    let neighbour_def = reg.get(neighbour);
+    let neighbour_def = ctx.reg.get(neighbour);
     if neighbour_def.opaque {
         return EMPTY_CELL;
     }
@@ -299,9 +290,9 @@ fn build_mask_cell(
         let ly = y - origin.y;
         let lz = z - origin.z;
         if (0..CHUNK_SIZE).contains(&lx) && (0..CHUNK_SIZE).contains(&ly) && (0..CHUNK_SIZE).contains(&lz) {
-            chunk.get(lx, ly, lz)
+            ctx.chunk.get(lx, ly, lz)
         } else {
-            sample(x, y, z)
+            (ctx.sample)(x, y, z)
         }
     };
     let ao = [
@@ -312,7 +303,7 @@ fn build_mask_cell(
             face_normal,
             iv3(corners[0]),
             &chunk_sample,
-            reg,
+            ctx.reg,
         ),
         crate::light::compute_vertex_ao(
             wx,
@@ -321,7 +312,7 @@ fn build_mask_cell(
             face_normal,
             iv3(corners[1]),
             &chunk_sample,
-            reg,
+            ctx.reg,
         ),
         crate::light::compute_vertex_ao(
             wx,
@@ -330,7 +321,7 @@ fn build_mask_cell(
             face_normal,
             iv3(corners[2]),
             &chunk_sample,
-            reg,
+            ctx.reg,
         ),
         crate::light::compute_vertex_ao(
             wx,
@@ -339,11 +330,11 @@ fn build_mask_cell(
             face_normal,
             iv3(corners[3]),
             &chunk_sample,
-            reg,
+            ctx.reg,
         ),
     ];
-    let bl = chunk.get_combined_light(lx, ly, lz);
-    let lc = chunk.get_combined_light_color(lx, ly, lz);
+    let bl = ctx.chunk.get_combined_light(lx, ly, lz);
+    let lc = ctx.chunk.get_combined_light_color(lx, ly, lz);
     MaskCell {
         block_id: id,
         ao,
@@ -369,15 +360,12 @@ fn fi_from_face(face: Face) -> usize {
 
 fn should_emit_face(
     face: Face,
-    lx: i32,
-    ly: i32,
-    lz: i32,
-    chunk: &Chunk,
-    reg: &BlockRegistry,
-    sample: &impl Fn(i32, i32, i32) -> BlockId,
-    sample_loaded: &impl Fn(i32, i32, i32) -> bool,
+    pos: (i32, i32, i32),
+    ctx: &MeshCtx<'_>,
+    sample_loaded: &dyn Fn(i32, i32, i32) -> bool,
 ) -> bool {
-    let origin = chunk_origin(chunk.pos);
+    let (lx, ly, lz) = pos;
+    let origin = ctx.origin;
     let wx = origin.x + lx;
     let wy = origin.y + ly;
     let wz = origin.z + lz;
@@ -385,24 +373,24 @@ fn should_emit_face(
     match face {
         Face::NegX if lx == 0 => {
             if sample_loaded(wx - 1, wy, wz) {
-                let nb = sample(wx + n.x, wy + n.y, wz + n.z);
-                if reg.get(nb).opaque {
+                let nb = (ctx.sample)(wx + n.x, wy + n.y, wz + n.z);
+                if ctx.reg.get(nb).opaque {
                     return false;
                 }
             }
         }
         Face::NegZ if lz == 0 => {
             if sample_loaded(wx, wy, wz - 1) {
-                let nb = sample(wx + n.x, wy + n.y, wz + n.z);
-                if reg.get(nb).opaque {
+                let nb = (ctx.sample)(wx + n.x, wy + n.y, wz + n.z);
+                if ctx.reg.get(nb).opaque {
                     return false;
                 }
             }
         }
-        Face::NegY if ly == 0 && chunk.pos.y() > 0
+        Face::NegY if ly == 0 && ctx.chunk.pos.y() > 0
             && sample_loaded(wx, wy - 1, wz) => {
-                let nb = sample(wx + n.x, wy + n.y, wz + n.z);
-                if reg.get(nb).opaque {
+                let nb = (ctx.sample)(wx + n.x, wy + n.y, wz + n.z);
+                if ctx.reg.get(nb).opaque {
                     return false;
                 }
             }
@@ -569,10 +557,8 @@ fn greedy_emit(
     mask: &[[MaskCell; S]; S],
     face: Face,
     slice: i32,
-    _chunk: &Chunk,
     reg: &BlockRegistry,
     directional: f32,
-    _origin: glam::IVec3,
 ) {
     let fi = fi_from_face(face);
     let h_pairs = &H_MERGE_PAIRS[fi];
@@ -761,18 +747,18 @@ fn emit_foliage_cross(
 
 fn emit_water_block(
     bundle: &mut ChunkMeshBundle,
-    chunk: &Chunk,
-    reg: &BlockRegistry,
-    sample: &impl Fn(i32, i32, i32) -> BlockId,
-    sample_water: &impl Fn(i32, i32, i32) -> u8,
-    sample_loaded: &impl Fn(i32, i32, i32) -> bool,
-    lx: i32,
-    ly: i32,
-    lz: i32,
+    ctx: &MeshCtx<'_>,
+    sample_water: &dyn Fn(i32, i32, i32) -> u8,
+    sample_loaded: &dyn Fn(i32, i32, i32) -> bool,
+    pos: (i32, i32, i32),
     def: &BlockDef,
     water_level: u8,
-    origin: glam::IVec3,
 ) {
+    let (lx, ly, lz) = pos;
+    let chunk = ctx.chunk;
+    let reg = ctx.reg;
+    let sample = ctx.sample;
+    let origin = ctx.origin;
     let water_f = water_level as f32;
     let height_frac = (water_f / 8.0).clamp(0.0, 1.0);
     let wx = origin.x + lx;
@@ -781,7 +767,7 @@ fn emit_water_block(
     let tile = def.textures.tile(Face::PosY);
 
     for (fi, face) in Face::ALL.iter().enumerate() {
-        if !should_emit_face(*face, lx, ly, lz, chunk, reg, sample, sample_loaded) {
+        if !should_emit_face(*face, (lx, ly, lz), ctx, sample_loaded) {
             continue;
         }
         let n = face.normal();
@@ -852,23 +838,23 @@ fn emit_water_block(
 
 fn emit_cactus_block(
     bundle: &mut ChunkMeshBundle,
-    chunk: &Chunk,
-    reg: &BlockRegistry,
-    sample: &impl Fn(i32, i32, i32) -> BlockId,
-    lx: i32,
-    ly: i32,
-    lz: i32,
+    ctx: &MeshCtx<'_>,
+    pos: (i32, i32, i32),
     def: &BlockDef,
-    origin: glam::IVec3,
     sun_dir: GVec3,
 ) {
+    let (lx, ly, lz) = pos;
+    let chunk = ctx.chunk;
+    let reg = ctx.reg;
+    let sample = ctx.sample;
+    let origin = ctx.origin;
     let wx = origin.x + lx;
     let wy = origin.y + ly;
     let wz = origin.z + lz;
     let block_light = chunk.get_combined_light(lx, ly, lz) as f32 / 15.0;
 
     for (fi, face) in Face::ALL.iter().enumerate() {
-        if !should_emit_face(*face, lx, ly, lz, chunk, reg, sample, &|_, _, _| false) {
+        if !should_emit_face(*face, (lx, ly, lz), ctx, &|_, _, _| false) {
             continue;
         }
         let n = face.normal();

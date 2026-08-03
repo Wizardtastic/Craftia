@@ -20,6 +20,17 @@ pub enum LeftPanelAction {
     SelectBlock(BlockId),
 }
 
+/// Shared drawing context for the left panel: font, mouse position and click
+/// state. Bundled so the per-row helpers stay under the `too_many_arguments`
+/// threshold.
+#[derive(Clone, Copy)]
+struct PanelCtx<'a> {
+    font: &'a FontAtlas,
+    mx: f32,
+    my: f32,
+    ui_click: bool,
+}
+
 pub fn draw_left_panel(
     ui: &mut UiDrawData,
     edit: &mut EditState,
@@ -60,13 +71,14 @@ pub fn draw_left_panel(
         ui,
         tools,
         &edit.active_tool_id,
-        panel_x,
-        y,
-        panel_w,
-        mouse,
-        font,
+        (panel_x, y, panel_w),
+        PanelCtx {
+            font,
+            mx: mouse.0,
+            my: mouse.1,
+            ui_click: edit.ui_click,
+        },
         &mut action,
-        edit.ui_click,
     );
 
     // 2. Active block section
@@ -77,12 +89,13 @@ pub fn draw_left_panel(
     y = draw_palette_section(
         ui,
         edit,
-        panel_x,
-        y,
-        panel_w,
-        screen_h,
-        mouse,
-        font,
+        (panel_x, y, panel_w),
+        PanelCtx {
+            font,
+            mx: mouse.0,
+            my: mouse.1,
+            ui_click: edit.ui_click,
+        },
         registry,
         &mut action,
     );
@@ -128,20 +141,22 @@ fn draw_tool_grid(
     ui: &mut UiDrawData,
     tools: &[super::ToolDef],
     active_id: &str,
-    x: f32,
-    y: f32,
-    w: f32,
-    mouse: (f32, f32),
-    font: &FontAtlas,
+    rect: (f32, f32, f32),
+    ctx: PanelCtx<'_>,
     action: &mut LeftPanelAction,
-    ui_click: bool,
 ) -> f32 {
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click,
+    } = ctx;
+    let (x, y, w) = rect;
     let cols = theme::TOOL_GRID_COLS;
     let pad = 4.0;
     let gap = 2.0;
     let cell_w = (w - pad * 2.0 - gap * (cols - 1) as f32) / cols as f32;
     let cell_h = cell_w;
-    let (mx, my) = mouse;
 
     let cy = y + pad;
     for (i, tool) in tools.iter().enumerate() {
@@ -245,15 +260,18 @@ fn draw_active_block(
 fn draw_palette_section(
     ui: &mut UiDrawData,
     edit: &mut EditState,
-    x: f32,
-    mut y: f32,
-    w: f32,
-    _screen_h: f32,
-    mouse: (f32, f32),
-    font: &FontAtlas,
+    rect: (f32, f32, f32),
+    ctx: PanelCtx<'_>,
     registry: &BlockRegistry,
     action: &mut LeftPanelAction,
 ) -> f32 {
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click: _,
+    } = ctx;
+    let (x, mut y, w) = rect;
     let header_h = theme::SECTION_HEADER_H;
     ui.quad(x, y, w, header_h, theme::HEADER_BG);
     ui.quad(x, y + header_h - 1.0, w, 1.0, theme::BORDER);
@@ -267,7 +285,6 @@ fn draw_palette_section(
     );
 
     let plus_x = x + w - 22.0;
-    let (mx, my) = mouse;
     let plus_hovered = mx >= plus_x && mx <= plus_x + 16.0 && my >= y && my <= y + header_h;
     ui.text(
         "+",

@@ -221,6 +221,36 @@ enum PendingDestroy {
     },
 }
 
+/// All per-frame scene inputs, bundled so `draw_frame` / `capture_frame`
+/// stay under the `too_many_arguments` threshold.
+pub struct FrameInput<'a> {
+    pub camera: Camera,
+    pub ui: Option<&'a UiDrawData>,
+    pub game_time: f32,
+    pub underwater: bool,
+    pub world_entities: &'a [crate::entity::EntityRenderData],
+    pub held_items: &'a [crate::entity::EntityRenderData],
+    pub show_panorama: bool,
+    pub panorama_rotation: f32,
+}
+
+/// Per-frame camera/matrix state shared by the chunk-record helpers.
+/// Bundled so the record passes stay under the `too_many_arguments` threshold.
+struct ChunkPassFrame<'a> {
+    frustum: &'a voxel_core::Frustum,
+    vp_cols: &'a [f32],
+    game_time: f32,
+    cam_pos: glam::Vec3,
+}
+
+/// Particle camera parameters bundled for [`Renderer::record_particle_subpass`].
+#[derive(Clone, Copy)]
+struct ParticleCamera {
+    view_proj: glam::Mat4,
+    near: f32,
+    far: f32,
+}
+
 struct Frame {
     cmd: vk::CommandBuffer,
     in_flight_fence: vk::Fence,
@@ -880,23 +910,27 @@ impl Renderer {
             &device,
             render_pass,
             pipeline_layout,
-            vk::PolygonMode::FILL,
-            vk::CullModeFlags::BACK,
-            &chunk_vert_spirv,
-            &chunk_frag_spirv,
-            msaa_samples,
-            true,
+            pipeline::GraphicsPipelineConfig {
+                polygon_mode: vk::PolygonMode::FILL,
+                cull_mode: vk::CullModeFlags::BACK,
+                vs_spirv: &chunk_vert_spirv,
+                fs_spirv: &chunk_frag_spirv,
+                msaa_samples,
+                depth_write: true,
+            },
         )?;
         let wireframe_pipeline = pipeline::create_graphics_pipeline(
             &device,
             render_pass,
             pipeline_layout,
-            vk::PolygonMode::LINE,
-            vk::CullModeFlags::BACK,
-            &chunk_vert_spirv,
-            &chunk_frag_spirv,
-            msaa_samples,
-            true,
+            pipeline::GraphicsPipelineConfig {
+                polygon_mode: vk::PolygonMode::LINE,
+                cull_mode: vk::CullModeFlags::BACK,
+                vs_spirv: &chunk_vert_spirv,
+                fs_spirv: &chunk_frag_spirv,
+                msaa_samples,
+                depth_write: true,
+            },
         )?;
         // The transparent pipeline is created against the TRANSPARENT render
         // pass (not the main pass): it is only ever bound inside
@@ -914,12 +948,14 @@ impl Renderer {
             &device,
             transparent_render_pass,
             pipeline_layout,
-            vk::PolygonMode::FILL,
-            vk::CullModeFlags::NONE,
-            &chunk_vert_spirv,
-            &chunk_frag_spirv,
-            vk::SampleCountFlags::TYPE_1,
-            false,
+            pipeline::GraphicsPipelineConfig {
+                polygon_mode: vk::PolygonMode::FILL,
+                cull_mode: vk::CullModeFlags::NONE,
+                vs_spirv: &chunk_vert_spirv,
+                fs_spirv: &chunk_frag_spirv,
+                msaa_samples: vk::SampleCountFlags::TYPE_1,
+                depth_write: false,
+            },
         )?;
 
         // ── Particle descriptor set layout + pipeline layout (Phase 2) ──
@@ -1293,20 +1329,22 @@ impl Renderer {
             pipeline::update_descriptor_set(
                 &device,
                 descriptor_set,
-                camera_ubo.buffer,
-                fog_ubo.buffer,
-                atlas.view,
-                atlas.sampler,
-                shadow_image.view,
-                shadow_sampler,
-                shadow_ubo.buffer,
-                tile_material_ubo.buffer,
-                MaterialTable::SIZE_BYTES as vk::DeviceSize,
-                scene_opaque_color.view,
-                scene_opaque_sampler,
-                scene_opaque_depth.view,
-                scene_depth_sampler,
-                reflection_ubo.buffer,
+                pipeline::DescriptorResources {
+                    camera_buffer: camera_ubo.buffer,
+                    fog_buffer: fog_ubo.buffer,
+                    atlas_view: atlas.view,
+                    atlas_sampler: atlas.sampler,
+                    shadow_view: shadow_image.view,
+                    shadow_sampler,
+                    shadow_buffer: shadow_ubo.buffer,
+                    material_table_buffer: tile_material_ubo.buffer,
+                    material_table_size: MaterialTable::SIZE_BYTES as vk::DeviceSize,
+                    scene_opaque_view: scene_opaque_color.view,
+                    scene_opaque_sampler,
+                    scene_depth_view: scene_opaque_depth.view,
+                    scene_depth_sampler,
+                    reflection_buffer: reflection_ubo.buffer,
+                },
             );
             // Tile-remap UBO: 256 u32 entries (= 1024 B). Currently an
             // identity map so the chunk shader's `tile_remap.map[frag_tile]`
@@ -1380,12 +1418,11 @@ impl Renderer {
         pipeline::update_ui_descriptor_set(
             &device,
             ui_descriptor_set,
-            atlas.view,
-            atlas.sampler,
-            font_texture.view,
-            font_texture.sampler,
-            minimap_texture.view,
-            minimap_texture.sampler,
+            pipeline::UiTextures {
+                block: (atlas.view, atlas.sampler),
+                font: (font_texture.view, font_texture.sampler),
+                minimap: (minimap_texture.view, minimap_texture.sampler),
+            },
         );
         let ui_pipeline_layout =
             pipeline::create_ui_pipeline_layout(&device, ui_descriptor_set_layout)?;
@@ -1855,14 +1892,18 @@ impl Renderer {
         // `device`/`alloc` (moved into Self below) are still borrowable.
         let gpu_driven = if config.gpu_driven {
             match indirect::GpuDriven::new(
-                &device,
-                &alloc,
-                render_pass,
-                descriptor_set_layout,
-                msaa_samples,
-                config.gpu_meshing,
-                command_pool,
-                graphics_queue,
+                indirect::GpuTransferCtx {
+                    device: &device,
+                    alloc: &alloc,
+                    command_pool,
+                    graphics_queue,
+                },
+                indirect::GpuDrivenConfig {
+                    render_pass,
+                    chunk_set_layout: descriptor_set_layout,
+                    msaa_samples,
+                    gpu_meshing: config.gpu_meshing,
+                },
             ) {
                 Ok(g) => Some(g),
                 Err(e) => {
@@ -2095,32 +2136,33 @@ impl Renderer {
             pipeline::update_descriptor_set(
                 &self.device,
                 frame.descriptor_set,
-                frame.camera_ubo.buffer,
-                self.fog_ubo.buffer,
-                new_atlas.view,
-                new_atlas.sampler,
-                self.shadow_image.view,
-                self.shadow_sampler,
-                frame.shadow_ubo.buffer,
-                self.tile_material_ubo.buffer,
-                MaterialTable::SIZE_BYTES as vk::DeviceSize,
-                self.scene_opaque_color.view,
-                self.scene_opaque_sampler,
-                self.scene_opaque_depth.view,
-                self.scene_depth_sampler,
-                self.reflection_ubo.buffer,
+                pipeline::DescriptorResources {
+                    camera_buffer: frame.camera_ubo.buffer,
+                    fog_buffer: self.fog_ubo.buffer,
+                    atlas_view: new_atlas.view,
+                    atlas_sampler: new_atlas.sampler,
+                    shadow_view: self.shadow_image.view,
+                    shadow_sampler: self.shadow_sampler,
+                    shadow_buffer: frame.shadow_ubo.buffer,
+                    material_table_buffer: self.tile_material_ubo.buffer,
+                    material_table_size: MaterialTable::SIZE_BYTES as vk::DeviceSize,
+                    scene_opaque_view: self.scene_opaque_color.view,
+                    scene_opaque_sampler: self.scene_opaque_sampler,
+                    scene_depth_view: self.scene_opaque_depth.view,
+                    scene_depth_sampler: self.scene_depth_sampler,
+                    reflection_buffer: self.reflection_ubo.buffer,
+                },
             );
         }
         // UI descriptor set (binding 0 = block atlas, binding 1 = font atlas, binding 2 = minimap).
         pipeline::update_ui_descriptor_set(
             &self.device,
             self.ui_descriptor_set,
-            new_atlas.view,
-            new_atlas.sampler,
-            self.font_texture.view,
-            self.font_texture.sampler,
-            self.minimap_texture.view,
-            self.minimap_texture.sampler,
+            pipeline::UiTextures {
+                block: (new_atlas.view, new_atlas.sampler),
+                font: (self.font_texture.view, self.font_texture.sampler),
+                minimap: (self.minimap_texture.view, self.minimap_texture.sampler),
+            },
         );
         self.atlas.destroy_in_place(&self.device, &self.alloc);
         self.atlas = new_atlas;
@@ -2249,34 +2291,40 @@ impl Renderer {
             &self.device,
             self.render_pass,
             self.pipeline_layout,
-            vk::PolygonMode::FILL,
-            vk::CullModeFlags::BACK,
-            &self.chunk_vert_spirv,
-            &self.chunk_frag_spirv,
-            self.msaa_samples,
-            true,
+            pipeline::GraphicsPipelineConfig {
+                polygon_mode: vk::PolygonMode::FILL,
+                cull_mode: vk::CullModeFlags::BACK,
+                vs_spirv: &self.chunk_vert_spirv,
+                fs_spirv: &self.chunk_frag_spirv,
+                msaa_samples: self.msaa_samples,
+                depth_write: true,
+            },
         )?;
         self.wireframe_pipeline = pipeline::create_graphics_pipeline(
             &self.device,
             self.render_pass,
             self.pipeline_layout,
-            vk::PolygonMode::LINE,
-            vk::CullModeFlags::BACK,
-            &self.chunk_vert_spirv,
-            &self.chunk_frag_spirv,
-            self.msaa_samples,
-            true,
+            pipeline::GraphicsPipelineConfig {
+                polygon_mode: vk::PolygonMode::LINE,
+                cull_mode: vk::CullModeFlags::BACK,
+                vs_spirv: &self.chunk_vert_spirv,
+                fs_spirv: &self.chunk_frag_spirv,
+                msaa_samples: self.msaa_samples,
+                depth_write: true,
+            },
         )?;
         self.transparent_pipeline = pipeline::create_graphics_pipeline(
             &self.device,
             self.transparent_render_pass,
             self.pipeline_layout,
-            vk::PolygonMode::FILL,
-            vk::CullModeFlags::NONE,
-            &self.chunk_vert_spirv,
-            &self.chunk_frag_spirv,
-            vk::SampleCountFlags::TYPE_1,
-            false,
+            pipeline::GraphicsPipelineConfig {
+                polygon_mode: vk::PolygonMode::FILL,
+                cull_mode: vk::CullModeFlags::NONE,
+                vs_spirv: &self.chunk_vert_spirv,
+                fs_spirv: &self.chunk_frag_spirv,
+                msaa_samples: vk::SampleCountFlags::TYPE_1,
+                depth_write: false,
+            },
         )?;
         Ok(())
     }
@@ -2887,10 +2935,12 @@ impl Renderer {
     ) -> bool {
         if let Some(gpu) = self.gpu_driven.as_mut() {
             return gpu.upload_chunk_gpu_mesh(
-                &self.device,
-                &self.alloc,
-                self.command_pool,
-                self.graphics_queue,
+                indirect::GpuTransferCtx {
+                    device: &self.device,
+                    alloc: &self.alloc,
+                    command_pool: self.command_pool,
+                    graphics_queue: self.graphics_queue,
+                },
                 pos,
                 pass,
                 voxels,
@@ -3066,17 +3116,17 @@ impl Renderer {
 
     /// Render one frame and present it. `camera` drives view-projection + culling.
     /// `ui` provides optional overlay vertices (crosshair, hotbar, pause menu).
-    pub fn draw_frame(
-        &mut self,
-        camera: Camera,
-        ui: Option<&UiDrawData>,
-        game_time: f32,
-        underwater: bool,
-        world_entities: &[crate::entity::EntityRenderData],
-        held_items: &[crate::entity::EntityRenderData],
-        show_panorama: bool,
-        panorama_rotation: f32,
-    ) -> Result<()> {
+    pub fn draw_frame(&mut self, input: FrameInput<'_>) -> Result<()> {
+        let FrameInput {
+            camera,
+            ui,
+            game_time,
+            underwater,
+            world_entities,
+            held_items,
+            show_panorama,
+            panorama_rotation,
+        } = input;
         // Resize-check, upload UI, precompute camera matrices. Everything we need
         // before submitting any GPU work.
         // First: drain any GPU resources queued for deferred destruction from
@@ -3261,23 +3311,29 @@ impl Renderer {
                 &self.device,
                 cmd,
                 descriptor_set,
-                &vp_cols,
-                game_time,
-                camera.pos,
-                self.query_pool,
-                Some(query_offset + 3),
-                Some(query_offset + 4),
+                indirect::RecordUniforms {
+                    vp_cols: &vp_cols,
+                    game_time,
+                    cam_pos: camera.pos,
+                },
+                indirect::QueryTimestamps {
+                    pool: self.query_pool,
+                    opaque_end_ts: Some(query_offset + 3),
+                    transparent_end_ts: Some(query_offset + 4),
+                },
             );
         } else {
             self.record_chunk_passes(
                 device,
                 cmd,
-                &frustum,
-                &vp_cols,
-                game_time,
+                &ChunkPassFrame {
+                    frustum: &frustum,
+                    vp_cols: &vp_cols,
+                    game_time,
+                    cam_pos: camera.pos,
+                },
                 Some(query_offset + 3),
                 Some(query_offset + 4),
-                camera.pos,
             );
         }
 
@@ -3340,9 +3396,11 @@ impl Renderer {
             device,
             cmd,
             descriptor_set,
-            view_proj,
-            camera.near,
-            camera.far,
+            ParticleCamera {
+                view_proj,
+                near: camera.near,
+                far: camera.far,
+            },
             frame_idx,
         );
 
@@ -3356,12 +3414,14 @@ impl Renderer {
             device,
             cmd,
             image_index,
-            &frustum,
-            &vp_cols,
-            game_time,
+            &ChunkPassFrame {
+                frustum: &frustum,
+                vp_cols: &vp_cols,
+                game_time,
+                cam_pos: camera.pos,
+            },
             descriptor_set,
             tile_remap_descriptor_set,
-            camera.pos,
         );
 
         // Timestamp 6: main pass end.
@@ -3422,17 +3482,17 @@ impl Renderer {
 
     /// Render one frame without presenting and read the colour attachment back
     /// as RGBA8 pixels (used by the engine to save a verification screenshot).
-    pub fn capture_frame(
-        &mut self,
-        camera: Camera,
-        ui: Option<&UiDrawData>,
-        game_time: f32,
-        underwater: bool,
-        world_entities: &[crate::entity::EntityRenderData],
-        held_items: &[crate::entity::EntityRenderData],
-        show_panorama: bool,
-        panorama_rotation: f32,
-    ) -> Result<Vec<u8>> {
+    pub fn capture_frame(&mut self, input: FrameInput<'_>) -> Result<Vec<u8>> {
+        let FrameInput {
+            camera,
+            ui,
+            game_time,
+            underwater,
+            world_entities,
+            held_items,
+            show_panorama,
+            panorama_rotation,
+        } = input;
         // Resize-check, upload UI, precompute camera matrices.
         let (view_proj, vp_cols, frustum, ui_index_count) = self.prepare_frame(&camera, ui)?;
 
@@ -3513,23 +3573,29 @@ impl Renderer {
                 &self.device,
                 cmd,
                 chunk_ds,
-                &vp_cols,
-                game_time,
-                camera.pos,
-                self.query_pool,
-                None,
-                None,
+                indirect::RecordUniforms {
+                    vp_cols: &vp_cols,
+                    game_time,
+                    cam_pos: camera.pos,
+                },
+                indirect::QueryTimestamps {
+                    pool: self.query_pool,
+                    opaque_end_ts: None,
+                    transparent_end_ts: None,
+                },
             );
         } else {
             self.record_chunk_passes(
                 &self.device,
                 cmd,
-                &frustum,
-                &vp_cols,
-                game_time,
+                &ChunkPassFrame {
+                    frustum: &frustum,
+                    vp_cols: &vp_cols,
+                    game_time,
+                    cam_pos: camera.pos,
+                },
                 None,
                 None,
-                camera.pos,
             );
         }
 
@@ -3552,12 +3618,14 @@ impl Renderer {
             device,
             cmd,
             image_index,
-            &frustum,
-            &vp_cols,
-            game_time,
+            &ChunkPassFrame {
+                frustum: &frustum,
+                vp_cols: &vp_cols,
+                game_time,
+                cam_pos: camera.pos,
+            },
             self.frames[0].descriptor_set,
             self.frames[0].tile_remap_descriptor_set,
-            camera.pos,
         );
 
         // SSAO depth barrier for capture.
@@ -3827,13 +3895,16 @@ impl Renderer {
         &self,
         device: &ash::Device,
         cmd: vk::CommandBuffer,
-        frustum: &Frustum,
-        vp_cols: &[f32],
-        game_time: f32,
+        frame: &ChunkPassFrame<'_>,
         opaque_end_timestamp_query: Option<u32>,
         transparent_end_timestamp_query: Option<u32>,
-        cam_pos: glam::Vec3,
     ) {
+        let ChunkPassFrame {
+            frustum,
+            vp_cols,
+            game_time,
+            cam_pos,
+        } = *frame;
         // Collect visible chunk buffer handles under the read lock, then
         // drop the lock so upload_chunks can proceed while we record.
         type DrawList = Vec<(ChunkPos, vk::Buffer, vk::Buffer, u32)>;
@@ -4140,7 +4211,7 @@ impl Renderer {
     /// mode to an input-attachment read so the fragment shader can compute
     /// a soft fade as the particle approaches geometry.
     ///
-    /// `view_proj` is the current frame's view-projection matrix; we push
+    /// `cam.view_proj` is the current frame's view-projection matrix; we push
     /// its inverse so the vertex shader can billboard quad vertices
     /// against the camera (right/up basis derived from the upper-3x3 of
     /// inverse(view_proj)) and project them back to clip space.
@@ -4149,11 +4220,14 @@ impl Renderer {
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         chunk_descriptor_set: vk::DescriptorSet,
-        view_proj: glam::Mat4,
-        camera_near: f32,
-        camera_far: f32,
+        cam: ParticleCamera,
         frame_idx: usize,
     ) {
+        let ParticleCamera {
+            view_proj,
+            near: camera_near,
+            far: camera_far,
+        } = cam;
         let instances = self.particle_manager.instances();
         if instances.is_empty() {
             return;
@@ -5418,13 +5492,16 @@ impl Renderer {
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         image_index: u32,
-        frustum: &voxel_core::Frustum,
-        vp_cols: &[f32],
-        game_time: f32,
+        frame: &ChunkPassFrame<'_>,
         descriptor_set: vk::DescriptorSet,
         tile_remap_descriptor_set: vk::DescriptorSet,
-        cam_pos: glam::Vec3,
     ) {
+        let ChunkPassFrame {
+            frustum,
+            vp_cols,
+            game_time,
+            cam_pos,
+        } = *frame;
         let any_transparent = self
             .chunks
             .read()

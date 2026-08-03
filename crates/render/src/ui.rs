@@ -30,6 +30,16 @@ pub struct UiDrawData {
     pub indices: Vec<u32>,
 }
 
+/// Visual style for [`UiDrawData::line_graph`] / [`UiDrawData::area_graph`].
+#[derive(Clone, Copy, Debug)]
+pub struct GraphStyle {
+    /// Optional Y-range clamp (None = auto-scale to data).
+    pub min_y: Option<f32>,
+    pub max_y: Option<f32>,
+    /// Line / fill colour.
+    pub color: [u8; 4],
+}
+
 impl UiDrawData {
     /// Push a coloured quad (uses the white tile in the block atlas, tex_id=0).
     pub fn quad(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
@@ -186,19 +196,15 @@ impl UiDrawData {
     /// quad between adjacent points.
     pub fn line_graph(
         &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
+        rect: (f32, f32, f32, f32),
         values: &[f32],
-        min_y: Option<f32>,
-        max_y: Option<f32>,
-        color: [u8; 4],
+        style: GraphStyle,
     ) {
+        let (x, y, w, h) = rect;
         if values.len() < 2 {
             return;
         }
-        let (lo, hi) = auto_range(values, min_y, max_y);
+        let (lo, hi) = auto_range(values, style.min_y, style.max_y);
         let range = (hi - lo).max(0.001);
         let bar_w = w / (values.len() - 1) as f32;
         let thickness = 1.5f32;
@@ -221,25 +227,25 @@ impl UiDrawData {
                 UiVertex {
                     pos: [x0 + nx, y0 + ny],
                     uv: [0.0, 0.0],
-                    color,
+                    color: style.color,
                     tex_id: 0.0,
                 },
                 UiVertex {
                     pos: [x0 - nx, y0 - ny],
                     uv: [0.0, 0.0],
-                    color,
+                    color: style.color,
                     tex_id: 0.0,
                 },
                 UiVertex {
                     pos: [x1 - nx, y1 - ny],
                     uv: [0.0, 0.0],
-                    color,
+                    color: style.color,
                     tex_id: 0.0,
                 },
                 UiVertex {
                     pos: [x1 + nx, y1 + ny],
                     uv: [0.0, 0.0],
-                    color,
+                    color: style.color,
                     tex_id: 0.0,
                 },
             ]);
@@ -257,19 +263,15 @@ impl UiDrawData {
     /// Filled area graph. Same as line_graph but filled to the baseline.
     pub fn area_graph(
         &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
+        rect: (f32, f32, f32, f32),
         values: &[f32],
-        min_y: Option<f32>,
-        max_y: Option<f32>,
-        color: [u8; 4],
+        style: GraphStyle,
     ) {
+        let (x, y, w, h) = rect;
         if values.is_empty() {
             return;
         }
-        let (lo, hi) = auto_range(values, min_y, max_y);
+        let (lo, hi) = auto_range(values, style.min_y, style.max_y);
         let range = (hi - lo).max(0.001);
         let bar_w = w / values.len() as f32;
         let baseline = y + h;
@@ -278,7 +280,7 @@ impl UiDrawData {
             let bx = x + i as f32 * bar_w;
             let bar_h = ((val - lo) / range * h).max(0.0);
             let by = baseline - bar_h;
-            self.quad(bx, by, bar_w.max(1.0), bar_h, color);
+            self.quad(bx, by, bar_w.max(1.0), bar_h, style.color);
         }
     }
 

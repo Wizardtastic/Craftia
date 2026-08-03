@@ -564,24 +564,47 @@ pub(super) fn allocate_descriptor_sets(
         .map_err(|e| anyhow!("allocate_descriptor_sets: {e:?}"))
 }
 
+/// All buffer/image resources referenced by the chunk descriptor set.
+/// Bundled so [`update_descriptor_set`] stays below the arg-count lint.
+#[derive(Clone, Copy)]
+pub(super) struct DescriptorResources {
+    pub camera_buffer: vk::Buffer,
+    pub fog_buffer: vk::Buffer,
+    pub atlas_view: vk::ImageView,
+    pub atlas_sampler: vk::Sampler,
+    pub shadow_view: vk::ImageView,
+    pub shadow_sampler: vk::Sampler,
+    pub shadow_buffer: vk::Buffer,
+    pub material_table_buffer: vk::Buffer,
+    pub material_table_size: vk::DeviceSize,
+    pub scene_opaque_view: vk::ImageView,
+    pub scene_opaque_sampler: vk::Sampler,
+    pub scene_depth_view: vk::ImageView,
+    pub scene_depth_sampler: vk::Sampler,
+    pub reflection_buffer: vk::Buffer,
+}
+
 pub(super) fn update_descriptor_set(
     device: &ash::Device,
     set: vk::DescriptorSet,
-    camera_buffer: vk::Buffer,
-    fog_buffer: vk::Buffer,
-    atlas_view: vk::ImageView,
-    atlas_sampler: vk::Sampler,
-    shadow_view: vk::ImageView,
-    shadow_sampler: vk::Sampler,
-    shadow_buffer: vk::Buffer,
-    material_table_buffer: vk::Buffer,
-    material_table_size: vk::DeviceSize,
-    scene_opaque_view: vk::ImageView,
-    scene_opaque_sampler: vk::Sampler,
-    scene_depth_view: vk::ImageView,
-    scene_depth_sampler: vk::Sampler,
-    reflection_buffer: vk::Buffer,
+    res: DescriptorResources,
 ) {
+    let DescriptorResources {
+        camera_buffer,
+        fog_buffer,
+        atlas_view,
+        atlas_sampler,
+        shadow_view,
+        shadow_sampler,
+        shadow_buffer,
+        material_table_buffer,
+        material_table_size,
+        scene_opaque_view,
+        scene_opaque_sampler,
+        scene_depth_view,
+        scene_depth_sampler,
+        reflection_buffer,
+    } = res;
     let cam_info = vk::DescriptorBufferInfo::default()
         .buffer(camera_buffer)
         .offset(0)
@@ -777,17 +800,32 @@ pub(super) fn create_pipeline_layout(
         .map_err(|e| anyhow!("create_pipeline_layout: {e:?}"))
 }
 
+/// Raster state + shaders for [`create_graphics_pipeline`].
+/// Bundled so the pipeline builder stays below the arg-count lint.
+#[derive(Clone, Copy)]
+pub(super) struct GraphicsPipelineConfig<'a> {
+    pub polygon_mode: vk::PolygonMode,
+    pub cull_mode: vk::CullModeFlags,
+    pub vs_spirv: &'a [u8],
+    pub fs_spirv: &'a [u8],
+    pub msaa_samples: vk::SampleCountFlags,
+    pub depth_write: bool,
+}
+
 pub(super) fn create_graphics_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-    polygon_mode: vk::PolygonMode,
-    cull_mode: vk::CullModeFlags,
-    vs_spirv: &[u8],
-    fs_spirv: &[u8],
-    msaa_samples: vk::SampleCountFlags,
-    depth_write: bool,
+    config: GraphicsPipelineConfig<'_>,
 ) -> Result<vk::Pipeline> {
+    let GraphicsPipelineConfig {
+        polygon_mode,
+        cull_mode,
+        vs_spirv,
+        fs_spirv,
+        msaa_samples,
+        depth_write,
+    } = config;
     let vert_spv: &[u8] = vs_spirv;
     let frag_spv: &[u8] = fs_spirv;
     let vert_code = spirv_to_u32(vert_spv);
@@ -986,16 +1024,25 @@ pub(super) fn allocate_ui_descriptor_set(
     Ok(sets[0])
 }
 
+/// The three texture (view, sampler) pairs bound by the UI descriptor set.
+/// Bundled so [`update_ui_descriptor_set`] stays below the arg-count lint.
+#[derive(Clone, Copy)]
+pub(super) struct UiTextures {
+    pub block: (vk::ImageView, vk::Sampler),
+    pub font: (vk::ImageView, vk::Sampler),
+    pub minimap: (vk::ImageView, vk::Sampler),
+}
+
 pub(super) fn update_ui_descriptor_set(
     device: &ash::Device,
     set: vk::DescriptorSet,
-    block_view: vk::ImageView,
-    block_sampler: vk::Sampler,
-    font_view: vk::ImageView,
-    font_sampler: vk::Sampler,
-    minimap_view: vk::ImageView,
-    minimap_sampler: vk::Sampler,
+    textures: UiTextures,
 ) {
+    let UiTextures {
+        block: (block_view, block_sampler),
+        font: (font_view, font_sampler),
+        minimap: (minimap_view, minimap_sampler),
+    } = textures;
     let block_info = vk::DescriptorImageInfo::default()
         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
         .image_view(block_view)

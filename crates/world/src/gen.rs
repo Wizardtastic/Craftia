@@ -67,6 +67,17 @@ impl BiomeId {
 }
 
 /// Configurable terrain generator. Owns precomputed noise samplers.
+/// World-space coordinate + surface height for one cave-carve evaluation.
+/// Bundled so [`TerrainGenerator::carve`] stays under the
+/// `too_many_arguments` threshold.
+struct CarvePoint {
+    x: i32,
+    y: i32,
+    z: i32,
+    height: i32,
+    biome: BiomeId,
+}
+
 pub struct TerrainGenerator {
     seed: i32,
     // Continental shape (low frequency).
@@ -274,16 +285,22 @@ impl TerrainGenerator {
     ///
     /// `chunk` and `reg` are accepted to match the planned API even though the
     /// current implementation only needs the coordinate and surface data.
+    ///
+    /// Coordinate + surface data bundled so `carve` stays under the
+    /// `too_many_arguments` threshold.
     fn carve(
         &self,
         _chunk: &mut Chunk,
-        x: i32,
-        y: i32,
-        z: i32,
-        height: i32,
-        biome: BiomeId,
+        point: CarvePoint,
         _reg: &BlockRegistry,
     ) -> bool {
+        let CarvePoint {
+            x,
+            y,
+            z,
+            height,
+            biome,
+        } = point;
         // Keep a safe margin from the world bottom/top.
         if !(4..=WORLD_HEIGHT_BLOCKS - 8).contains(&y) {
             return false;
@@ -867,7 +884,19 @@ impl TerrainGenerator {
                     // avoids surface potholes. Bedrock, water and sand are
                     // never carved.
                     let carveable = block == stone || block == dirt || block == gravel;
-                    if carveable && self.carve(chunk, wx, wy, wz, height, biome, reg) {
+                    if carveable
+                        && self.carve(
+                            chunk,
+                            CarvePoint {
+                                x: wx,
+                                y: wy,
+                                z: wz,
+                                height,
+                                biome,
+                            },
+                            reg,
+                        )
+                    {
                         block = BlockId::AIR;
                     }
 
@@ -949,11 +978,13 @@ impl TerrainGenerator {
                         tree::try_place_tree(
                             chunk,
                             reg,
-                            self.seed,
-                            wx,
-                            wz,
-                            sy,
-                            tree_type,
+                            tree::TreePlacement {
+                                seed: self.seed,
+                                wx,
+                                wz,
+                                surface_ly: sy,
+                                tree_type,
+                            },
                             &neighbour_set,
                         );
                     }

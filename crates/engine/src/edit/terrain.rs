@@ -319,17 +319,29 @@ pub fn apply_smooth(
     super::brush::affected_chunks_range(min, max + IVec3::new(0, 10, 0))
 }
 
+/// Parameters for the noise terrain operation.
+#[derive(Clone, Copy, Debug)]
+pub struct NoiseParams {
+    pub radius: f32,
+    pub scale: f32,
+    pub amplitude: f32,
+    pub seed: i32,
+}
+
 /// Apply terrain noise: add noise displacement to each column's height.
 pub fn apply_noise(
     world: &Arc<World>,
     center: IVec3,
-    radius: f32,
-    scale: f32,
-    amplitude: f32,
-    seed: i32,
+    params: NoiseParams,
     block: BlockId,
     undo_redo: &mut voxel_game::UndoRedoState,
 ) -> Vec<voxel_core::math::ChunkPos> {
+    let NoiseParams {
+        radius,
+        scale,
+        amplitude,
+        seed,
+    } = params;
     let r = radius.ceil() as i32;
     let min = center - IVec3::new(r, 0, r);
     let max = center + IVec3::new(r, 0, r);

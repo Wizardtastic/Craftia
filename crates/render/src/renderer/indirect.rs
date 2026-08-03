@@ -105,18 +105,67 @@ pub struct GpuDriven {
     gpu_mesher: Option<GpuMesher>,
 }
 
+/// Device/queue handles shared by GPU transfer helpers.
+#[derive(Clone, Copy)]
+pub struct GpuTransferCtx<'a> {
+    pub device: &'a ash::Device,
+    pub alloc: &'a Alloc,
+    pub command_pool: vk::CommandPool,
+    pub graphics_queue: vk::Queue,
+}
+
+/// Render-pass options bundled for [`GpuDriven::new`].
+#[derive(Clone, Copy)]
+pub struct GpuDrivenConfig {
+    pub render_pass: vk::RenderPass,
+    pub chunk_set_layout: vk::DescriptorSetLayout,
+    pub msaa_samples: vk::SampleCountFlags,
+    pub gpu_meshing: bool,
+}
+
+/// Per-frame uniforms for [`GpuDriven::record`].
+#[derive(Clone, Copy)]
+pub struct RecordUniforms<'a> {
+    pub vp_cols: &'a [f32],
+    pub game_time: f32,
+    pub cam_pos: Vec3,
+}
+
+/// Occlusion-query timestamp slots for [`GpuDriven::record`].
+#[derive(Clone, Copy)]
+pub struct QueryTimestamps {
+    pub pool: vk::QueryPool,
+    pub opaque_end_ts: Option<u32>,
+    pub transparent_end_ts: Option<u32>,
+}
+
+/// Destination buffers/offsets for one GPU-meshed chunk.
+#[derive(Clone, Copy)]
+pub struct MegaTargets {
+    pub mega_vbo: vk::Buffer,
+    pub mega_ibo: vk::Buffer,
+    pub vbo_offset: vk::DeviceSize,
+    pub ibo_offset: vk::DeviceSize,
+}
+
 impl GpuDriven {
     #[allow(clippy::too_many_lines)]
     pub fn new(
-        device: &ash::Device,
-        alloc: &Alloc,
-        render_pass: vk::RenderPass,
-        chunk_set_layout: vk::DescriptorSetLayout,
-        msaa_samples: vk::SampleCountFlags,
-        gpu_meshing: bool,
-        command_pool: vk::CommandPool,
-        graphics_queue: vk::Queue,
+        ctx: GpuTransferCtx<'_>,
+        config: GpuDrivenConfig,
     ) -> Result<Self> {
+        let GpuTransferCtx {
+            device,
+            alloc,
+            command_pool,
+            graphics_queue,
+        } = ctx;
+        let GpuDrivenConfig {
+            render_pass,
+            chunk_set_layout,
+            msaa_samples,
+            gpu_meshing,
+        } = config;
         let mega_vbo = GpuBuffer::device_local(
             device,
             alloc,
@@ -201,23 +250,27 @@ impl GpuDriven {
             device,
             render_pass,
             ind_pl,
-            vk::PolygonMode::FILL,
-            vk::CullModeFlags::BACK,
-            &vert_spv,
-            &frag_spv,
-            msaa_samples,
-            true,
+            super::pipeline::GraphicsPipelineConfig {
+                polygon_mode: vk::PolygonMode::FILL,
+                cull_mode: vk::CullModeFlags::BACK,
+                vs_spirv: &vert_spv,
+                fs_spirv: &frag_spv,
+                msaa_samples,
+                depth_write: true,
+            },
         )?;
         let transparent_pipeline = create_graphics_pipeline(
             device,
             render_pass,
             ind_pl,
-            vk::PolygonMode::FILL,
-            vk::CullModeFlags::NONE,
-            &vert_spv,
-            &frag_spv,
-            msaa_samples,
-            false,
+            super::pipeline::GraphicsPipelineConfig {
+                polygon_mode: vk::PolygonMode::FILL,
+                cull_mode: vk::CullModeFlags::NONE,
+                vs_spirv: &vert_spv,
+                fs_spirv: &frag_spv,
+                msaa_samples,
+                depth_write: false,
+            },
         )?;
         let ind_pool = create_indirect_descriptor_pool(device)?;
         let ind_set = allocate_set(device, ind_pool, ind_set_layout)?;
@@ -290,14 +343,17 @@ impl GpuDriven {
     /// the mega VBO/IBO. Returns true on success.
     pub fn upload_chunk_gpu_mesh(
         &mut self,
-        device: &ash::Device,
-        alloc: &Alloc,
-        command_pool: vk::CommandPool,
-        graphics_queue: vk::Queue,
+        ctx: GpuTransferCtx<'_>,
         pos: ChunkPos,
         pass: MeshPass,
         voxels: &[u16],
     ) -> bool {
+        let GpuTransferCtx {
+            device,
+            alloc,
+            command_pool,
+            graphics_queue,
+        } = ctx;
         if self.gpu_mesher.is_none() {
             return false;
         }
@@ -327,16 +383,20 @@ impl GpuDriven {
         let mega_vbo = self.mega_vbo.buffer;
         let mega_ibo = self.mega_ibo.buffer;
         let result = self.gpu_mesher.as_mut().unwrap().mesh_chunk(
-            device,
-            alloc,
-            command_pool,
-            graphics_queue,
+            GpuTransferCtx {
+                device,
+                alloc,
+                command_pool,
+                graphics_queue,
+            },
             voxels,
             pass_mode,
-            mega_vbo,
-            mega_ibo,
-            vbo_off,
-            ibo_off,
+            MegaTargets {
+                mega_vbo,
+                mega_ibo,
+                vbo_offset: vbo_off,
+                ibo_offset: ibo_off,
+            },
         );
         let Some((vert_count, idx_count)) = result else {
             return false;
@@ -918,13 +978,19 @@ impl GpuDriven {
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         chunk_descriptor_set: vk::DescriptorSet,
-        vp_cols: &[f32],
-        game_time: f32,
-        cam_pos: Vec3,
-        query_pool: vk::QueryPool,
-        opaque_end_ts: Option<u32>,
-        transparent_end_ts: Option<u32>,
+        uniforms: RecordUniforms<'_>,
+        timestamps: QueryTimestamps,
     ) {
+        let RecordUniforms {
+            vp_cols,
+            game_time,
+            cam_pos,
+        } = uniforms;
+        let QueryTimestamps {
+            pool: query_pool,
+            opaque_end_ts,
+            transparent_end_ts,
+        } = timestamps;
         if self.dirty {
             self.rebuild(device);
         }
@@ -1562,17 +1628,23 @@ impl GpuMesher {
 
     pub fn mesh_chunk(
         &mut self,
-        device: &ash::Device,
-        _alloc: &Alloc,
-        command_pool: vk::CommandPool,
-        graphics_queue: vk::Queue,
+        ctx: GpuTransferCtx<'_>,
         voxels: &[u16],
         pass_mode: u32,
-        mega_vbo: vk::Buffer,
-        mega_ibo: vk::Buffer,
-        vbo_offset: vk::DeviceSize,
-        ibo_offset: vk::DeviceSize,
+        targets: MegaTargets,
     ) -> Option<(u32, u32)> {
+        let GpuTransferCtx {
+            device,
+            alloc: _alloc,
+            command_pool,
+            graphics_queue,
+        } = ctx;
+        let MegaTargets {
+            mega_vbo,
+            mega_ibo,
+            vbo_offset,
+            ibo_offset,
+        } = targets;
         use crate::texture::{begin_one_time, end_and_submit};
         {
             let slice = self.voxel_staging.mapped_slice_mut().ok()?;
