@@ -145,8 +145,10 @@ impl Simulation {
     pub fn new(world: Arc<World>, spawn_pos: Vec3, with_timing: bool) -> Self {
         // ECS world + default camera + default input snapshot.
         let mut ecs_world = EcsWorld::new();
-        let mut initial_camera = voxel_core::Camera::default();
-        initial_camera.pos = spawn_pos + glam::Vec3::new(0.0, voxel_game::EYE_HEIGHT, 0.0);
+        let initial_camera = voxel_core::Camera {
+            pos: spawn_pos + glam::Vec3::new(0.0, voxel_game::EYE_HEIGHT, 0.0),
+            ..Default::default()
+        };
         ecs_world.insert_resource(CameraResource(initial_camera));
         ecs_world.insert_resource(InputResource(InputSnapshot::default()));
         // Install the physics world once. The world Arc is constant for
@@ -444,8 +446,8 @@ impl Simulation {
     /// borrows in a single expression).
     pub fn player_transform_state(&self) -> Option<(Transform, PlayerState)> {
         let e = self.player_entity()?;
-        let t = self.ecs_world.get::<Transform>(e)?.clone();
-        let s = self.ecs_world.get::<PlayerState>(e)?.clone();
+        let t = *self.ecs_world.get::<Transform>(e)?;
+        let s = *self.ecs_world.get::<PlayerState>(e)?;
         Some((t, s))
     }
 

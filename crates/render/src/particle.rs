@@ -244,7 +244,7 @@ mod tests {
     fn update_drops_dead_particles() {
         let mut mgr = ParticleManager::new(8);
         mgr.emit_break(Vec3::ZERO, [255, 0, 0, 255], Vec3::Y);
-        assert!(mgr.len() > 0);
+        assert!(!mgr.is_empty());
         // Step far past max_life so every particle expires.
         mgr.update(100.0);
         assert!(mgr.is_empty(), "all particles should die after huge dt");

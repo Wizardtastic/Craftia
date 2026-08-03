@@ -318,7 +318,6 @@ fn sample_channel(channel: &AnimChannel, time: f32) -> [f32; 4] {
             // For simplicity, fall back to linear interpolation.
             let v0 = values[idx];
             let v1 = values[next];
-            let frac = frac;
             match channel.path {
                 AnimPath::Rotation => {
                     let q0 = Quat::from_xyzw(v0[0], v0[1], v0[2], v0[3]);
@@ -386,7 +385,10 @@ mod tests {
             node_index: 0,
             path: AnimPath::Rotation,
             keyframe_times: vec![0.0, 1.0],
-            keyframe_values: vec![[0.0, 0.0, 0.0, 1.0], [0.0, 0.7071, 0.0, 0.7071]],
+            keyframe_values: vec![
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2],
+            ],
             interpolation: AnimInterpolation::Linear,
         };
         let v = sample_channel(&channel, 0.5);

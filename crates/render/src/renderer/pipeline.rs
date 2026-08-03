@@ -122,14 +122,16 @@ pub(super) fn create_render_pass(
     // API (ash 0.38 only chains `SubpassDescriptionDepthStencilResolve` onto
     // `SubpassDescription2`). Dispatch to the v2 builder; the caller only
     // passes `Some(mode)` when the device is Vulkan 1.2+.
-    if msaa && depth_resolve_mode.is_some() {
-        return create_render_pass_depth_resolve(
-            device,
-            color_format,
-            depth_format,
-            msaa_samples,
-            depth_resolve_mode.unwrap(),
-        );
+    if msaa {
+        if let Some(mode) = depth_resolve_mode {
+            return create_render_pass_depth_resolve(
+                device,
+                color_format,
+                depth_format,
+                msaa_samples,
+                mode,
+            );
+        }
     }
 
     // ── Attachment 0: (MSAA) color ──

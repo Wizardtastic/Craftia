@@ -629,11 +629,10 @@ impl World {
                 .id_of("water")
                 .expect("water block must be registered");
             let current = chunk.get(lx, ly, lz);
-            if current.is_air() || self.reg.is_liquid(current) {
-                if current != water_id {
+            if (current.is_air() || self.reg.is_liquid(current))
+                && current != water_id {
                     chunk.set(lx, ly, lz, water_id);
                 }
-            }
         } else {
             let current = chunk.get(lx, ly, lz);
             if self.reg.is_liquid(current) {

@@ -438,6 +438,7 @@ mod tests {
     ///   `latest.log` is opened.
     /// * launch #3 → the prior launch's content now lives in
     ///   `previous.log`, and a new `latest.log` is started.
+    ///
     /// In every step, exactly one of `latest.log` / `previous.log`
     /// carries the OLD content and the other is the current run.
     #[test]

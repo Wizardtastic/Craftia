@@ -342,7 +342,7 @@ pub fn discover_texture_packs(packs_dir: &Path) -> Vec<PathBuf> {
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "zip"))
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "zip"))
         .map(|entry| entry.path())
         .collect();
 

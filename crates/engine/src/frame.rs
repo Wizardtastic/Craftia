@@ -130,7 +130,7 @@ impl crate::EngineApp {
                                     log::warn!("config reload: parse {path:?} failed: {e}");
                                     self.gameplay
                                         .chat
-                                        .push_message(format!("[config] parse error"));
+                                        .push_message("[config] parse error".to_string());
                                     continue;
                                 }
                             };
@@ -476,8 +476,8 @@ impl crate::EngineApp {
                     let snap = voxel_game::InputSnapshot::default();
                     self.simulation.set_player_input(snap);
                     // Still tick so systems like regen can run (but movement is zeroed).
-                    let affected = self.simulation.tick_fixed(frame_dt);
-                    affected
+                    
+                    self.simulation.tick_fixed(frame_dt)
                 } else if self.gameplay.block_picker_open {
                     // Block picker (creative inventory) is open — no movement, no mouse look.
                     if self.input.cursor_locked {
@@ -585,7 +585,7 @@ impl crate::EngineApp {
         let camera_now = self
             .simulation
             .player_camera()
-            .unwrap_or(voxel_core::Camera::default());
+            .unwrap_or_default();
         if let Some(streamer) = &self.world_state.streamer {
             // Only send focus if player moved to a different chunk.
             let player_chunk =
@@ -929,8 +929,7 @@ impl crate::EngineApp {
                     let in_menu_bar = my < edit::theme::MENU_BAR_H;
                     let in_status_bar = my > sh - edit::theme::STATUS_BAR_H;
                     let in_cat_bar = mx < edit::theme::CAT_BAR_W;
-                    let in_left_panel = mx >= edit::theme::CAT_BAR_W
-                        && mx < edit::theme::CAT_BAR_W + edit::theme::LEFT_PANEL_W
+                    let in_left_panel = (edit::theme::CAT_BAR_W..edit::theme::CAT_BAR_W + edit::theme::LEFT_PANEL_W).contains(&mx)
                         && my >= edit::theme::MENU_BAR_H
                         && my < sh - edit::theme::STATUS_BAR_H;
                     let in_right_panel = mx > sw - edit::theme::RIGHT_PANEL_W
@@ -985,7 +984,7 @@ impl crate::EngineApp {
                             let shift_held =
                                 self.input.input.held(voxel_game::input::Action::Sneak);
                             if shift_held
-                                && self.gameplay.edit.brush_ref().map_or(false, |b| b.replace)
+                                && self.gameplay.edit.brush_ref().is_some_and(|b| b.replace)
                             {
                                 edit::brush::pick_replace_target(
                                     &mut self.gameplay.edit,
@@ -1004,8 +1003,8 @@ impl crate::EngineApp {
                     }
 
                     // --- Terrain tool interaction ---
-                    if self.gameplay.edit.terrain_ref().is_some() {
-                        if clicks.left && (self.input.cursor_locked || !click_in_ui) {
+                    if self.gameplay.edit.terrain_ref().is_some()
+                        && clicks.left && (self.input.cursor_locked || !click_in_ui) {
                             let terrain = self.gameplay.edit.terrain_ref().unwrap().clone();
                             let affected = match &terrain.op {
                                 TerrainOp::Raise { amount } => edit::terrain::apply_raise(
@@ -1064,11 +1063,10 @@ impl crate::EngineApp {
                             }
                             clicks.left = false;
                         }
-                    }
 
                     // --- Paint tool interaction ---
-                    if self.gameplay.edit.paint_ref().is_some() {
-                        if clicks.left && (self.input.cursor_locked || !click_in_ui) {
+                    if self.gameplay.edit.paint_ref().is_some()
+                        && clicks.left && (self.input.cursor_locked || !click_in_ui) {
                             let paint = self.gameplay.edit.paint_ref().unwrap().clone();
                             let affected = edit::paint::apply_gradient(
                                 &paint,
@@ -1083,7 +1081,6 @@ impl crate::EngineApp {
                             }
                             clicks.left = false;
                         }
-                    }
 
                     // --- Filter tool interaction ---
                     // Filters apply via UI button, not click in world.
@@ -1502,7 +1499,7 @@ impl crate::EngineApp {
         let mut camera = self
             .simulation
             .player_camera()
-            .unwrap_or(voxel_core::Camera::default());
+            .unwrap_or_default();
         let h = self.render.window_size.1 as f32;
         camera.aspect = if h > 0.0 {
             self.render.window_size.0 as f32 / h

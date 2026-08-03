@@ -397,7 +397,7 @@ fn place_spruce(
     for cy in canopy_bottom..=canopy_top {
         let dist_from_bottom = cy - canopy_bottom;
         let radius: i32 = match dist_from_bottom {
-            0 | 1 | 2 => 1, // 3×3
+            0..=2 => 1, // 3×3
             3 | 4 => 0,     // 1×1
             _ => continue,
         };

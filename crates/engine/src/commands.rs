@@ -260,7 +260,7 @@ impl crate::EngineApp {
                         return;
                     }
                 };
-                let paste_origin = origin.unwrap_or_else(|| glam::IVec3::ZERO);
+                let paste_origin = origin.unwrap_or(glam::IVec3::ZERO);
                 let undo = &mut self.gameplay.undo_redo;
                 undo.begin_batch(format!("schematic_paste {name}"));
                 let entity_opt = self.world_state.world.paste_schematic(
@@ -321,7 +321,7 @@ impl crate::EngineApp {
                         .push_message("Cheats must be enabled to use /difficulty".into());
                     return;
                 }
-                let new_diff = match voxel_hunger::Difficulty::from_str(&diff) {
+                let new_diff = match voxel_hunger::Difficulty::parse(&diff) {
                     Some(d) => d,
                     None => {
                         self.gameplay

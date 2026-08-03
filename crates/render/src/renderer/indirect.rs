@@ -25,7 +25,7 @@ use super::pipeline::{create_graphics_pipeline, spirv_to_u32};
 const VERTEX_STRIDE: vk::DeviceSize = std::mem::size_of::<crate::Vertex>() as vk::DeviceSize;
 const INDEX_STRIDE: vk::DeviceSize = std::mem::size_of::<u32>() as vk::DeviceSize;
 const MEGA_VBO_INITIAL: vk::DeviceSize = 4 * 1024 * 1024;
-const MEGA_IBO_INITIAL: vk::DeviceSize = 1 * 1024 * 1024;
+const MEGA_IBO_INITIAL: vk::DeviceSize = 1024 * 1024;
 const MAX_DRAW_SLOTS: usize = 8192;
 const TILE_REMAP_UBO_SIZE: vk::DeviceSize = 1024;
 
@@ -962,7 +962,7 @@ impl GpuDriven {
                 0,
                 bytemuck::bytes_of(&dc),
             );
-            device.cmd_dispatch(cmd, (dc + 63) / 64, 1, 1);
+            device.cmd_dispatch(cmd, dc.div_ceil(64), 1, 1);
         }
         let barrier = vk::BufferMemoryBarrier::default()
             .buffer(self.indirect_cmd_buf.buffer)
@@ -1523,7 +1523,7 @@ impl GpuMesher {
         alloc: &Alloc,
         props: &[crate::BlockPropertiesGpu],
     ) {
-        let needed = props.len() * std::mem::size_of::<crate::BlockPropertiesGpu>();
+        let needed = std::mem::size_of_val(props);
         if needed as vk::DeviceSize > self.block_props.size {
             self.block_props.destroy_in_place(device, alloc);
             self.block_props = match GpuBuffer::host_visible(

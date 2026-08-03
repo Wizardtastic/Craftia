@@ -259,11 +259,9 @@ pub struct TileRemap {
 impl Default for TileRemap {
     fn default() -> Self {
         // Identity mapping: each tile maps to itself.
-        let mut map = [0u32; 256];
-        for i in 0..256 {
-            map[i] = i as u32;
+        Self {
+            map: std::array::from_fn(|i| i as u32),
         }
-        Self { map }
     }
 }
 

@@ -105,25 +105,19 @@ impl SurvivalInventory {
         let mut merged_any = false;
 
         // First, try to merge into existing stacks. Hotbar first, then main.
-        if let Some(r) = self.try_merge_into(&remainder, 0, HOTBAR_SLOTS, true) {
-            if r.count < remainder.count {
-                merged_any = true;
-            }
-            remainder = r;
-        } else {
-            return None;
+        let r = self.try_merge_into(&remainder, 0, HOTBAR_SLOTS, true)?;
+        if r.count < remainder.count {
+            merged_any = true;
         }
+        remainder = r;
         if remainder.is_empty() {
             return None;
         }
-        if let Some(r) = self.try_merge_into(&remainder, 0, MAIN_SLOTS, false) {
-            if r.count < remainder.count {
-                merged_any = true;
-            }
-            remainder = r;
-        } else {
-            return None;
+        let r = self.try_merge_into(&remainder, 0, MAIN_SLOTS, false)?;
+        if r.count < remainder.count {
+            merged_any = true;
         }
+        remainder = r;
         if remainder.is_empty() {
             return None;
         }
@@ -137,14 +131,8 @@ impl SurvivalInventory {
         }
 
         // No merge happened, so try to insert into empty slots.
-        match self.try_insert_into_empty(&remainder, 0, HOTBAR_SLOTS, true) {
-            Some(r) => remainder = r,
-            None => return None,
-        }
-        match self.try_insert_into_empty(&remainder, 0, MAIN_SLOTS, false) {
-            Some(r) => remainder = r,
-            None => return None,
-        }
+        remainder = self.try_insert_into_empty(&remainder, 0, HOTBAR_SLOTS, true)?;
+        remainder = self.try_insert_into_empty(&remainder, 0, MAIN_SLOTS, false)?;
 
         Some(remainder)
     }
@@ -167,11 +155,7 @@ impl SurvivalInventory {
             };
 
             if !slot.is_empty() && slot.id() == remainder.id() {
-                let merged = slot.merge_with(&remainder);
-                match merged {
-                    Some(r) => remainder = r,
-                    None => return None,
-                }
+                remainder = slot.merge_with(&remainder)?;
             }
         }
 
@@ -306,11 +290,7 @@ impl SurvivalInventory {
         // Try to merge first.
         for i in 0..HOTBAR_SLOTS {
             if !self.hotbar[i].is_empty() && self.hotbar[i].id() == remainder.id() {
-                let merged = self.hotbar[i].merge_with(&remainder);
-                match merged {
-                    Some(r) => remainder = r,
-                    None => return None,
-                }
+                remainder = self.hotbar[i].merge_with(&remainder)?;
             }
         }
 
@@ -332,11 +312,7 @@ impl SurvivalInventory {
         // Try to merge first.
         for i in 0..MAIN_SLOTS {
             if !self.main[i].is_empty() && self.main[i].id() == remainder.id() {
-                let merged = self.main[i].merge_with(&remainder);
-                match merged {
-                    Some(r) => remainder = r,
-                    None => return None,
-                }
+                remainder = self.main[i].merge_with(&remainder)?;
             }
         }
 

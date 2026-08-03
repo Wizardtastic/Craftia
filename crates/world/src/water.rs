@@ -74,7 +74,7 @@ pub fn simulate_flow_step(
 
     buf.clear();
     buf.to_process.extend(pending.drain());
-    std::mem::swap(&mut buf.next_pending, &mut HashSet::new());
+    buf.next_pending = HashSet::new();
     // Reuse the hashset from last tick — `clear()` keeps the allocation.
     let next_pending = &mut buf.next_pending;
 

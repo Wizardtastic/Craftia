@@ -84,6 +84,11 @@ impl SoundRegistry {
         self.sounds.len()
     }
 
+    /// Whether no sounds are loaded.
+    pub fn is_empty(&self) -> bool {
+        self.sounds.is_empty()
+    }
+
     /// Reload a specific sound from disk.
     pub fn reload(&mut self, key: &str, audio_dir: &Path) -> anyhow::Result<()> {
         // Convert dotted key back to path.

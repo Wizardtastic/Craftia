@@ -61,7 +61,7 @@ impl BucketQueue {
     }
 
     fn push(&mut self, x: i32, y: i32, z: i32, level: i32) {
-        let bucket = level.max(0).min(15) as usize;
+        let bucket = level.clamp(0, 15) as usize;
         self.buckets[bucket].push((x, y, z));
         if level > self.max_level {
             self.max_level = level;

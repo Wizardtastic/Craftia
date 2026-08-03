@@ -302,7 +302,7 @@ pub fn process_assets_with_packs(
 
     // Try cache.
     if let Some((atlas_rgba, mip_chain)) = read_cache(textures_dir, &composite) {
-        let width = (ATLAS_TILES * ATLAS_TILE_SIZE) as u32;
+        let width = ATLAS_TILES * ATLAS_TILE_SIZE ;
         let height = width;
         log::info!("asset cache hit ({} tiles)", mapping.len());
         return Ok(CacheStatus::Hit {
@@ -432,7 +432,7 @@ mod tests {
 
         // Write to temp dir.
         let dir = std::env::temp_dir().join("voxel_asset_cache_test");
-        let _ = std::fs::create_dir_all(&dir.join(".cache"));
+        let _ = std::fs::create_dir_all(dir.join(".cache"));
         let _ = write_cache(&dir, &composite, &mip_chain, 4, 4, &entries);
 
         // Read back.

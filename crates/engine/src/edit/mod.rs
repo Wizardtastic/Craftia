@@ -246,7 +246,9 @@ pub fn tools_for_category(cat: ToolCategory) -> &'static [ToolDef] {
 // ── Top-level editor state ───────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum EditModeState {
+    #[default]
     Inactive,
     Active { tool: EditTool },
 }
@@ -257,11 +259,6 @@ impl EditModeState {
     }
 }
 
-impl Default for EditModeState {
-    fn default() -> Self {
-        EditModeState::Inactive
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditTool {
@@ -340,19 +337,12 @@ pub struct WeightedBlock {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub struct BrushPalette {
     pub entries: Vec<WeightedBlock>,
     pub enabled: bool,
 }
 
-impl Default for BrushPalette {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            enabled: false,
-        }
-    }
-}
 
 impl BrushPalette {
     /// Pick a block from the weighted palette using a deterministic hash.

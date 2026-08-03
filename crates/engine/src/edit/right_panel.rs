@@ -92,79 +92,76 @@ pub fn draw_right_panel(
     );
 
     // Draw tool-specific options based on active tool.
-    match &edit.mode {
-        crate::edit::EditModeState::Active { tool } => match tool {
-            crate::edit::EditTool::Brush(brush) => {
-                y = draw_brush_options(
-                    ui,
-                    edit,
-                    brush.clone(),
-                    panel_x,
-                    y,
-                    panel_w,
-                    font,
-                    mx,
-                    my,
-                    &mut action,
-                );
-            }
-            crate::edit::EditTool::Select(sel) => {
-                y = draw_select_options(
-                    ui,
-                    sel.clone(),
-                    panel_x,
-                    y,
-                    panel_w,
-                    font,
-                    mx,
-                    my,
-                    &mut action,
-                );
-            }
-            crate::edit::EditTool::Terrain(terrain) => {
-                y = draw_terrain_options(
-                    ui,
-                    edit,
-                    terrain.clone(),
-                    panel_x,
-                    y,
-                    panel_w,
-                    font,
-                    mx,
-                    my,
-                    &mut action,
-                );
-            }
-            crate::edit::EditTool::Paint(paint) => {
-                y = draw_paint_options(
-                    ui,
-                    edit,
-                    paint.clone(),
-                    panel_x,
-                    y,
-                    panel_w,
-                    font,
-                    mx,
-                    my,
-                    &mut action,
-                );
-            }
-            crate::edit::EditTool::Filter(filters) => {
-                y = draw_filter_options(
-                    ui,
-                    filters.clone(),
-                    panel_x,
-                    y,
-                    panel_w,
-                    font,
-                    mx,
-                    my,
-                    &mut action,
-                );
-            }
-        },
-        _ => {}
-    }
+    if let crate::edit::EditModeState::Active { tool } = &edit.mode { match tool {
+        crate::edit::EditTool::Brush(brush) => {
+            y = draw_brush_options(
+                ui,
+                edit,
+                brush.clone(),
+                panel_x,
+                y,
+                panel_w,
+                font,
+                mx,
+                my,
+                &mut action,
+            );
+        }
+        crate::edit::EditTool::Select(sel) => {
+            y = draw_select_options(
+                ui,
+                sel.clone(),
+                panel_x,
+                y,
+                panel_w,
+                font,
+                mx,
+                my,
+                &mut action,
+            );
+        }
+        crate::edit::EditTool::Terrain(terrain) => {
+            y = draw_terrain_options(
+                ui,
+                edit,
+                terrain.clone(),
+                panel_x,
+                y,
+                panel_w,
+                font,
+                mx,
+                my,
+                &mut action,
+            );
+        }
+        crate::edit::EditTool::Paint(paint) => {
+            y = draw_paint_options(
+                ui,
+                edit,
+                paint.clone(),
+                panel_x,
+                y,
+                panel_w,
+                font,
+                mx,
+                my,
+                &mut action,
+            );
+        }
+        crate::edit::EditTool::Filter(filters) => {
+            y = draw_filter_options(
+                ui,
+                filters.clone(),
+                panel_x,
+                y,
+                panel_w,
+                font,
+                mx,
+                my,
+                &mut action,
+            );
+        }
+    } }
 
     // ── Undo/Redo section (Phase 8) ──
     y = draw_separator(ui, panel_x, y, panel_w);
@@ -471,7 +468,7 @@ fn draw_brush_options(
         *action = RightPanelAction::ToggleMultiBlock;
     }
     if brush.palette.enabled {
-        for (_i, entry) in brush.palette.entries.iter().enumerate() {
+        for entry in brush.palette.entries.iter() {
             let pct = if brush.palette.entries.len() > 1 {
                 let total: f32 = brush.palette.entries.iter().map(|e| e.weight).sum();
                 if total > 0.0 {

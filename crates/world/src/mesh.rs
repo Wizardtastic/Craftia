@@ -200,9 +200,9 @@ impl ChunkMesher {
             let directional = (diffuse * 0.65 + 0.35).clamp(0.0, 1.0);
 
             for slice in 0..CHUNK_SIZE {
-                for v in 0..S {
-                    for u in 0..S {
-                        mask[v][u] = build_mask_cell(
+                for (v, row) in mask.iter_mut().enumerate() {
+                    for (u, cell) in row.iter_mut().enumerate() {
+                        *cell = build_mask_cell(
                             face,
                             slice,
                             u as i32,
@@ -277,12 +277,9 @@ fn build_mask_cell(
     let nlx = lx + n.x;
     let nly = ly + n.y;
     let nlz = lz + n.z;
-    let neighbour = if nlx >= 0
-        && nlx < CHUNK_SIZE
-        && nly >= 0
-        && nly < CHUNK_SIZE
-        && nlz >= 0
-        && nlz < CHUNK_SIZE
+    let neighbour = if (0..CHUNK_SIZE).contains(&nlx)
+        && (0..CHUNK_SIZE).contains(&nly)
+        && (0..CHUNK_SIZE).contains(&nlz)
     {
         chunk.get(nlx, nly, nlz)
     } else {
@@ -301,7 +298,7 @@ fn build_mask_cell(
         let lx = x - origin.x;
         let ly = y - origin.y;
         let lz = z - origin.z;
-        if lx >= 0 && lx < CHUNK_SIZE && ly >= 0 && ly < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE {
+        if (0..CHUNK_SIZE).contains(&lx) && (0..CHUNK_SIZE).contains(&ly) && (0..CHUNK_SIZE).contains(&lz) {
             chunk.get(lx, ly, lz)
         } else {
             sample(x, y, z)
@@ -402,14 +399,13 @@ fn should_emit_face(
                 }
             }
         }
-        Face::NegY if ly == 0 && chunk.pos.y() > 0 => {
-            if sample_loaded(wx, wy - 1, wz) {
+        Face::NegY if ly == 0 && chunk.pos.y() > 0
+            && sample_loaded(wx, wy - 1, wz) => {
                 let nb = sample(wx + n.x, wy + n.y, wz + n.z);
                 if reg.get(nb).opaque {
                     return false;
                 }
             }
-        }
         _ => {}
     }
     true

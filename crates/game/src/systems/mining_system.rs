@@ -142,104 +142,6 @@ pub fn evaluate_drops(
     drops
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use voxel_world::registry::{BlockDef, BlockDrop, BlockKind, BlockTextures, ToolType};
-
-    fn test_block(drops: Vec<BlockDrop>) -> BlockDef {
-        BlockDef {
-            id: BlockId(7),
-            name: Arc::from("test"),
-            kind: BlockKind::Solid,
-            solid: true,
-            opaque: true,
-            breakable: true,
-            replaceable: false,
-            textures: BlockTextures::same(1),
-            emission: 0,
-            emission_color: [255, 248, 240],
-            light_absorption: 15,
-            map_color: [255, 255, 255, 255],
-            hardness: 1.0,
-            blast_resistance: 1.0,
-            required_tool: ToolType::None,
-            required_tier: 0,
-            drops,
-            animation: None,
-            material: Default::default(),
-        }
-    }
-
-    #[test]
-    fn empty_drop_table_means_no_drop() {
-        assert!(evaluate_drops(&test_block(Vec::new()), false, 0).is_empty());
-    }
-
-    #[test]
-    fn fortune_level_scales_fortune_drop() {
-        let item = BlockId(9);
-        let block = test_block(vec![BlockDrop::fortune(item, 2, 3)]);
-        assert_eq!(evaluate_drops(&block, false, 0), vec![(item, 2)]);
-        let drops = evaluate_drops(&block, false, 3);
-        assert_eq!(drops.len(), 1);
-        assert!((2..=5).contains(&drops[0].1));
-    }
-
-    #[test]
-    fn self_drop_condition_uses_block_id() {
-        let block = test_block(vec![BlockDrop::self_drop()]);
-        assert_eq!(evaluate_drops(&block, false, 0), vec![(BlockId(7), 1)]);
-    }
-
-    #[test]
-    fn builtin_solid_blocks_drop_themselves() {
-        let reg = voxel_world::BlockRegistry::with_builtins();
-        for name in ["stone", "dirt", "sand", "gravel", "planks", "coal_ore"] {
-            let id = reg.id_of(name).unwrap();
-            let drops = evaluate_drops(reg.get(id), false, 0);
-            assert_eq!(drops, vec![(id, 1)], "{name} should drop itself once");
-        }
-    }
-
-    #[test]
-    fn builtin_no_drop_blocks_drop_nothing() {
-        let reg = voxel_world::BlockRegistry::with_builtins();
-        for name in ["glass", "leaves", "tall_grass"] {
-            let id = reg.id_of(name).unwrap();
-            assert!(
-                evaluate_drops(reg.get(id), false, 0).is_empty(),
-                "{name} should drop nothing"
-            );
-        }
-    }
-
-    #[test]
-    fn fortune_drop_still_honors_probability() {
-        let block = test_block(vec![BlockDrop {
-            item: BlockId(9),
-            min_count: 2,
-            max_count: 5,
-            probability: 0.0,
-            condition: voxel_world::registry::DropCondition::FortuneScaled {
-                base: 2,
-                max_extra: 3,
-            },
-        }]);
-        assert!(evaluate_drops(&block, false, 3).is_empty());
-    }
-
-    #[test]
-    fn insufficient_tool_tier_is_unharvestable() {
-        assert_eq!(
-            calculate_break_time_with_tier(1.0, ToolType::Pickaxe, 2, true, 1, 2.0),
-            -1.0
-        );
-        assert!(calculate_break_time_with_tier(1.0, ToolType::Pickaxe, 2, true, 2, 2.0) > 0.0);
-    }
-}
-
 /// Progressive mining system entry point. Called each fixed timestep.
 pub fn progressive_mining_system(world: &mut World, dt: f32) {
     let player_entity = match world.resource::<PlayerEntity>().and_then(|p| p.0) {
@@ -384,5 +286,103 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
         // Reset mining progress.
         mining.reset();
         world.set(player_entity, mining);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use voxel_world::registry::{BlockDef, BlockDrop, BlockKind, BlockTextures, ToolType};
+
+    fn test_block(drops: Vec<BlockDrop>) -> BlockDef {
+        BlockDef {
+            id: BlockId(7),
+            name: Arc::from("test"),
+            kind: BlockKind::Solid,
+            solid: true,
+            opaque: true,
+            breakable: true,
+            replaceable: false,
+            textures: BlockTextures::same(1),
+            emission: 0,
+            emission_color: [255, 248, 240],
+            light_absorption: 15,
+            map_color: [255, 255, 255, 255],
+            hardness: 1.0,
+            blast_resistance: 1.0,
+            required_tool: ToolType::None,
+            required_tier: 0,
+            drops,
+            animation: None,
+            material: Default::default(),
+        }
+    }
+
+    #[test]
+    fn empty_drop_table_means_no_drop() {
+        assert!(evaluate_drops(&test_block(Vec::new()), false, 0).is_empty());
+    }
+
+    #[test]
+    fn fortune_level_scales_fortune_drop() {
+        let item = BlockId(9);
+        let block = test_block(vec![BlockDrop::fortune(item, 2, 3)]);
+        assert_eq!(evaluate_drops(&block, false, 0), vec![(item, 2)]);
+        let drops = evaluate_drops(&block, false, 3);
+        assert_eq!(drops.len(), 1);
+        assert!((2..=5).contains(&drops[0].1));
+    }
+
+    #[test]
+    fn self_drop_condition_uses_block_id() {
+        let block = test_block(vec![BlockDrop::self_drop()]);
+        assert_eq!(evaluate_drops(&block, false, 0), vec![(BlockId(7), 1)]);
+    }
+
+    #[test]
+    fn builtin_solid_blocks_drop_themselves() {
+        let reg = voxel_world::BlockRegistry::with_builtins();
+        for name in ["stone", "dirt", "sand", "gravel", "planks", "coal_ore"] {
+            let id = reg.id_of(name).unwrap();
+            let drops = evaluate_drops(reg.get(id), false, 0);
+            assert_eq!(drops, vec![(id, 1)], "{name} should drop itself once");
+        }
+    }
+
+    #[test]
+    fn builtin_no_drop_blocks_drop_nothing() {
+        let reg = voxel_world::BlockRegistry::with_builtins();
+        for name in ["glass", "leaves", "tall_grass"] {
+            let id = reg.id_of(name).unwrap();
+            assert!(
+                evaluate_drops(reg.get(id), false, 0).is_empty(),
+                "{name} should drop nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn fortune_drop_still_honors_probability() {
+        let block = test_block(vec![BlockDrop {
+            item: BlockId(9),
+            min_count: 2,
+            max_count: 5,
+            probability: 0.0,
+            condition: voxel_world::registry::DropCondition::FortuneScaled {
+                base: 2,
+                max_extra: 3,
+            },
+        }]);
+        assert!(evaluate_drops(&block, false, 3).is_empty());
+    }
+
+    #[test]
+    fn insufficient_tool_tier_is_unharvestable() {
+        assert_eq!(
+            calculate_break_time_with_tier(1.0, ToolType::Pickaxe, 2, true, 1, 2.0),
+            -1.0
+        );
+        assert!(calculate_break_time_with_tier(1.0, ToolType::Pickaxe, 2, true, 2, 2.0) > 0.0);
     }
 }

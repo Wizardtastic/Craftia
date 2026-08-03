@@ -719,7 +719,7 @@ impl TerrainGenerator {
         for (dx, dz) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let nx = lx + dx;
             let nz = lz + dz;
-            if nx < 0 || nx >= CHUNK_SIZE || nz < 0 || nz >= CHUNK_SIZE {
+            if !(0..CHUNK_SIZE).contains(&nx) || !(0..CHUNK_SIZE).contains(&nz) {
                 continue;
             }
             let below = chunk.get(nx, ly - 1, nz);

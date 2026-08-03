@@ -60,10 +60,9 @@ impl Resources {
         self.map.keys().copied().collect()
     }
 
-    /// Look up a resource by its `TypeId` and return it as `&(dyn Any + Send
-    /// + Sync)`. Used by `World::format_resource` so the inspector can
-    /// route the value through the same `Debug`-based formatters as
-    /// component values.
+    /// Look up a resource by its `TypeId` and return it as `&(dyn Any + Send + Sync)`.
+    /// Used by `World::format_resource` so the inspector can route the value
+    /// through the same `Debug`-based formatters as component values.
     pub fn get_raw(&self, id: &TypeId) -> Option<&(dyn Any + Send + Sync)> {
         self.map.get(id).map(|b| &**b as &(dyn Any + Send + Sync))
     }

@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// The game mode determines player capabilities and survival mechanics.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum GameMode {
+    #[default]
     Survival,
     Creative,
     Adventure,
@@ -202,11 +204,6 @@ impl GameMode {
     }
 }
 
-impl Default for GameMode {
-    fn default() -> Self {
-        Self::Survival
-    }
-}
 
 impl std::fmt::Display for GameMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

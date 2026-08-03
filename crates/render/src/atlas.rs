@@ -112,7 +112,7 @@ fn build_atlas_fallback(
         let pack_dir = textures_dir.join(".texture_packs");
         let png_path = if pack_dir.join(filename).exists() {
             // Search all subdirs of .texture_packs for this file.
-            find_in_texture_packs(&textures_dir, filename)
+            find_in_texture_packs(textures_dir, filename)
                 .unwrap_or_else(|| textures_dir.join(filename))
         } else {
             textures_dir.join(filename)

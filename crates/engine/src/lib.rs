@@ -368,7 +368,6 @@ pub(crate) struct GamePlayState {
     /// Whether the left mouse button is currently held in the settings menu.
     pub settings_left_mouse_held: bool,
     pub cheats_enabled: bool,
-    pub death_buttons: Option<((f32, f32, f32, f32), (f32, f32, f32, f32))>,
     // Visual polish state
     pub looked_at_block: Option<[i32; 3]>,
     pub mining_crack: Option<([i32; 3], u8)>,
@@ -385,7 +384,7 @@ pub(crate) struct GamePlayState {
 pub(crate) struct SettingsWidgets {
     /// (x, y, w, h) for each slider: render_distance, fog_distance, exposure,
     /// mouse_sensitivity, walk_speed, fly_speed
-    pub sliders: Vec<(f32, f32, f32, f32, String, f32, f32)>, // x, y, w, h, label, min, max
+    pub sliders: Vec<SliderWidget>,
     /// (x, y, w, h) for each toggle: vsync, shadows, vignette
     pub toggles: Vec<(f32, f32, f32, f32, String)>, // x, y, w, h, label
     /// Apply / Defaults button rects
@@ -435,7 +434,6 @@ impl GamePlayState {
             settings_slider_dragging: None,
             settings_left_mouse_held: false,
             cheats_enabled: false,
-            death_buttons: None,
             creative_items: Vec::new(),
             creative_tab: 0,
             creative_search: String::new(),
@@ -707,9 +705,13 @@ pub fn run(config: EngineConfig) -> Result<()> {
 }
 
 /// Schematic clipboard: origin corner, opposite corner, flattened block list.
-type Clipboard = ((i32, i32, i32), (i32, i32, i32), Vec<voxel_core::BlockId>);
+pub(crate) type Clipboard = ((i32, i32, i32), (i32, i32, i32), Vec<voxel_core::BlockId>);
+
+/// Pre-computed settings slider widget rect: (x, y, w, h, label, min, max).
+pub(crate) type SliderWidget = (f32, f32, f32, f32, String, f32, f32);
 
 /// Manages loaded texture packs and their UI state.
+#[derive(Default)]
 pub struct TexturePackManager {
     /// Currently loaded texture packs (in load order).
     pub loaded_packs: Vec<TexturePackInfo>,
@@ -736,14 +738,6 @@ pub struct TexturePackInfo {
     pub enabled: bool,
 }
 
-impl Default for TexturePackManager {
-    fn default() -> Self {
-        Self {
-            loaded_packs: Vec::new(),
-            panel_open: false,
-        }
-    }
-}
 
 pub(crate) struct EngineApp {
     config: EngineConfig,
@@ -1622,8 +1616,8 @@ impl ApplicationHandler for EngineApp {
                                         }
                                     }
                                 }
-                                Action::FullscreenMap => {
-                                    if self.gameplay.game_state == GameState::Playing {
+                                Action::FullscreenMap
+                                    if self.gameplay.game_state == GameState::Playing => {
                                         self.gameplay.map.fullscreen_open = !self.gameplay.map.fullscreen_open;
                                         if self.gameplay.map.fullscreen_open {
                                             self.unlock_cursor();
@@ -1631,7 +1625,6 @@ impl ApplicationHandler for EngineApp {
                                             self.lock_cursor();
                                         }
                                     }
-                                }
                                 _ => {}
                             }
                         }
@@ -1771,10 +1764,7 @@ impl ApplicationHandler for EngineApp {
                         // clicks for UI interaction instead of re-locking the cursor.
                         if !self.input.cursor_locked && pressed {
                             if self.gameplay.edit.mode.is_active() {
-                                match button {
-                                    MouseButton::Left => self.gameplay.edit.ui_click = true,
-                                    _ => {}
-                                }
+                                if button == MouseButton::Left { self.gameplay.edit.ui_click = true }
                                 return;
                             }
                             // If the block picker (creative inventory) is open,
@@ -1827,14 +1817,13 @@ impl ApplicationHandler for EngineApp {
                             }
                         }
                         // Track left-mouse held state for slider dragging.
-                        if self.gameplay.game_state == GameState::SettingsMenu {
-                            if button == MouseButton::Left {
+                        if self.gameplay.game_state == GameState::SettingsMenu
+                            && button == MouseButton::Left {
                                 self.gameplay.settings_left_mouse_held = pressed;
                                 if !pressed {
                                     self.gameplay.settings_slider_dragging = None;
                                 }
                             }
-                        }
                     }
                 }
             }

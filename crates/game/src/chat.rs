@@ -580,9 +580,9 @@ impl ChatState {
                         // count rather than the bare extent — otherwise a
                         // user asking for "32 blocks wide" would silently get
                         // 33.
-                        let cell_x = (x1 - x2).unsigned_abs() as u32 + 1;
-                        let cell_y = (y1 - y2).unsigned_abs() as u32 + 1;
-                        let cell_z = (z1 - z2).unsigned_abs() as u32 + 1;
+                        let cell_x = (x1 - x2).unsigned_abs() + 1;
+                        let cell_y = (y1 - y2).unsigned_abs() + 1;
+                        let cell_z = (z1 - z2).unsigned_abs() + 1;
                         if cell_x > 32 || cell_y > 32 || cell_z > 32 {
                             return CommandResult::Unknown(format!(
                                 "/copy selection too large: \

@@ -30,12 +30,12 @@ pub fn property_animation_system(world: &mut World, dt: f32) {
 
         // Find the channel targeting Translation (for Position target).
         for channel in &clip.channels {
-            let should_apply = match (&animator.target, &channel.property) {
-                (PropertyTarget::Position, TargetedProperty::Translation) => true,
-                (PropertyTarget::RotationEuler, TargetedProperty::Rotation) => true,
-                (PropertyTarget::Scale, TargetedProperty::Scale) => true,
-                _ => false,
-            };
+            let should_apply = matches!(
+                (&animator.target, &channel.property),
+                (PropertyTarget::Position, TargetedProperty::Translation)
+                    | (PropertyTarget::RotationEuler, TargetedProperty::Rotation)
+                    | (PropertyTarget::Scale, TargetedProperty::Scale)
+            );
 
             if !should_apply {
                 continue;

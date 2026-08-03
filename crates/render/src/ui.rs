@@ -318,15 +318,15 @@ impl UiDrawData {
         let mut cumulative = vec![0.0f32; len];
         for (si, s) in series.iter().enumerate() {
             let color = colors.get(si).copied().unwrap_or([200, 200, 200, 200]);
-            for i in 0..len {
+            for (i, c) in cumulative.iter_mut().enumerate() {
                 let val = s.get(i).copied().unwrap_or(0.0);
-                let base = cumulative[i];
+                let base = *c;
                 let bar_h = (val / range * h).max(0.0);
                 let base_h = (base / range * h).max(0.0);
                 let bx = x + i as f32 * bar_w;
                 let by = y + h - base_h - bar_h;
                 self.quad(bx, by, bar_w.max(1.0), bar_h, color);
-                cumulative[i] += val;
+                *c += val;
             }
         }
     }

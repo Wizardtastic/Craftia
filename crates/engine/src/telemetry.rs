@@ -243,8 +243,10 @@ mod tests {
     #[test]
     fn push_and_extract() {
         let mut collector = TelemetryCollector::new(100);
-        let mut snap = TelemetrySnapshot::default();
-        snap.cpu_frame_ms = 16.0;
+        let mut snap = TelemetrySnapshot {
+            cpu_frame_ms: 16.0,
+            ..Default::default()
+        };
         collector.push(snap.clone());
         snap.cpu_frame_ms = 32.0;
         collector.push(snap);
@@ -259,8 +261,10 @@ mod tests {
     fn ring_buffer_eviction() {
         let mut collector = TelemetryCollector::new(3);
         for i in 0..5 {
-            let mut snap = TelemetrySnapshot::default();
-            snap.cpu_frame_ms = i as f32;
+            let snap = TelemetrySnapshot {
+                cpu_frame_ms: i as f32,
+                ..Default::default()
+            };
             collector.push(snap);
         }
         assert_eq!(collector.samples().len(), 3);

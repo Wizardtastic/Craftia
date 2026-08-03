@@ -191,8 +191,7 @@ fn merge_nearby_items(world: &mut World) {
             continue;
         }
 
-        for j in (i + 1)..items.len() {
-            let (entity_b, item_b, pos_b) = items[j];
+        for (entity_b, item_b, pos_b) in items[(i + 1)..].iter().copied() {
             if already_merged.contains(&entity_b) {
                 continue;
             }

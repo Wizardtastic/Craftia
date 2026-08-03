@@ -190,8 +190,8 @@ fn apply_at(
 
     let block = if t < 0.5 { tool.block_a } else { tool.block_b };
     let old = world.get_block(pos.x, pos.y, pos.z);
-    if old != block {
-        if world.set_block(pos.x, pos.y, pos.z, block) {
+    if old != block
+        && world.set_block(pos.x, pos.y, pos.z, block) {
             let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
                 x: pos.x,
                 y: pos.y,
@@ -200,5 +200,4 @@ fn apply_at(
                 new_block: block.0,
             });
         }
-    }
 }

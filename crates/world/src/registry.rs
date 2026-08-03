@@ -1152,7 +1152,7 @@ impl BlockRegistry {
             let map_color = bd.map_color.unwrap_or_else(|| default_map_color(&bd.name));
             let emission_color = bd
                 .emission_color
-                .map(|c| [c[0].min(255), c[1].min(255), c[2].min(255)])
+                .map(|c| [c[0], c[1], c[2]])
                 .unwrap_or(DEFAULT_EMISSION_COLOR);
             reg.add_named_owned(
                 Arc::clone(&name),

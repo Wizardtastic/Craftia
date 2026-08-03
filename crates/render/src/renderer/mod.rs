@@ -2172,6 +2172,7 @@ impl Renderer {
     ///   * `sky.{vert,frag}` -> sky pipeline
     ///   * `shadow.{vert,frag}` -> shadow pipeline
     ///   * `post.{vert,frag}` -> post pipeline
+    ///
     /// Callers must invoke this on the renderer's own thread (i.e. from the
     /// engine's frame loop, NOT from the file-watcher thread).
     pub fn reload_shader(&mut self, name: &str) -> Result<()> {
@@ -2914,8 +2915,6 @@ impl Renderer {
         Ok(id)
     }
 
-    /// Get a reference to a loaded model by id.
-
     /// Set overlay data for the current frame (brush wireframe, etc).
     pub fn set_overlay(&mut self, data: crate::overlay::OverlayData) {
         self.overlay_data = data;
@@ -2949,6 +2948,7 @@ impl Renderer {
             device.cmd_draw(cmd, vertex_count, 1, 0, 0);
         }
     }
+    /// Get a reference to a loaded model by id.
     pub fn get_model(&self, id: u32) -> Option<&crate::model::Model> {
         self.models.get(id as usize)
     }
@@ -2964,7 +2964,7 @@ impl Renderer {
     pub fn chunk_buffer_stats(&self) -> (u32, u32) {
         let chunks = self.chunks.read();
         let mut index_count = 0u32;
-        for (_, bufs) in chunks.iter() {
+        for bufs in chunks.values() {
             if let Some(ref opaque) = bufs.opaque {
                 index_count += opaque.index_count;
             }
@@ -3727,22 +3727,6 @@ impl Renderer {
         Ok(out)
     }
 
-    /// Record both chunk draw passes (opaque then transparent) into `cmd`.
-    ///
-    /// Both `draw_frame` and `capture_frame` need identical chunk rendering;
-    /// this is the shared implementation. Uses the **collect-then-drop** lock
-    /// pattern: acquire `self.chunks.read()` once to build the list of
-    /// visible chunks, release it before recording draws. This keeps chunk
-    /// uploads (`upload_chunks` taking `self.chunks.write()`) from blocking
-    /// for the duration of push-constant filling + draw command recording.
-    ///
-    /// `opaque_end_timestamp_query` and `transparent_end_timestamp_query`
-    /// are `Some(query_offset + 3)` and `Some(query_offset + 4)` from
-    /// `draw_frame` (GPU profiling); `capture_frame` passes `None` for both
-    /// since it doesn't run the timestamp pool.
-    ///
-    /// `vp_cols` is the 16-float view-projection matrix in column-major order.
-
     /// Read back occlusion query results from the previous frame and update
     /// per-chunk visibility state. Must be called with `&mut self` (in
     /// `draw_frame` / `capture_frame`) after the fence wait.
@@ -3785,7 +3769,7 @@ impl Renderer {
         let mut state = self.occlusion_state.write();
         for (i, &query_idx) in queries.iter().enumerate() {
             // Find the chunk that owns this query index.
-            for (_pos, oc) in state.iter_mut() {
+            for oc in state.values_mut() {
                 if oc.query_index == query_idx {
                     if results[i] > 0 {
                         oc.was_visible = true;
@@ -3824,8 +3808,21 @@ impl Renderer {
         frame.used_queries.clear();
     }
 
-    /// Allocate a free occlusion query index for a chunk. Returns None if the
-    /// pool is exhausted.
+    /// Record both chunk draw passes (opaque then transparent) into `cmd`.
+    ///
+    /// Both `draw_frame` and `capture_frame` need identical chunk rendering;
+    /// this is the shared implementation. Uses the **collect-then-drop** lock
+    /// pattern: acquire `self.chunks.read()` once to build the list of
+    /// visible chunks, release it before recording draws. This keeps chunk
+    /// uploads (`upload_chunks` taking `self.chunks.write()`) from blocking
+    /// for the duration of push-constant filling + draw command recording.
+    ///
+    /// `opaque_end_timestamp_query` and `transparent_end_timestamp_query`
+    /// are `Some(query_offset + 3)` and `Some(query_offset + 4)` from
+    /// `draw_frame` (GPU profiling); `capture_frame` passes `None` for both
+    /// since it doesn't run the timestamp pool.
+    ///
+    /// `vp_cols` is the 16-float view-projection matrix in column-major order.
     fn record_chunk_passes(
         &self,
         device: &ash::Device,
@@ -3839,10 +3836,8 @@ impl Renderer {
     ) {
         // Collect visible chunk buffer handles under the read lock, then
         // drop the lock so upload_chunks can proceed while we record.
-        let (mut opaque_draws, transparent_draws): (
-            Vec<(ChunkPos, vk::Buffer, vk::Buffer, u32)>,
-            Vec<(ChunkPos, vk::Buffer, vk::Buffer, u32)>,
-        ) = {
+        type DrawList = Vec<(ChunkPos, vk::Buffer, vk::Buffer, u32)>;
+        let (mut opaque_draws, transparent_draws): (DrawList, DrawList) = {
             let chunks = self.chunks.read();
             let mut opaque = Vec::new();
             let mut transparent = Vec::new();

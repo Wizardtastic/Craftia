@@ -1208,9 +1208,6 @@ impl crate::EngineApp {
             [200, 100, 100, 255],
         );
 
-        // Store button rects for click handling.
-        self.gameplay.death_buttons =
-            Some(((btn_x, btn_y, btn_w, btn_h), (btn_x, btn2_y, btn_w, btn_h)));
     }
 
     /// Draw the pause/exit menu (4 buttons: back, options, save & quit, quit).
@@ -2148,7 +2145,6 @@ impl crate::EngineApp {
                     self.load_and_play_world(save_path);
                 }
             }
-            return;
         }
     }
 
@@ -2702,7 +2698,6 @@ impl crate::EngineApp {
                 };
             self.gameplay.create_world_state = None;
             self.create_world_from_dialog(name, seed, mode, cheats);
-            return;
         }
     }
 
@@ -2741,7 +2736,7 @@ impl crate::EngineApp {
         );
 
         // Message.
-        let msg1 = format!("Are you sure you want to delete");
+        let msg1 = "Are you sure you want to delete".to_string();
         let msg2 = format!("\"{}\"?", world_name);
         let msg3 = "This cannot be undone.".to_string();
         ui.text(
@@ -2862,7 +2857,6 @@ impl crate::EngineApp {
             }
             self.gameplay.pending_delete = None;
             self.enter_world_select(); // refresh list
-            return;
         }
     }
 
@@ -3397,7 +3391,7 @@ impl crate::EngineApp {
         };
         let pct = ((self.gameplay.mouse_pos.0 - sx) / sw).clamp(0.0, 1.0);
         let new_val = min + pct * (max - min);
-        self.apply_slider_value(&label, new_val);
+        self.apply_slider_value(label, new_val);
     }
 
     fn draw_section_header(&self, ui: &mut UiDrawData, title: &str, x: f32, y: f32, w: f32) -> f32 {
@@ -3576,7 +3570,7 @@ impl crate::EngineApp {
         y: f32,
         w: f32,
         slider_index: usize,
-    ) -> (f32, (f32, f32, f32, f32, String, f32, f32)) {
+    ) -> (f32, crate::SliderWidget) {
         let is_dragging = self.gameplay.settings_slider_dragging == Some(slider_index);
         let next_y = self.draw_setting_slider(ui, label, value, min, max, x, y, w, is_dragging);
         let bar_x = x + w * 0.55;
@@ -3925,7 +3919,7 @@ impl crate::EngineApp {
         let mut hovered_slot_pos: Option<(f32, f32)> = None;
 
         // Calculate scroll bounds.
-        let total_rows = (filtered_items.len() + cols - 1) / cols;
+        let total_rows = filtered_items.len().div_ceil(cols);
         let max_scroll = total_rows.saturating_sub(visible_rows);
         let scroll_offset = self.gameplay.creative_scroll.min(max_scroll);
 
@@ -5115,8 +5109,8 @@ fn apply_transform_move(
 
     // Clear old positions.
     for &(x, y, z, block) in &blocks {
-        if !block.is_air() {
-            if world.set_block(x, y, z, BlockId::AIR) {
+        if !block.is_air()
+            && world.set_block(x, y, z, BlockId::AIR) {
                 let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
                     x,
                     y,
@@ -5125,7 +5119,6 @@ fn apply_transform_move(
                     new_block: 0,
                 });
             }
-        }
     }
 
     // Place at new positions.
@@ -5134,7 +5127,7 @@ fn apply_transform_move(
             let nx = x + delta.x;
             let ny = y + delta.y;
             let nz = z + delta.z;
-            if ny >= 0 && ny < 256 {
+            if (0..256).contains(&ny) {
                 let old = world.get_block(nx, ny, nz);
                 if world.set_block(nx, ny, nz, block) {
                     let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
@@ -5165,7 +5158,7 @@ fn apply_transform_rotate(
     undo_redo: &mut voxel_game::UndoRedoState,
 ) -> Vec<voxel_core::math::ChunkPos> {
     let center = (min + max) / 2;
-    let steps = ((degrees % 360 + 360) % 360 / 90) as usize;
+    let steps = (degrees.rem_euclid(360) / 90) as usize;
 
     // Read all blocks.
     let mut blocks = Vec::new();
@@ -5182,8 +5175,8 @@ fn apply_transform_rotate(
 
     // Clear old positions.
     for &(x, y, z, block) in &blocks {
-        if !block.is_air() {
-            if world.set_block(x, y, z, BlockId::AIR) {
+        if !block.is_air()
+            && world.set_block(x, y, z, BlockId::AIR) {
                 let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
                     x,
                     y,
@@ -5192,7 +5185,6 @@ fn apply_transform_rotate(
                     new_block: 0,
                 });
             }
-        }
     }
 
     // Apply rotation steps.
@@ -5207,7 +5199,7 @@ fn apply_transform_rotate(
                 rx = center.x + rel_z;
                 rz = center.z - rel_x;
             }
-            if y >= 0 && y < 256 {
+            if (0..256).contains(&y) {
                 let old = world.get_block(rx, y, rz);
                 if world.set_block(rx, y, rz, block) {
                     let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
@@ -5255,8 +5247,8 @@ fn apply_transform_scale(
 
     // Clear old positions.
     for &(x, y, z, block) in &blocks {
-        if !block.is_air() {
-            if world.set_block(x, y, z, BlockId::AIR) {
+        if !block.is_air()
+            && world.set_block(x, y, z, BlockId::AIR) {
                 let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
                     x,
                     y,
@@ -5265,7 +5257,6 @@ fn apply_transform_scale(
                     new_block: 0,
                 });
             }
-        }
     }
 
     // Scale and place.
@@ -5277,7 +5268,7 @@ fn apply_transform_scale(
             let nx = origin.x + (rel_x * factor).round() as i32;
             let ny = origin.y + (rel_y * factor).round() as i32;
             let nz = origin.z + (rel_z * factor).round() as i32;
-            if ny >= 0 && ny < 256 {
+            if (0..256).contains(&ny) {
                 let old = world.get_block(nx, ny, nz);
                 if world.set_block(nx, ny, nz, block) {
                     let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {

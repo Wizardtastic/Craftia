@@ -7,6 +7,7 @@ use voxel_world::World;
 
 /// Selection tool state.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub struct SelectTool {
     /// First corner (set on drag start).
     pub corner_a: Option<IVec3>,
@@ -18,16 +19,6 @@ pub struct SelectTool {
     pub active_selection: Option<(IVec3, IVec3)>, // min, max
 }
 
-impl Default for SelectTool {
-    fn default() -> Self {
-        Self {
-            corner_a: None,
-            corner_b: None,
-            dragging: false,
-            active_selection: None,
-        }
-    }
-}
 
 impl SelectTool {
     /// Start a new drag at the given block position.
@@ -163,7 +154,7 @@ pub fn copy_selection(
     world: &World,
     min: IVec3,
     max: IVec3,
-) -> ((i32, i32, i32), (i32, i32, i32), Vec<BlockId>) {
+) -> crate::Clipboard {
     let mut blocks = Vec::new();
     for y in min.y..=max.y {
         for z in min.z..=max.z {
@@ -187,8 +178,8 @@ pub fn delete_selection(
         for z in min.z..=max.z {
             for x in min.x..=max.x {
                 let old = world.get_block(x, y, z);
-                if !old.is_air() {
-                    if world.set_block(x, y, z, BlockId::AIR) {
+                if !old.is_air()
+                    && world.set_block(x, y, z, BlockId::AIR) {
                         let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
                             x,
                             y,
@@ -197,7 +188,6 @@ pub fn delete_selection(
                             new_block: 0,
                         });
                     }
-                }
             }
         }
     }
