@@ -10,6 +10,31 @@ use crate::edit;
 use crate::edit::terrain::TerrainOp;
 use crate::GameState;
 
+/// Screen-space rectangle (x, y, width, height).
+#[derive(Clone, Copy, Debug)]
+struct Rect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+/// Inclusive min/max range for a settings slider.
+#[derive(Clone, Copy, Debug)]
+struct SliderRange {
+    min: f32,
+    max: f32,
+}
+
+/// Slider row position: x/y origin plus available width. The row height is
+/// implied by the slider bar's fixed dimensions.
+#[derive(Clone, Copy, Debug)]
+struct SliderRect {
+    x: f32,
+    y: f32,
+    w: f32,
+}
+
 /// Sanitize a string for use as a directory/file name.
 fn sanitize_filename(name: &str) -> String {
     name.chars()
@@ -1178,7 +1203,12 @@ impl crate::EngineApp {
         let btn_y = h * 0.5;
         self.draw_button(
             ui,
-            (btn_x, btn_y, btn_w, btn_h),
+            Rect {
+                x: btn_x,
+                y: btn_y,
+                w: btn_w,
+                h: btn_h,
+            },
             "RESPAWN",
             [40, 80, 40, 220],
             [60, 120, 60, 255],
@@ -1189,13 +1219,17 @@ impl crate::EngineApp {
         let btn2_y = btn_y + 60.0;
         self.draw_button(
             ui,
-            (btn_x, btn2_y, btn_w, btn_h),
+            Rect {
+                x: btn_x,
+                y: btn2_y,
+                w: btn_w,
+                h: btn_h,
+            },
             "TITLE SCREEN",
             [80, 40, 40, 220],
             [120, 60, 60, 255],
             [200, 100, 100, 255],
         );
-
     }
 
     /// Draw the pause/exit menu (4 buttons: back, options, save & quit, quit).
@@ -1230,7 +1264,12 @@ impl crate::EngineApp {
         // Back to Game
         self.draw_button(
             ui,
-            (btn_x, btn_y0, btn_w, btn_h),
+            Rect {
+                x: btn_x,
+                y: btn_y0,
+                w: btn_w,
+                h: btn_h,
+            },
             "BACK TO GAME",
             [40, 80, 40, 220],
             [60, 120, 60, 255],
@@ -1239,7 +1278,12 @@ impl crate::EngineApp {
         // Options
         self.draw_button(
             ui,
-            (btn_x, btn_y0 + spacing, btn_w, btn_h),
+            Rect {
+                x: btn_x,
+                y: btn_y0 + spacing,
+                w: btn_w,
+                h: btn_h,
+            },
             "OPTIONS",
             [50, 50, 80, 220],
             [70, 70, 110, 255],
@@ -1248,7 +1292,12 @@ impl crate::EngineApp {
         // Save & Quit to Title
         self.draw_button(
             ui,
-            (btn_x, btn_y0 + spacing * 2.0, btn_w, btn_h),
+            Rect {
+                x: btn_x,
+                y: btn_y0 + spacing * 2.0,
+                w: btn_w,
+                h: btn_h,
+            },
             "SAVE & QUIT",
             [80, 60, 30, 220],
             [120, 90, 40, 255],
@@ -1257,7 +1306,12 @@ impl crate::EngineApp {
         // Quit Game
         self.draw_button(
             ui,
-            (btn_x, btn_y0 + spacing * 3.0, btn_w, btn_h),
+            Rect {
+                x: btn_x,
+                y: btn_y0 + spacing * 3.0,
+                w: btn_w,
+                h: btn_h,
+            },
             "QUIT GAME",
             [90, 30, 30, 220],
             [140, 50, 50, 255],
@@ -1279,13 +1333,13 @@ impl crate::EngineApp {
     fn draw_button(
         &self,
         ui: &mut UiDrawData,
-        rect: (f32, f32, f32, f32),
+        rect: Rect,
         label: &str,
         fill_normal: [u8; 4],
         fill_hover: [u8; 4],
         border: [u8; 4],
     ) {
-        let (x, y, w, h) = rect;
+        let Rect { x, y, w, h } = rect;
         let hovered = self.point_in_rect(self.gameplay.mouse_pos, x, y, w, h);
         let fill = if hovered { fill_hover } else { fill_normal };
         ui.quad(x, y, w, h, fill);
@@ -1707,7 +1761,19 @@ impl crate::EngineApp {
         for (i, label) in btn_labels.iter().enumerate() {
             let by = btn_start_y + i as f32 * spacing;
             let (fill, hover, border) = btn_colors[i];
-            self.draw_button(ui, (btn_x, by, panel_w, btn_h), label, fill, hover, border);
+            self.draw_button(
+                ui,
+                Rect {
+                    x: btn_x,
+                    y: by,
+                    w: panel_w,
+                    h: btn_h,
+                },
+                label,
+                fill,
+                hover,
+                border,
+            );
             buttons[i] = (btn_x, by, panel_w, btn_h);
         }
 
@@ -2897,8 +2963,15 @@ impl crate::EngineApp {
             ui,
             "Render Distance",
             self.config.stream.load_radius as f32,
-            (2.0, 16.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange {
+                min: 2.0,
+                max: 16.0,
+            },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -2918,8 +2991,15 @@ impl crate::EngineApp {
             ui,
             "Fog Distance",
             self.config.render.fog_distance,
-            (100.0, 800.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange {
+                min: 100.0,
+                max: 800.0,
+            },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -2929,8 +3009,12 @@ impl crate::EngineApp {
             ui,
             "Exposure",
             self.config.exposure,
-            (0.1, 3.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange { min: 0.1, max: 3.0 },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -2970,8 +3054,12 @@ impl crate::EngineApp {
             ui,
             "SSAO Radius",
             self.config.ssao_radius,
-            (0.5, 5.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange { min: 0.5, max: 5.0 },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -2981,8 +3069,15 @@ impl crate::EngineApp {
             ui,
             "SSAO Bias",
             self.config.ssao_bias,
-            (0.001, 0.1),
-            (lx, sy, panel_w - 32.0),
+            SliderRange {
+                min: 0.001,
+                max: 0.1,
+            },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -2992,8 +3087,12 @@ impl crate::EngineApp {
             ui,
             "SSAO Strength",
             self.config.ssao_strength,
-            (0.0, 3.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange { min: 0.0, max: 3.0 },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -3011,8 +3110,12 @@ impl crate::EngineApp {
             ui,
             "MSAA Samples",
             msaa_val,
-            (0.0, 3.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange { min: 0.0, max: 3.0 },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -3027,8 +3130,15 @@ impl crate::EngineApp {
             ui,
             "Mouse Sensitivity",
             self.config.player.mouse_sensitivity * 1000.0,
-            (0.5, 10.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange {
+                min: 0.5,
+                max: 10.0,
+            },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -3038,8 +3148,15 @@ impl crate::EngineApp {
             ui,
             "Walk Speed",
             self.config.player.walk_speed,
-            (1.0, 10.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange {
+                min: 1.0,
+                max: 10.0,
+            },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         slider_idx += 1;
@@ -3049,8 +3166,15 @@ impl crate::EngineApp {
             ui,
             "Fly Speed",
             self.config.player.fly_speed,
-            (5.0, 50.0),
-            (lx, sy, panel_w - 32.0),
+            SliderRange {
+                min: 5.0,
+                max: 50.0,
+            },
+            SliderRect {
+                x: lx,
+                y: sy,
+                w: panel_w - 32.0,
+            },
             slider_idx,
         );
         sy = ny;
@@ -3349,12 +3473,12 @@ impl crate::EngineApp {
         ui: &mut UiDrawData,
         label: &str,
         value: f32,
-        range: (f32, f32),
-        rect: (f32, f32, f32),
+        range: SliderRange,
+        rect: SliderRect,
         is_dragging: bool,
     ) -> f32 {
-        let (min, max) = range;
-        let (x, y, w) = rect;
+        let SliderRange { min, max } = range;
+        let SliderRect { x, y, w } = rect;
         let bar_x = x + w * 0.55;
         let bar_w = w * 0.35;
         let bar_h = 8.0;
@@ -3507,12 +3631,12 @@ impl crate::EngineApp {
         ui: &mut UiDrawData,
         label: &str,
         value: f32,
-        range: (f32, f32),
-        rect: (f32, f32, f32),
+        range: SliderRange,
+        rect: SliderRect,
         slider_index: usize,
     ) -> (f32, crate::SliderWidget) {
-        let (min, max) = range;
-        let (x, y, w) = rect;
+        let SliderRange { min, max } = range;
+        let SliderRect { x, y, w } = rect;
         let is_dragging = self.gameplay.settings_slider_dragging == Some(slider_index);
         let next_y = self.draw_setting_slider(ui, label, value, range, rect, is_dragging);
         let bar_x = x + w * 0.55;
@@ -5037,16 +5161,15 @@ fn apply_transform_move(
 
     // Clear old positions.
     for &(x, y, z, block) in &blocks {
-        if !block.is_air()
-            && world.set_block(x, y, z, BlockId::AIR) {
-                let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                    x,
-                    y,
-                    z,
-                    old_block: block.0,
-                    new_block: 0,
-                });
-            }
+        if !block.is_air() && world.set_block(x, y, z, BlockId::AIR) {
+            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                x,
+                y,
+                z,
+                old_block: block.0,
+                new_block: 0,
+            });
+        }
     }
 
     // Place at new positions.
@@ -5103,16 +5226,15 @@ fn apply_transform_rotate(
 
     // Clear old positions.
     for &(x, y, z, block) in &blocks {
-        if !block.is_air()
-            && world.set_block(x, y, z, BlockId::AIR) {
-                let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                    x,
-                    y,
-                    z,
-                    old_block: block.0,
-                    new_block: 0,
-                });
-            }
+        if !block.is_air() && world.set_block(x, y, z, BlockId::AIR) {
+            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                x,
+                y,
+                z,
+                old_block: block.0,
+                new_block: 0,
+            });
+        }
     }
 
     // Apply rotation steps.
@@ -5175,16 +5297,15 @@ fn apply_transform_scale(
 
     // Clear old positions.
     for &(x, y, z, block) in &blocks {
-        if !block.is_air()
-            && world.set_block(x, y, z, BlockId::AIR) {
-                let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                    x,
-                    y,
-                    z,
-                    old_block: block.0,
-                    new_block: 0,
-                });
-            }
+        if !block.is_air() && world.set_block(x, y, z, BlockId::AIR) {
+            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                x,
+                y,
+                z,
+                old_block: block.0,
+                new_block: 0,
+            });
+        }
     }
 
     // Scale and place.
