@@ -151,6 +151,11 @@ struct RenderState {
     pub renderer: Option<Renderer>,
     pub window: Option<Window>,
     pub window_size: (u32, u32),
+    /// Monitor DPI scale factor of the window (e.g. 1.0 = 100%, 2.0 = 200%
+    /// HiDPI). UI is laid out in *logical* pixels (`window_size / ui_scale`)
+    /// and vertex positions are multiplied back by `ui_scale` before upload,
+    /// so HUD/menus stay the same physical size on high-DPI displays.
+    pub ui_scale: f32,
     pub font: FontAtlas,
 }
 
@@ -160,13 +165,22 @@ impl RenderState {
             renderer: None,
             window: None,
             window_size: (1280, 720),
+            ui_scale: 1.0,
             font: FontAtlas::new(),
         }
     }
 
-    fn resize(&mut self) {
+    /// Logical (DPI-independent) UI size in pixels: the physical window size
+    /// divided by the monitor scale factor. All UI layout happens in this
+    /// space so the HUD/menus render at a consistent size on HiDPI displays.
+    fn logical_size(&self) -> (f32, f32) {
+        let s = self.ui_scale.max(0.25);
+        (self.window_size.0 as f32 / s, self.window_size.1 as f32 / s)
+    }
+
+    fn resize(&mut self, size: (u32, u32)) {
         if let Some(r) = self.renderer.as_mut() {
-            r.resize();
+            r.resize(size);
         }
     }
 }
@@ -300,7 +314,8 @@ pub(crate) struct GamePlayState {
     pub game_time: f64,
     /// Length of a full day/night cycle in seconds.
     pub day_length: f64,
-    /// Mouse position in physical pixels (for pause-menu and block-picker hit-testing).
+    /// Mouse position in logical UI pixels (physical / ui_scale), for
+    /// pause-menu and block-picker hit-testing against UI rects.
     pub mouse_pos: (f32, f32),
     /// Pre-computed pause-menu button rects (4 buttons: back, options, save&quit, quit).
     pub pause_buttons: Option<[(f32, f32, f32, f32); 4]>,
@@ -1072,6 +1087,9 @@ impl ApplicationHandler for EngineApp {
                 return;
             }
         };
+        // Capture the initial DPI scale factor (HiDPI laptops report > 1.0)
+        // so the HUD/menus lay out in logical pixels from the first frame.
+        self.render.ui_scale = window.scale_factor().max(0.25) as f32;
         self.render.window = Some(window);
 
         // Build the renderer from the window's raw handles.
@@ -1093,7 +1111,16 @@ impl ApplicationHandler for EngineApp {
                     return;
                 }
             };
-            match Renderer::new(wh, dh, self.config.render.clone()) {
+            // Query the actual physical window size: on Wayland the
+            // compositor may assign a size different from the requested one,
+            // and the swapchain must match whatever the window really is.
+            let window_size = window.inner_size();
+            match Renderer::new(
+                wh,
+                dh,
+                self.config.render.clone(),
+                (window_size.width, window_size.height),
+            ) {
                 Ok(r) => {
                     self.render.window_size = (r.extent().width, r.extent().height);
                     // Populate texture pack manager from initial renderer pack info.
@@ -1184,9 +1211,19 @@ impl ApplicationHandler for EngineApp {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // DPI changed (e.g. the window moved between monitors).
+                // Update the UI scale; the next redraw re-lays-out the HUD
+                // at the new scale. The physical window size is unchanged
+                // (the existing `Resized` path handles any swapchain work).
+                self.render.ui_scale = scale_factor.max(0.25) as f32;
+                if let Some(w) = &self.render.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 self.render.window_size = (size.width, size.height);
-                self.render.resize();
+                self.render.resize((size.width, size.height));
             }
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -1822,8 +1859,10 @@ impl ApplicationHandler for EngineApp {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                // Track mouse position for pause-menu button hit-testing.
-                self.gameplay.mouse_pos = (position.x as f32, position.y as f32);
+                // Track mouse position for UI hit-testing, in logical pixels
+                // (divided by the DPI scale) to match UI layout coordinates.
+                let s = self.render.ui_scale.max(0.25);
+                self.gameplay.mouse_pos = (position.x as f32 / s, position.y as f32 / s);
             }
             WindowEvent::RedrawRequested => {
                 if self.input.running {

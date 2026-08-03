@@ -1,24 +1,35 @@
-[2026-08-03T02:10:58Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
-[2026-08-03T02:10:58Z INFO  voxel] ============ voxel sandbox startup ============
-[2026-08-03T02:10:58Z INFO  voxel]   binary:    voxel-app 0.1.0
-[2026-08-03T02:10:58Z INFO  voxel]   git:       6cda7b0 (dirty)
-[2026-08-03T02:10:58Z INFO  voxel]   rustc:     rustc 1.97.1 (8bab26f4f 2026-07-14)
-[2026-08-03T02:10:58Z INFO  voxel]   target:    x86_64-unknown-linux-gnu
-[2026-08-03T02:10:58Z INFO  voxel]   build unx: 1785723016
-[2026-08-03T02:10:58Z INFO  voxel]   pid:       16628
-[2026-08-03T02:10:58Z INFO  voxel] ===============================================
-[2026-08-03T02:10:58Z INFO  voxel_engine::settings] Loaded config from config.toml
-[2026-08-03T02:10:58Z INFO  voxel] starting voxel engine (seed=1337)
-[2026-08-03T02:10:58Z WARN  voxel_world::world] failed to load blocks from assets: failed to read assets/blocks.json. Using builtins.
-[2026-08-03T02:10:58Z INFO  voxel_engine] spawn search: land column at (2, 65, 2) -> spawn pos [2.5, 67.0, 2.5]
-[2026-08-03T02:10:58Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
-[2026-08-03T02:10:59Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
-[2026-08-03T02:10:59Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
-[2026-08-03T02:10:59Z INFO  voxel_render::renderer] MSAA TYPE_2 enabled
-[2026-08-03T02:10:59Z INFO  voxel_render::renderer] occlusion culling: 16384 queries per frame
-[2026-08-03T02:10:59Z INFO  voxel_engine] file-watcher: active (config = config.toml)
-[2026-08-03T02:10:59Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
-[2026-08-03T02:10:59Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
-[2026-08-03T02:10:59Z INFO  voxel_engine] Audio system initialized
-[2026-08-03T02:10:59Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
-[2026-08-03T02:11:32Z INFO  voxel_render::hot_reload] file-watcher: shut down
+[2026-08-03T15:18:26Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
+[2026-08-03T15:18:26Z INFO  voxel] ============ voxel sandbox startup ============
+[2026-08-03T15:18:26Z INFO  voxel]   binary:    voxel-app 0.1.0
+[2026-08-03T15:18:26Z INFO  voxel]   git:       9c18188 (dirty)
+[2026-08-03T15:18:26Z INFO  voxel]   rustc:     rustc 1.97.1 (8bab26f4f 2026-07-14)
+[2026-08-03T15:18:26Z INFO  voxel]   target:    x86_64-unknown-linux-gnu
+[2026-08-03T15:18:26Z INFO  voxel]   build unx: 1785770235
+[2026-08-03T15:18:26Z INFO  voxel]   pid:       20293
+[2026-08-03T15:18:26Z INFO  voxel] ===============================================
+[2026-08-03T15:18:26Z INFO  voxel_engine::settings] Loaded config from config.toml
+[2026-08-03T15:18:26Z INFO  voxel] starting voxel engine (seed=1337)
+[2026-08-03T15:18:26Z WARN  voxel_world::world] failed to load blocks from assets: failed to read assets/blocks.json. Using builtins.
+[2026-08-03T15:18:26Z INFO  voxel_engine] spawn search: land column at (2, 65, 2) -> spawn pos [2.5, 67.0, 2.5]
+[2026-08-03T15:18:26Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
+[2026-08-03T15:18:26Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
+[2026-08-03T15:18:26Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
+[2026-08-03T15:18:26Z INFO  voxel_render::renderer] MSAA TYPE_2 enabled
+[2026-08-03T15:18:26Z INFO  voxel_render::renderer] occlusion culling: 16384 queries per frame
+[2026-08-03T15:18:26Z INFO  voxel_engine] file-watcher: active (config = config.toml)
+[2026-08-03T15:18:27Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
+[2026-08-03T15:18:27Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
+[2026-08-03T15:18:27Z INFO  voxel_engine] Audio system initialized
+[2026-08-03T15:18:27Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
+[2026-08-03T15:18:31Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
+[2026-08-03T15:18:36Z INFO  voxel_world::save] Saved 343 chunks to saves/New_World
+[2026-08-03T15:18:36Z INFO  voxel_engine::ui] created new world 'New World' (seed=1785770316, mode=survival, cheats=false) at saves/New_World
+[2026-08-03T15:18:36Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
+[2026-08-03T15:18:40Z WARN  calloop::loop_logic] [calloop] Received an event for non-existence source: TokenInner { id: 3, version: 2, sub_id: 0 }
+[2026-08-03T15:18:44Z WARN  calloop::loop_logic] [calloop] Received an event for non-existence source: TokenInner { id: 3, version: 8, sub_id: 0 }
+[2026-08-03T15:18:52Z WARN  calloop::loop_logic] [calloop] Received an event for non-existence source: TokenInner { id: 3, version: 15, sub_id: 0 }
+[2026-08-03T15:19:00Z WARN  calloop::loop_logic] [calloop] Received an event for non-existence source: TokenInner { id: 3, version: 23, sub_id: 0 }
+[2026-08-03T15:19:02Z WARN  calloop::loop_logic] [calloop] Received an event for non-existence source: TokenInner { id: 3, version: 25, sub_id: 0 }
+[2026-08-03T15:19:03Z WARN  calloop::loop_logic] [calloop] Received an event for non-existence source: TokenInner { id: 3, version: 26, sub_id: 0 }
+[2026-08-03T15:19:06Z INFO  voxel_engine::ui] exit game requested
+[2026-08-03T15:19:06Z INFO  voxel_render::hot_reload] file-watcher: shut down

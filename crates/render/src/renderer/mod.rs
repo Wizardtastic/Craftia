@@ -322,6 +322,11 @@ pub struct Renderer {
     swapchain_image_views: Vec<vk::ImageView>,
     swapchain_format: vk::Format,
     swapchain_extent: vk::Extent2D,
+    /// The window's current physical size in pixels. Used as the swapchain
+    /// extent fallback when the surface reports `current_extent` as
+    /// `u32::MAX` (Wayland / some X11 drivers), so the rendered image always
+    /// matches the actual window size instead of a hardcoded 1280x720.
+    window_size: (u32, u32),
     depth: Option<GpuImage>,
     // ── MSAA resolve targets ──
     msaa_color: Option<GpuImage>,
@@ -657,10 +662,15 @@ fn load_pack_mapping(
 
 impl Renderer {
     /// Create a complete renderer for `window`.
+    ///
+    /// `window_size` is the window's physical size in pixels at creation
+    /// time; it is the fallback swapchain extent on platforms whose surface
+    /// caps report `current_extent` as `u32::MAX` (Wayland, some X11).
     pub fn new(
         window_handle: RawWindowHandle,
         display_handle: RawDisplayHandle,
         config: RendererConfig,
+        window_size: (u32, u32),
     ) -> Result<Self> {
         let entry = unsafe { Entry::load() }.map_err(|e| anyhow!("Vulkan loader: {e}"))?;
 
@@ -817,6 +827,10 @@ impl Renderer {
                 physical_device,
                 surface,
                 config.vsync,
+                vk::Extent2D {
+                    width: window_size.0,
+                    height: window_size.1,
+                },
             )?;
         let swapchain_image_views =
             swapchain::create_image_views(&device, &swapchain_images, swapchain_format)?;
@@ -1878,6 +1892,7 @@ impl Renderer {
             swapchain_image_views,
             swapchain_format,
             swapchain_extent,
+            window_size,
             depth: Some(depth),
             msaa_color: msaa_color_img,
             msaa_depth: msaa_depth_img,
@@ -2027,8 +2042,12 @@ impl Renderer {
         &self.loaded_pack_infos
     }
 
-    /// Mark the swapchain for recreation on the next draw (call on window resize).
-    pub fn resize(&mut self) {
+    /// Record a window resize and mark the swapchain for recreation on the
+    /// next draw. `size` is the window's new physical size in pixels — it
+    /// becomes the swapchain extent fallback on platforms whose surface caps
+    /// report `current_extent` as `u32::MAX` (Wayland / some X11 drivers).
+    pub fn resize(&mut self, size: (u32, u32)) {
+        self.window_size = size;
         self.needs_resize = true;
     }
 
@@ -4898,6 +4917,10 @@ impl Renderer {
                 self.physical_device,
                 self.surface,
                 self.config.vsync,
+                vk::Extent2D {
+                    width: self.window_size.0,
+                    height: self.window_size.1,
+                },
             )?;
         let swapchain_image_views =
             swapchain::create_image_views(&self.device, &swapchain_images, swapchain_format)?;

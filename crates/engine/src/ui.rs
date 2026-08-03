@@ -60,35 +60,38 @@ impl crate::EngineApp {
     /// or the pause/exit menu when paused.
     pub(crate) fn build_ui(&mut self) -> UiDrawData {
         let mut ui = UiDrawData::default();
-        let (w, h) = self.render.window_size;
+        // Lay out in logical (DPI-independent) pixels; the vertices are
+        // scaled back to physical pixels below, and the UI shader maps
+        // against the physical swapchain size.
+        let (w, h) = self.render.logical_size();
 
         match self.gameplay.game_state {
             GameState::TitleScreen => {
-                self.draw_title_screen(&mut ui, w as f32, h as f32);
+                self.draw_title_screen(&mut ui, w, h);
             }
             GameState::WorldSelect => {
-                self.draw_world_select(&mut ui, w as f32, h as f32);
+                self.draw_world_select(&mut ui, w, h);
                 // Draw create world dialog overlay if active.
                 if self.gameplay.create_world_state.is_some() {
-                    self.draw_create_world_dialog(&mut ui, w as f32, h as f32);
+                    self.draw_create_world_dialog(&mut ui, w, h);
                 }
                 // Draw delete confirmation overlay if pending.
                 if self.gameplay.pending_delete.is_some() {
-                    self.draw_delete_confirm_dialog(&mut ui, w as f32, h as f32);
+                    self.draw_delete_confirm_dialog(&mut ui, w, h);
                 }
             }
             GameState::SettingsMenu => {
                 // Draw the previous state underneath (dimmed).
                 match self.gameplay.settings_previous {
                     GameState::TitleScreen => {
-                        self.draw_title_screen(&mut ui, w as f32, h as f32);
+                        self.draw_title_screen(&mut ui, w, h);
                     }
                     GameState::PauseMenu => {
-                        self.draw_pause_menu(&mut ui, w as f32, h as f32);
+                        self.draw_pause_menu(&mut ui, w, h);
                     }
                     _ => {}
                 }
-                self.draw_settings_menu(&mut ui, w as f32, h as f32);
+                self.draw_settings_menu(&mut ui, w, h);
             }
             GameState::Playing => {
                 // Check if player is dead.
@@ -103,46 +106,58 @@ impl crate::EngineApp {
 
                 if is_dead {
                     // Show death screen instead of normal HUD.
-                    self.draw_death_screen(&mut ui, w as f32, h as f32);
+                    self.draw_death_screen(&mut ui, w, h);
                 } else {
-                    self.draw_crosshair(&mut ui, w as f32, h as f32);
-                    self.draw_hotbar(&mut ui, w as f32, h as f32);
-                    self.draw_held_item_name(&mut ui, w as f32, h as f32);
-                    self.draw_health_bar(&mut ui, w as f32, h as f32);
-                    self.draw_hunger_bar(&mut ui, w as f32, h as f32);
-                    self.draw_xp_bar(&mut ui, w as f32, h as f32);
-                    self.draw_bubble_bar(&mut ui, w as f32, h as f32);
-                    self.draw_damage_vignette(&mut ui, w as f32, h as f32);
-                    self.draw_player_arm(&mut ui, w as f32, h as f32);
+                    self.draw_crosshair(&mut ui, w, h);
+                    self.draw_hotbar(&mut ui, w, h);
+                    self.draw_held_item_name(&mut ui, w, h);
+                    self.draw_health_bar(&mut ui, w, h);
+                    self.draw_hunger_bar(&mut ui, w, h);
+                    self.draw_xp_bar(&mut ui, w, h);
+                    self.draw_bubble_bar(&mut ui, w, h);
+                    self.draw_damage_vignette(&mut ui, w, h);
+                    self.draw_player_arm(&mut ui, w, h);
                 }
                 if self.gameplay.debug_overlay {
-                    self.draw_debug_overlay(&mut ui, w as f32, h as f32);
+                    self.draw_debug_overlay(&mut ui, w, h);
                 }
                 if self.profiler.enabled {
-                    self.draw_profiler_overlay(&mut ui, w as f32, h as f32);
+                    self.draw_profiler_overlay(&mut ui, w, h);
                 }
                 if self.gameplay.ecs_inspector {
-                    self.draw_ecs_inspector(&mut ui, w as f32, h as f32);
+                    self.draw_ecs_inspector(&mut ui, w, h);
                 }
                 if self.gameplay.block_picker_open {
-                    self.draw_block_picker(&mut ui, w as f32, h as f32);
+                    self.draw_block_picker(&mut ui, w, h);
                 }
-                self.draw_chat(&mut ui, w as f32, h as f32);
+                self.draw_chat(&mut ui, w, h);
                 if self.gameplay.console.open {
-                    self.draw_console(&mut ui, w as f32, h as f32);
+                    self.draw_console(&mut ui, w, h);
                 }
                 if self.telemetry.enabled() {
-                    self.draw_telemetry_dashboard(&mut ui, w as f32, h as f32);
+                    self.draw_telemetry_dashboard(&mut ui, w, h);
                 }
-                self.draw_fullscreen_map(&mut ui, w as f32, h as f32);
-                self.draw_minimap(&mut ui, w as f32, h as f32);
+                self.draw_fullscreen_map(&mut ui, w, h);
+                self.draw_minimap(&mut ui, w, h);
                 if self.gameplay.edit.mode.is_active() {
-                    self.draw_editor_ui(&mut ui, w as f32, h as f32);
+                    self.draw_editor_ui(&mut ui, w, h);
                 }
                 self.gameplay.edit.consume_frame();
             }
             GameState::PauseMenu => {
-                self.draw_pause_menu(&mut ui, w as f32, h as f32);
+                self.draw_pause_menu(&mut ui, w, h);
+            }
+        }
+
+        // Scale the logical-pixel layout up to physical pixels so the UI
+        // pipeline (which divides by the physical swapchain size) renders
+        // it at the correct size on HiDPI displays. Skip the no-op when
+        // the scale is 1.0 (typical Windows desktop).
+        let s = self.render.ui_scale;
+        if (s - 1.0).abs() > f32::EPSILON {
+            for v in &mut ui.vertices {
+                v.pos[0] *= s;
+                v.pos[1] *= s;
             }
         }
 
@@ -1318,9 +1333,7 @@ impl crate::EngineApp {
 
     /// Handle a click in the creative inventory overlay.
     pub(crate) fn handle_block_picker_click(&mut self) {
-        let (w, h) = self.render.window_size;
-        let w = w as f32;
-        let h = h as f32;
+        let (w, h) = self.render.logical_size();
 
         // ── Recompute layout (must match draw_block_picker) ──
         let slot_size = 40.0f32;
@@ -1525,8 +1538,8 @@ impl crate::EngineApp {
 
     /// Click handler for the ECS inspector.
     pub(crate) fn handle_ecs_inspector_click(&mut self) {
-        let (w, h) = self.render.window_size;
-        if let Some(e) = self.entity_at_slot(w as f32, h as f32, self.gameplay.mouse_pos) {
+        let (w, h) = self.render.logical_size();
+        if let Some(e) = self.entity_at_slot(w, h, self.gameplay.mouse_pos) {
             self.gameplay.pinned_entity = Some(e);
             self.gameplay
                 .chat
@@ -1603,9 +1616,7 @@ impl crate::EngineApp {
 
     /// Handle a click on the death screen (Respawn / Title Screen).
     pub(crate) fn handle_death_screen_click(&mut self) {
-        let (w, h) = self.render.window_size;
-        let w = w as f32;
-        let h = h as f32;
+        let (w, h) = self.render.logical_size();
 
         let btn_w = 200.0;
         let btn_h = 40.0;
@@ -2822,8 +2833,7 @@ impl crate::EngineApp {
         };
 
         // Compute the same layout as draw_delete_confirm_dialog.
-        let (w, h) = self.render.window_size;
-        let (w, h) = (w as f32, h as f32);
+        let (w, h) = self.render.logical_size();
         let panel_w = 340.0f32;
         let panel_h = 160.0f32;
         let px = (w - panel_w) * 0.5;

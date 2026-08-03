@@ -921,10 +921,11 @@ impl crate::EngineApp {
                     self.gameplay.edit.brush_center = Some(center);
                     self.gameplay.edit.preview_valid = true;
 
-                    // Check if click is outside UI panels.
+                    // Check if click is outside UI panels. The editor draws
+                    // in logical pixels now, so compare against the logical
+                    // window size to match the panel rects.
                     let (mx, my) = self.gameplay.mouse_pos;
-                    let sw = self.render.window_size.0 as f32;
-                    let sh = self.render.window_size.1 as f32;
+                    let (sw, sh) = self.render.logical_size();
                     let in_menu_bar = my < edit::theme::MENU_BAR_H;
                     let in_status_bar = my > sh - edit::theme::STATUS_BAR_H;
                     let in_cat_bar = mx < edit::theme::CAT_BAR_W;
