@@ -6,7 +6,9 @@
 //!   3. Palette grid (6 columns)
 //!   4. History section (fills remaining space)
 
+use crate::edit::ctx::PanelCtx;
 use crate::edit::{tools_for_category, EditState};
+use crate::ui::Row;
 use voxel_core::BlockId;
 use voxel_render::{FontAtlas, UiDrawData};
 use voxel_world::registry::BlockRegistry;
@@ -18,17 +20,6 @@ pub enum LeftPanelAction {
     None,
     SelectTool(String),
     SelectBlock(BlockId),
-}
-
-/// Shared drawing context for the left panel: font, mouse position and click
-/// state. Bundled so the per-row helpers stay under the `too_many_arguments`
-/// threshold.
-#[derive(Clone, Copy)]
-struct PanelCtx<'a> {
-    font: &'a FontAtlas,
-    mx: f32,
-    my: f32,
-    ui_click: bool,
 }
 
 pub fn draw_left_panel(
@@ -71,7 +62,11 @@ pub fn draw_left_panel(
         ui,
         tools,
         &edit.active_tool_id,
-        (panel_x, y, panel_w),
+        Row {
+            x: panel_x,
+            y,
+            w: panel_w,
+        },
         PanelCtx {
             font,
             mx: mouse.0,
@@ -89,7 +84,11 @@ pub fn draw_left_panel(
     y = draw_palette_section(
         ui,
         edit,
-        (panel_x, y, panel_w),
+        Row {
+            x: panel_x,
+            y,
+            w: panel_w,
+        },
         PanelCtx {
             font,
             mx: mouse.0,
@@ -141,7 +140,7 @@ fn draw_tool_grid(
     ui: &mut UiDrawData,
     tools: &[super::ToolDef],
     active_id: &str,
-    rect: (f32, f32, f32),
+    rect: Row,
     ctx: PanelCtx<'_>,
     action: &mut LeftPanelAction,
 ) -> f32 {
@@ -151,7 +150,7 @@ fn draw_tool_grid(
         my,
         ui_click,
     } = ctx;
-    let (x, y, w) = rect;
+    let Row { x, y, w } = rect;
     let cols = theme::TOOL_GRID_COLS;
     let pad = 4.0;
     let gap = 2.0;
@@ -260,7 +259,7 @@ fn draw_active_block(
 fn draw_palette_section(
     ui: &mut UiDrawData,
     edit: &mut EditState,
-    rect: (f32, f32, f32),
+    rect: Row,
     ctx: PanelCtx<'_>,
     registry: &BlockRegistry,
     action: &mut LeftPanelAction,
@@ -271,7 +270,7 @@ fn draw_palette_section(
         my,
         ui_click: _,
     } = ctx;
-    let (x, mut y, w) = rect;
+    let Row { x, mut y, w } = rect;
     let header_h = theme::SECTION_HEADER_H;
     ui.quad(x, y, w, header_h, theme::HEADER_BG);
     ui.quad(x, y + header_h - 1.0, w, 1.0, theme::BORDER);

@@ -3,10 +3,12 @@
 //! Changes dynamically depending on the selected tool.
 //! Contains: tool options, tool mask, target info, world properties.
 
+use crate::edit::ctx::PanelCtx;
 use crate::edit::filter::FilterOp;
 use crate::edit::paint::{GradientShape, InterpolationMode};
 use crate::edit::terrain::TerrainOp;
 use crate::edit::{BrushShape, EditState, PaintMode};
+use crate::ui::{Row, SliderRange};
 use voxel_render::{FontAtlas, UiDrawData};
 
 use super::theme;
@@ -57,17 +59,6 @@ pub enum RightPanelAction {
     RedoAction,
 }
 
-/// Shared drawing context for the right panel: font, mouse position, click
-/// state and the action sink. Bundled so the per-row helpers stay under the
-/// `too_many_arguments` threshold.
-#[derive(Clone, Copy)]
-struct PanelCtx<'a> {
-    font: &'a FontAtlas,
-    mx: f32,
-    my: f32,
-    ui_click: bool,
-}
-
 pub fn draw_right_panel(
     ui: &mut UiDrawData,
     edit: &mut EditState,
@@ -108,57 +99,102 @@ pub fn draw_right_panel(
     );
 
     // Draw tool-specific options based on active tool.
-    if let crate::edit::EditModeState::Active { tool } = &edit.mode { match tool {
-        crate::edit::EditTool::Brush(brush) => {
-            y = draw_brush_options(
-                ui,
-                &ctx,
-                &mut action,
-                brush.clone(),
-                (panel_x, y, panel_w),
-            );
+    if let crate::edit::EditModeState::Active { tool } = &edit.mode {
+        match tool {
+            crate::edit::EditTool::Brush(brush) => {
+                y = draw_brush_options(
+                    ui,
+                    &ctx,
+                    &mut action,
+                    brush.clone(),
+                    Row {
+                        x: panel_x,
+                        y,
+                        w: panel_w,
+                    },
+                );
+            }
+            crate::edit::EditTool::Select(sel) => {
+                y = draw_select_options(
+                    ui,
+                    &ctx,
+                    sel.clone(),
+                    Row {
+                        x: panel_x,
+                        y,
+                        w: panel_w,
+                    },
+                );
+            }
+            crate::edit::EditTool::Terrain(terrain) => {
+                y = draw_terrain_options(
+                    ui,
+                    &ctx,
+                    &mut action,
+                    terrain.clone(),
+                    Row {
+                        x: panel_x,
+                        y,
+                        w: panel_w,
+                    },
+                );
+            }
+            crate::edit::EditTool::Paint(paint) => {
+                y = draw_paint_options(
+                    ui,
+                    &ctx,
+                    &mut action,
+                    paint.clone(),
+                    Row {
+                        x: panel_x,
+                        y,
+                        w: panel_w,
+                    },
+                );
+            }
+            crate::edit::EditTool::Filter(filters) => {
+                y = draw_filter_options(
+                    ui,
+                    &ctx,
+                    &mut action,
+                    filters.clone(),
+                    Row {
+                        x: panel_x,
+                        y,
+                        w: panel_w,
+                    },
+                );
+            }
         }
-        crate::edit::EditTool::Select(sel) => {
-            y = draw_select_options(ui, &ctx, sel.clone(), (panel_x, y, panel_w));
-        }
-        crate::edit::EditTool::Terrain(terrain) => {
-            y = draw_terrain_options(
-                ui,
-                &ctx,
-                &mut action,
-                terrain.clone(),
-                (panel_x, y, panel_w),
-            );
-        }
-        crate::edit::EditTool::Paint(paint) => {
-            y = draw_paint_options(
-                ui,
-                &ctx,
-                &mut action,
-                paint.clone(),
-                (panel_x, y, panel_w),
-            );
-        }
-        crate::edit::EditTool::Filter(filters) => {
-            y = draw_filter_options(
-                ui,
-                &ctx,
-                &mut action,
-                filters.clone(),
-                (panel_x, y, panel_w),
-            );
-        }
-    } }
+    }
 
     // ── Undo/Redo section (Phase 8) ──
     y = draw_separator(ui, panel_x, y, panel_w);
     y = draw_header(ui, "Undo / Redo", panel_x, y, panel_w, font);
     let undo_label = format!("Undo ({})", edit.history.len().saturating_sub(1));
-    y = draw_button_row(ui, &ctx, &undo_label, (panel_x, y, panel_w));
+    y = draw_button_row(
+        ui,
+        &ctx,
+        &undo_label,
+        Row {
+            x: panel_x,
+            y,
+            w: panel_w,
+        },
+    );
     if edit.ui_click && my >= y - theme::OPTION_ROW_H && my <= y {
         action = RightPanelAction::UndoAction;
     }
-    y = draw_button_row(ui, &ctx, "Redo", (panel_x, y, panel_w));
+    y = draw_button_row(
+        ui,
+        &ctx,
+        "Redo",
+        Row {
+            x: panel_x,
+            y,
+            w: panel_w,
+        },
+    );
     if edit.ui_click && my >= y - theme::OPTION_ROW_H && my <= y {
         action = RightPanelAction::RedoAction;
     }
@@ -194,15 +230,23 @@ pub fn draw_right_panel(
         &mut action,
         "Time",
         6000.0,
-        (0.0, 24000.0),
-        (panel_x, y, panel_w),
+        SliderRange {
+            min: 0.0,
+            max: 24000.0,
+        },
+        Row {
+            x: panel_x,
+            y,
+            w: panel_w,
+        },
     );
     let (ny, grid_clicked) = draw_toggle_row(ui, &ctx, "Show Grid", edit.show_grid, (panel_x, y));
     y = ny;
     if grid_clicked {
         action = RightPanelAction::ToggleShowGrid;
     }
-    let (ny, chunks_clicked) = draw_toggle_row(ui, &ctx, "Show Chunks", edit.show_chunks, (panel_x, y));
+    let (ny, chunks_clicked) =
+        draw_toggle_row(ui, &ctx, "Show Chunks", edit.show_chunks, (panel_x, y));
     y = ny;
     if chunks_clicked {
         action = RightPanelAction::ToggleShowChunks;
@@ -219,7 +263,7 @@ fn draw_brush_options(
     ctx: &PanelCtx<'_>,
     action: &mut RightPanelAction,
     brush: crate::edit::BrushTool,
-    rect: (f32, f32, f32),
+    rect: Row,
 ) -> f32 {
     let PanelCtx {
         font,
@@ -227,17 +271,50 @@ fn draw_brush_options(
         my,
         ui_click,
     } = *ctx;
-    let (x, mut y, w) = rect;
+    let Row { x, mut y, w } = rect;
     let lx = x + 8.0;
 
     // Shape dropdown
-    y = draw_dropdown_row(ui, ctx, action, "Shape", brush.shape.label(), (x, y, w));
+    y = draw_dropdown_row(
+        ui,
+        ctx,
+        action,
+        "Shape",
+        brush.shape.label(),
+        Row { x, y, w },
+    );
     // Radius slider
-    y = draw_slider_row(ui, ctx, action, "Radius", brush.radius, (1.0, 25.0), (x, y, w));
+    y = draw_slider_row(
+        ui,
+        ctx,
+        action,
+        "Radius",
+        brush.radius,
+        SliderRange {
+            min: 1.0,
+            max: 25.0,
+        },
+        Row { x, y, w },
+    );
     // Strength slider
-    y = draw_slider_row(ui, ctx, action, "Strength", brush.strength, (0.0, 1.0), (x, y, w));
+    y = draw_slider_row(
+        ui,
+        ctx,
+        action,
+        "Strength",
+        brush.strength,
+        SliderRange { min: 0.0, max: 1.0 },
+        Row { x, y, w },
+    );
     // Paint mode dropdown
-    y = draw_dropdown_row(ui, ctx, action, "Paint Mode", brush.paint_mode.label(), (x, y, w));
+    y = draw_dropdown_row(
+        ui,
+        ctx,
+        action,
+        "Paint Mode",
+        brush.paint_mode.label(),
+        Row { x, y, w },
+    );
 
     y = draw_separator(ui, x, y, w);
 
@@ -247,7 +324,8 @@ fn draw_brush_options(
     if hollow_clicked {
         *action = RightPanelAction::ToggleHollow;
     }
-    let (ny, surface_clicked) = draw_toggle_row(ui, ctx, "Surface Only", brush.surface_only, (x, y));
+    let (ny, surface_clicked) =
+        draw_toggle_row(ui, ctx, "Surface Only", brush.surface_only, (x, y));
     y = ny;
     if surface_clicked {
         *action = RightPanelAction::ToggleSurfaceOnly;
@@ -270,12 +348,12 @@ fn draw_brush_options(
             None => "Any non-air".to_string(),
         };
         y = draw_label_value(ui, "Target", &target_str, x, y, w, font);
-        y = draw_button_row(ui, ctx, "Pick Target (Shift+RMB)", (x, y, w));
+        y = draw_button_row(ui, ctx, "Pick Target (Shift+RMB)", Row { x, y, w });
         if ui_click && my >= y - theme::OPTION_ROW_H && my <= y {
             *action = RightPanelAction::PickReplaceTarget;
         }
         if brush.target.is_some() {
-            y = draw_button_row(ui, ctx, "Clear Target", (x, y, w));
+            y = draw_button_row(ui, ctx, "Clear Target", Row { x, y, w });
             if ui_click && my >= y - theme::OPTION_ROW_H && my <= y {
                 *action = RightPanelAction::ClearReplaceTarget;
             }
@@ -285,7 +363,8 @@ fn draw_brush_options(
     y = draw_separator(ui, x, y, w);
 
     // Phase 3: Multi-block palette
-    let (ny, multi_clicked) = draw_toggle_row(ui, ctx, "Multi-block", brush.palette.enabled, (x, y));
+    let (ny, multi_clicked) =
+        draw_toggle_row(ui, ctx, "Multi-block", brush.palette.enabled, (x, y));
     y = ny;
     if multi_clicked {
         *action = RightPanelAction::ToggleMultiBlock;
@@ -306,11 +385,11 @@ fn draw_brush_options(
             ui.text(&label, lx, y + 2.0, 0.6, theme::TEXT_SECONDARY, font);
             y += theme::OPTION_ROW_H;
         }
-        y = draw_button_row(ui, ctx, "+ Add Block", (x, y, w));
+        y = draw_button_row(ui, ctx, "+ Add Block", Row { x, y, w });
         if ui_click && my >= y - theme::OPTION_ROW_H && my <= y {
             *action = RightPanelAction::AddPaletteBlock;
         }
-        y = draw_button_row(ui, ctx, "Clear Palette", (x, y, w));
+        y = draw_button_row(ui, ctx, "Clear Palette", Row { x, y, w });
         if ui_click && my >= y - theme::OPTION_ROW_H && my <= y {
             *action = RightPanelAction::ClearPalette;
         }
@@ -323,10 +402,15 @@ fn draw_select_options(
     ui: &mut UiDrawData,
     ctx: &PanelCtx<'_>,
     sel: crate::edit::select::SelectTool,
-    rect: (f32, f32, f32),
+    rect: Row,
 ) -> f32 {
-    let PanelCtx { font, mx, my, ui_click: _ } = *ctx;
-    let (x, mut y, w) = rect;
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click: _,
+    } = *ctx;
+    let Row { x, mut y, w } = rect;
     y = draw_label_value(ui, "Dimensions", &sel.dimensions_str(), x, y, w, font);
     y = draw_label_value(
         ui,
@@ -341,7 +425,7 @@ fn draw_select_options(
     y = draw_separator(ui, x, y, w);
 
     // Action buttons
-    y = draw_button_row(ui, ctx, "Copy (Ctrl+C)", (x, y, w));
+    y = draw_button_row(ui, ctx, "Copy (Ctrl+C)", Row { x, y, w });
     if mx >= x + 8.0 && mx <= x + w - 8.0 && my >= y - theme::OPTION_ROW_H && my <= y {
         ui.quad(
             x + 8.0,
@@ -351,14 +435,14 @@ fn draw_select_options(
             theme::HOVER_BG,
         );
     }
-    y = draw_button_row(ui, ctx, "Cut", (x, y, w));
-    y = draw_button_row(ui, ctx, "Delete", (x, y, w));
-    y = draw_button_row(ui, ctx, "Fill...", (x, y, w));
-    y = draw_button_row(ui, ctx, "Replace...", (x, y, w));
+    y = draw_button_row(ui, ctx, "Cut", Row { x, y, w });
+    y = draw_button_row(ui, ctx, "Delete", Row { x, y, w });
+    y = draw_button_row(ui, ctx, "Fill...", Row { x, y, w });
+    y = draw_button_row(ui, ctx, "Replace...", Row { x, y, w });
 
     y = draw_separator(ui, x, y, w);
 
-    y = draw_button_row(ui, ctx, "Clear Selection", (x, y, w));
+    y = draw_button_row(ui, ctx, "Clear Selection", Row { x, y, w });
 
     y
 }
@@ -368,13 +452,36 @@ fn draw_terrain_options(
     ctx: &PanelCtx<'_>,
     action: &mut RightPanelAction,
     terrain: crate::edit::terrain::TerrainTool,
-    rect: (f32, f32, f32),
+    rect: Row,
 ) -> f32 {
-    let PanelCtx { font, mx, my, ui_click } = *ctx;
-    let (x, mut y, w) = rect;
-    y = draw_dropdown_row(ui, ctx, action, "Shape", terrain.shape.label(), (x, y, w));
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click,
+    } = *ctx;
+    let Row { x, mut y, w } = rect;
+    y = draw_dropdown_row(
+        ui,
+        ctx,
+        action,
+        "Shape",
+        terrain.shape.label(),
+        Row { x, y, w },
+    );
     // Radius slider
-    y = draw_slider_row(ui, ctx, action, "Radius", terrain.radius, (1.0, 25.0), (x, y, w));
+    y = draw_slider_row(
+        ui,
+        ctx,
+        action,
+        "Radius",
+        terrain.radius,
+        SliderRange {
+            min: 1.0,
+            max: 25.0,
+        },
+        Row { x, y, w },
+    );
 
     y = draw_separator(ui, x, y, w);
 
@@ -435,8 +542,7 @@ fn draw_terrain_options(
             },
             font,
         );
-        if mx >= bx && mx <= bx + btn_w && my >= y && my <= y + theme::OPTION_ROW_H && ui_click
-        {
+        if mx >= bx && mx <= bx + btn_w && my >= y && my <= y + theme::OPTION_ROW_H && ui_click {
             *action = RightPanelAction::SetTerrainOp(op.clone());
         }
     }
@@ -445,7 +551,18 @@ fn draw_terrain_options(
     // Operation-specific params.
     match &terrain.op {
         TerrainOp::Raise { amount } | TerrainOp::Lower { amount } => {
-            y = draw_slider_row(ui, ctx, action, "Amount", *amount, (1.0, 20.0), (x, y, w));
+            y = draw_slider_row(
+                ui,
+                ctx,
+                action,
+                "Amount",
+                *amount,
+                SliderRange {
+                    min: 1.0,
+                    max: 20.0,
+                },
+                Row { x, y, w },
+            );
             if ui_click && mx >= x + 58.0 && mx <= x + w - 58.0 {
                 let slider_w = w - 116.0;
                 let click_pct = ((mx - (x + 58.0)) / slider_w).clamp(0.0, 1.0);
@@ -468,8 +585,30 @@ fn draw_terrain_options(
             amplitude,
             seed,
         } => {
-            y = draw_slider_row(ui, ctx, action, "Scale", *scale, (1.0, 100.0), (x, y, w));
-            y = draw_slider_row(ui, ctx, action, "Amplitude", *amplitude, (0.1, 20.0), (x, y, w));
+            y = draw_slider_row(
+                ui,
+                ctx,
+                action,
+                "Scale",
+                *scale,
+                SliderRange {
+                    min: 1.0,
+                    max: 100.0,
+                },
+                Row { x, y, w },
+            );
+            y = draw_slider_row(
+                ui,
+                ctx,
+                action,
+                "Amplitude",
+                *amplitude,
+                SliderRange {
+                    min: 0.1,
+                    max: 20.0,
+                },
+                Row { x, y, w },
+            );
             y = draw_label_value(ui, "Seed", &format!("{}", seed), x, y, w, font);
         }
     }
@@ -482,20 +621,59 @@ fn draw_paint_options(
     ctx: &PanelCtx<'_>,
     action: &mut RightPanelAction,
     paint: crate::edit::paint::PaintTool,
-    rect: (f32, f32, f32),
+    rect: Row,
 ) -> f32 {
-    let PanelCtx { font, mx, my, ui_click } = *ctx;
-    let (x, mut y, w) = rect;
-    y = draw_dropdown_row(ui, ctx, action, "Shape", paint.shape.label(), (x, y, w));
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click,
+    } = *ctx;
+    let Row { x, mut y, w } = rect;
+    y = draw_dropdown_row(
+        ui,
+        ctx,
+        action,
+        "Shape",
+        paint.shape.label(),
+        Row { x, y, w },
+    );
     // Radius
-    y = draw_slider_row(ui, ctx, action, "Radius", paint.radius, (1.0, 25.0), (x, y, w));
+    y = draw_slider_row(
+        ui,
+        ctx,
+        action,
+        "Radius",
+        paint.radius,
+        SliderRange {
+            min: 1.0,
+            max: 25.0,
+        },
+        Row { x, y, w },
+    );
 
     y = draw_separator(ui, x, y, w);
 
     // Blocks
-    y = draw_label_value(ui, "Block A", &format!("{}", paint.block_a.0), x, y, w, font);
-    y = draw_label_value(ui, "Block B", &format!("{}", paint.block_b.0), x, y, w, font);
-    y = draw_button_row(ui, ctx, "Swap Blocks", (x, y, w));
+    y = draw_label_value(
+        ui,
+        "Block A",
+        &format!("{}", paint.block_a.0),
+        x,
+        y,
+        w,
+        font,
+    );
+    y = draw_label_value(
+        ui,
+        "Block B",
+        &format!("{}", paint.block_b.0),
+        x,
+        y,
+        w,
+        font,
+    );
+    y = draw_button_row(ui, ctx, "Swap Blocks", Row { x, y, w });
     if ui_click && my >= y - theme::OPTION_ROW_H && my <= y {
         *action = RightPanelAction::SwapGradientBlocks;
     }
@@ -542,8 +720,7 @@ fn draw_paint_options(
             },
             font,
         );
-        if mx >= bx && mx <= bx + btn_w && my >= y && my <= y + theme::OPTION_ROW_H && ui_click
-        {
+        if mx >= bx && mx <= bx + btn_w && my >= y && my <= y + theme::OPTION_ROW_H && ui_click {
             *action = RightPanelAction::SetGradientShape(*gs);
         }
     }
@@ -589,8 +766,7 @@ fn draw_paint_options(
             },
             font,
         );
-        if mx >= bx && mx <= bx + btn_w && my >= y && my <= y + theme::OPTION_ROW_H && ui_click
-        {
+        if mx >= bx && mx <= bx + btn_w && my >= y && my <= y + theme::OPTION_ROW_H && ui_click {
             *action = RightPanelAction::SetInterpolation(*im);
         }
     }
@@ -604,10 +780,15 @@ fn draw_filter_options(
     ctx: &PanelCtx<'_>,
     action: &mut RightPanelAction,
     filters: crate::edit::filter::FilterStack,
-    rect: (f32, f32, f32),
+    rect: Row,
 ) -> f32 {
-    let PanelCtx { font, mx, my, ui_click: _ } = *ctx;
-    let (x, mut y, w) = rect;
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click: _,
+    } = *ctx;
+    let Row { x, mut y, w } = rect;
     for (i, op) in filters.filters.iter().enumerate() {
         let label = format!("{}. {}", i + 1, op.label());
         ui.text(&label, x + 8.0, y + 2.0, 0.65, theme::TEXT_PRIMARY, font);
@@ -623,16 +804,16 @@ fn draw_filter_options(
     y = draw_separator(ui, x, y, w);
 
     // Add filter buttons.
-    y = draw_button_row(ui, ctx, "+ Noise Filter", (x, y, w));
+    y = draw_button_row(ui, ctx, "+ Noise Filter", Row { x, y, w });
     // TODO: wire click handler for "+ Noise Filter" button.
-    y = draw_button_row(ui, ctx, "+ Erode Filter", (x, y, w));
-    y = draw_button_row(ui, ctx, "+ Dilate Filter", (x, y, w));
-    y = draw_button_row(ui, ctx, "+ Smooth Filter", (x, y, w));
+    y = draw_button_row(ui, ctx, "+ Erode Filter", Row { x, y, w });
+    y = draw_button_row(ui, ctx, "+ Dilate Filter", Row { x, y, w });
+    y = draw_button_row(ui, ctx, "+ Smooth Filter", Row { x, y, w });
 
     y = draw_separator(ui, x, y, w);
 
-    y = draw_button_row(ui, ctx, "Apply Filters", (x, y, w));
-    y = draw_button_row(ui, ctx, "Clear All", (x, y, w));
+    y = draw_button_row(ui, ctx, "Apply Filters", Row { x, y, w });
+    y = draw_button_row(ui, ctx, "Clear All", Row { x, y, w });
 
     y
 }
@@ -679,12 +860,17 @@ fn draw_slider_row(
     action: &mut RightPanelAction,
     label: &str,
     value: f32,
-    range: (f32, f32),
-    rect: (f32, f32, f32),
+    range: SliderRange,
+    rect: Row,
 ) -> f32 {
-    let PanelCtx { font, mx, my, ui_click } = *ctx;
-    let (min, max) = range;
-    let (x, y, w) = rect;
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click,
+    } = *ctx;
+    let SliderRange { min, max } = range;
+    let Row { x, y, w } = rect;
     let lx = x + 8.0;
     let rw = w - 16.0;
 
@@ -763,7 +949,12 @@ fn draw_toggle_row(
     on: bool,
     pos: (f32, f32),
 ) -> (f32, bool) {
-    let PanelCtx { font, mx, my, ui_click } = *ctx;
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click,
+    } = *ctx;
     let (x, y) = pos;
     let lx = x + 8.0;
     let box_size = 11.0;
@@ -811,10 +1002,15 @@ fn draw_dropdown_row(
     action: &mut RightPanelAction,
     label: &str,
     value: &str,
-    rect: (f32, f32, f32),
+    rect: Row,
 ) -> f32 {
-    let PanelCtx { font, mx, my, ui_click } = *ctx;
-    let (x, y, w) = rect;
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click,
+    } = *ctx;
+    let Row { x, y, w } = rect;
     let lx = x + 8.0;
     let rw = w - 16.0;
 
@@ -879,14 +1075,14 @@ fn draw_dropdown_row(
     y + theme::OPTION_ROW_H
 }
 
-fn draw_button_row(
-    ui: &mut UiDrawData,
-    ctx: &PanelCtx<'_>,
-    label: &str,
-    rect: (f32, f32, f32),
-) -> f32 {
-    let PanelCtx { font, mx, my, ui_click: _ } = *ctx;
-    let (x, y, w) = rect;
+fn draw_button_row(ui: &mut UiDrawData, ctx: &PanelCtx<'_>, label: &str, rect: Row) -> f32 {
+    let PanelCtx {
+        font,
+        mx,
+        my,
+        ui_click: _,
+    } = *ctx;
+    let Row { x, y, w } = rect;
     let bx = x + 8.0;
     let bw = w - 16.0;
     let bh = theme::OPTION_ROW_H - 4.0;

@@ -5,6 +5,7 @@
 //! left tool panel, viewport, right options panel, and status bar.
 
 pub mod brush;
+pub mod ctx;
 pub mod filter;
 pub mod left_panel;
 pub mod menu_bar;
@@ -245,12 +246,13 @@ pub fn tools_for_category(cat: ToolCategory) -> &'static [ToolDef] {
 
 // ── Top-level editor state ───────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum EditModeState {
     #[default]
     Inactive,
-    Active { tool: EditTool },
+    Active {
+        tool: EditTool,
+    },
 }
 
 impl EditModeState {
@@ -258,7 +260,6 @@ impl EditModeState {
         matches!(self, EditModeState::Active { .. })
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditTool {
@@ -336,13 +337,11 @@ pub struct WeightedBlock {
     pub weight: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct BrushPalette {
     pub entries: Vec<WeightedBlock>,
     pub enabled: bool,
 }
-
 
 impl BrushPalette {
     /// Pick a block from the weighted palette using a deterministic hash.

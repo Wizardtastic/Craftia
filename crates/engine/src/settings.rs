@@ -765,8 +765,7 @@ impl GameSettings {
 
     /// Save settings to a TOML file on disk.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let content = toml::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

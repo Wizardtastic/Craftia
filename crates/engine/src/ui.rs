@@ -12,27 +12,29 @@ use crate::GameState;
 
 /// Screen-space rectangle (x, y, width, height).
 #[derive(Clone, Copy, Debug)]
-struct Rect {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+pub(crate) struct Rect {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) w: f32,
+    pub(crate) h: f32,
 }
 
-/// Inclusive min/max range for a settings slider.
+/// Inclusive min/max range for a slider. Shared by the settings sliders and
+/// the edit-panel slider rows.
 #[derive(Clone, Copy, Debug)]
-struct SliderRange {
-    min: f32,
-    max: f32,
+pub(crate) struct SliderRange {
+    pub(crate) min: f32,
+    pub(crate) max: f32,
 }
 
-/// Slider row position: x/y origin plus available width. The row height is
-/// implied by the slider bar's fixed dimensions.
+/// Row position: x/y origin plus available width. The row height is implied
+/// by the row's fixed dimensions. Shared by the settings sliders and the
+/// edit-panel row helpers.
 #[derive(Clone, Copy, Debug)]
-struct SliderRect {
-    x: f32,
-    y: f32,
-    w: f32,
+pub(crate) struct Row {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) w: f32,
 }
 
 /// Sanitize a string for use as a directory/file name.
@@ -1319,14 +1321,35 @@ impl crate::EngineApp {
         );
 
         self.gameplay.pause_buttons = Some([
-            (btn_x, btn_y0, btn_w, btn_h),
-            (btn_x, btn_y0 + spacing, btn_w, btn_h),
-            (btn_x, btn_y0 + spacing * 2.0, btn_w, btn_h),
-            (btn_x, btn_y0 + spacing * 3.0, btn_w, btn_h),
+            Rect {
+                x: btn_x,
+                y: btn_y0,
+                w: btn_w,
+                h: btn_h,
+            },
+            Rect {
+                x: btn_x,
+                y: btn_y0 + spacing,
+                w: btn_w,
+                h: btn_h,
+            },
+            Rect {
+                x: btn_x,
+                y: btn_y0 + spacing * 2.0,
+                w: btn_w,
+                h: btn_h,
+            },
+            Rect {
+                x: btn_x,
+                y: btn_y0 + spacing * 3.0,
+                w: btn_w,
+                h: btn_h,
+            },
         ]);
     }
 
-    fn point_in_rect(&self, pos: (f32, f32), x: f32, y: f32, w: f32, h: f32) -> bool {
+    fn point_in_rect(&self, pos: (f32, f32), rect: Rect) -> bool {
+        let Rect { x, y, w, h } = rect;
         pos.0 >= x && pos.0 <= x + w && pos.1 >= y && pos.1 <= y + h
     }
 
@@ -1340,7 +1363,7 @@ impl crate::EngineApp {
         border: [u8; 4],
     ) {
         let Rect { x, y, w, h } = rect;
-        let hovered = self.point_in_rect(self.gameplay.mouse_pos, x, y, w, h);
+        let hovered = self.point_in_rect(self.gameplay.mouse_pos, rect);
         let fill = if hovered { fill_hover } else { fill_normal };
         ui.quad(x, y, w, h, fill);
         ui.rect_border(x, y, w, h, 2.0, border);
@@ -1584,33 +1607,15 @@ impl crate::EngineApp {
                 group: voxel_audio::AudioGroup::Sfx,
             });
             // Back to Game
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                buttons[0].0,
-                buttons[0].1,
-                buttons[0].2,
-                buttons[0].3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, buttons[0]) {
                 self.enter_playing();
             }
             // Options
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                buttons[1].0,
-                buttons[1].1,
-                buttons[1].2,
-                buttons[1].3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, buttons[1]) {
                 self.enter_settings(GameState::PauseMenu);
             }
             // Save & Quit to Title
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                buttons[2].0,
-                buttons[2].1,
-                buttons[2].2,
-                buttons[2].3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, buttons[2]) {
                 // Save the world and update metadata.
                 if let Some(ref save_path) = self.gameplay.current_world_path {
                     let _ = self.save_entities(save_path);
@@ -1626,13 +1631,7 @@ impl crate::EngineApp {
                 self.enter_title_screen();
             }
             // Quit Game
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                buttons[3].0,
-                buttons[3].1,
-                buttons[3].2,
-                buttons[3].3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, buttons[3]) {
                 log::info!("exit game requested");
                 self.gameplay.want_exit = true;
             }
@@ -1647,27 +1646,25 @@ impl crate::EngineApp {
         let btn_h = 40.0;
         let btn_x = (w - btn_w) * 0.5;
         let btn_y = h * 0.5;
-        let respawn_btn = (btn_x, btn_y, btn_w, btn_h);
-        let title_btn = (btn_x, btn_y + 60.0, btn_w, btn_h);
+        let respawn_btn = Rect {
+            x: btn_x,
+            y: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        let title_btn = Rect {
+            x: btn_x,
+            y: btn_y + 60.0,
+            w: btn_w,
+            h: btn_h,
+        };
 
         // Respawn
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            respawn_btn.0,
-            respawn_btn.1,
-            respawn_btn.2,
-            respawn_btn.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, respawn_btn) {
             self.respawn_player();
         }
         // Title Screen
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            title_btn.0,
-            title_btn.1,
-            title_btn.2,
-            title_btn.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, title_btn) {
             // Save and return to title.
             if let Some(ref save_path) = self.gameplay.current_world_path {
                 let _ = self.save_entities(save_path);
@@ -1757,7 +1754,12 @@ impl crate::EngineApp {
             ([90, 30, 30, 220], [140, 50, 50, 255], [220, 100, 100, 255]),
         ];
 
-        let mut buttons = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); 4];
+        let mut buttons = [Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        }; 4];
         for (i, label) in btn_labels.iter().enumerate() {
             let by = btn_start_y + i as f32 * spacing;
             let (fill, hover, border) = btn_colors[i];
@@ -1774,24 +1776,23 @@ impl crate::EngineApp {
                 hover,
                 border,
             );
-            buttons[i] = (btn_x, by, panel_w, btn_h);
+            buttons[i] = Rect {
+                x: btn_x,
+                y: by,
+                w: panel_w,
+                h: btn_h,
+            };
         }
 
         // "Multiplayer" is grayed out — draw "Coming Soon" on hover.
         let mp_btn = buttons[1];
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            mp_btn.0,
-            mp_btn.1,
-            mp_btn.2,
-            mp_btn.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, mp_btn) {
             let cs = "Coming Soon";
             let csw = self.render.font.text_width(cs, 0.8);
             ui.text(
                 cs,
-                mp_btn.0 + (mp_btn.2 - csw) * 0.5,
-                mp_btn.1 + mp_btn.3 + 4.0,
+                mp_btn.x + (mp_btn.w - csw) * 0.5,
+                mp_btn.y + mp_btn.h + 4.0,
                 0.8,
                 [150, 150, 150, 200],
                 &self.render.font,
@@ -1824,45 +1825,21 @@ impl crate::EngineApp {
                 group: voxel_audio::AudioGroup::Sfx,
             });
             // Singleplayer — show world selection screen.
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                buttons[0].0,
-                buttons[0].1,
-                buttons[0].2,
-                buttons[0].3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, buttons[0]) {
                 self.enter_world_select();
             }
             // Multiplayer (not implemented)
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                buttons[1].0,
-                buttons[1].1,
-                buttons[1].2,
-                buttons[1].3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, buttons[1]) {
                 self.gameplay
                     .chat
                     .push_message("Multiplayer not yet implemented".into());
             }
             // Options
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                buttons[2].0,
-                buttons[2].1,
-                buttons[2].2,
-                buttons[2].3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, buttons[2]) {
                 self.enter_settings(GameState::TitleScreen);
             }
             // Quit
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                buttons[3].0,
-                buttons[3].1,
-                buttons[3].2,
-                buttons[3].3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, buttons[3]) {
                 self.gameplay.want_exit = true;
             }
         }
@@ -1895,8 +1872,15 @@ impl crate::EngineApp {
         // Close button
         let close_x = px + panel_w - 30.0;
         let close_y = py + 8.0;
-        let close_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, close_x, close_y, 22.0, 22.0);
+        let close_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: close_x,
+                y: close_y,
+                w: 22.0,
+                h: 22.0,
+            },
+        );
         ui.quad(
             close_x,
             close_y,
@@ -1924,9 +1908,24 @@ impl crate::EngineApp {
         let mut buttons = crate::WorldSelectButtons {
             rows: Vec::new(),
             delete_buttons: Vec::new(),
-            create_btn: (0.0, 0.0, 0.0, 0.0),
-            play_btn: (0.0, 0.0, 0.0, 0.0),
-            close_btn: (close_x, close_y, 22.0, 22.0),
+            create_btn: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+            play_btn: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+            close_btn: Rect {
+                x: close_x,
+                y: close_y,
+                w: 22.0,
+                h: 22.0,
+            },
         };
 
         let mut ry = list_y;
@@ -1937,10 +1936,12 @@ impl crate::EngineApp {
             let selected = self.gameplay.selected_world_index == Some(i);
             let row_hovered = self.point_in_rect(
                 self.gameplay.mouse_pos,
-                px + 8.0,
-                ry,
-                panel_w - 16.0,
-                row_h - 4.0,
+                Rect {
+                    x: px + 8.0,
+                    y: ry,
+                    w: panel_w - 16.0,
+                    h: row_h - 4.0,
+                },
             );
 
             let bg = if selected {
@@ -1996,8 +1997,15 @@ impl crate::EngineApp {
 
             // Delete button
             let del_x = px + panel_w - 60.0;
-            let del_hovered =
-                self.point_in_rect(self.gameplay.mouse_pos, del_x, ry + 10.0, 40.0, 20.0);
+            let del_hovered = self.point_in_rect(
+                self.gameplay.mouse_pos,
+                Rect {
+                    x: del_x,
+                    y: ry + 10.0,
+                    w: 40.0,
+                    h: 20.0,
+                },
+            );
             ui.quad(
                 del_x,
                 ry + 10.0,
@@ -2018,10 +2026,18 @@ impl crate::EngineApp {
                 &self.render.font,
             );
 
-            buttons
-                .rows
-                .push((px + 8.0, ry, panel_w - 16.0, row_h - 4.0));
-            buttons.delete_buttons.push((del_x, ry + 10.0, 40.0, 20.0));
+            buttons.rows.push(Rect {
+                x: px + 8.0,
+                y: ry,
+                w: panel_w - 16.0,
+                h: row_h - 4.0,
+            });
+            buttons.delete_buttons.push(Rect {
+                x: del_x,
+                y: ry + 10.0,
+                w: 40.0,
+                h: 20.0,
+            });
 
             ry += row_h;
         }
@@ -2030,8 +2046,15 @@ impl crate::EngineApp {
         let create_y = list_y + list_h + 4.0;
         let create_w = 160.0;
         let create_x = px + 8.0;
-        let create_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, create_x, create_y, create_w, 28.0);
+        let create_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: create_x,
+                y: create_y,
+                w: create_w,
+                h: 28.0,
+            },
+        );
         ui.quad(
             create_x,
             create_y,
@@ -2052,14 +2075,26 @@ impl crate::EngineApp {
             [180, 220, 180, 255],
             &self.render.font,
         );
-        buttons.create_btn = (create_x, create_y, create_w, 28.0);
+        buttons.create_btn = Rect {
+            x: create_x,
+            y: create_y,
+            w: create_w,
+            h: 28.0,
+        };
 
         // Play Selected World button
         let play_w = 180.0;
         let play_x = px + panel_w - play_w - 8.0;
         let play_enabled = self.gameplay.selected_world_index.is_some();
-        let play_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, play_x, create_y, play_w, 28.0);
+        let play_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: play_x,
+                y: create_y,
+                w: play_w,
+                h: 28.0,
+            },
+        );
         let play_bg = if !play_enabled {
             [40, 40, 40, 150]
         } else if play_hovered {
@@ -2092,7 +2127,12 @@ impl crate::EngineApp {
             },
             &self.render.font,
         );
-        buttons.play_btn = (play_x, create_y, play_w, 28.0);
+        buttons.play_btn = Rect {
+            x: play_x,
+            y: create_y,
+            w: play_w,
+            h: 28.0,
+        };
 
         self.gameplay.world_select_buttons = Some(buttons);
     }
@@ -2114,20 +2154,14 @@ impl crate::EngineApp {
         };
 
         // Close button
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            buttons.close_btn.0,
-            buttons.close_btn.1,
-            buttons.close_btn.2,
-            buttons.close_btn.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, buttons.close_btn) {
             self.enter_title_screen();
             return;
         }
 
         // Delete buttons — check BEFORE row selection (delete sits inside the row rect).
-        for (i, &(dx, dy, dw, dh)) in buttons.delete_buttons.iter().enumerate() {
-            if self.point_in_rect(self.gameplay.mouse_pos, dx, dy, dw, dh) {
+        for (i, &rect) in buttons.delete_buttons.iter().enumerate() {
+            if self.point_in_rect(self.gameplay.mouse_pos, rect) {
                 if i < self.gameplay.world_list.len() {
                     self.gameplay.pending_delete = Some(i);
                 }
@@ -2136,8 +2170,8 @@ impl crate::EngineApp {
         }
 
         // World row selection (with double-click detection)
-        for (i, &(rx, ry, rw, rh)) in buttons.rows.iter().enumerate() {
-            if self.point_in_rect(self.gameplay.mouse_pos, rx, ry, rw, rh) {
+        for (i, &rect) in buttons.rows.iter().enumerate() {
+            if self.point_in_rect(self.gameplay.mouse_pos, rect) {
                 self.gameplay.selected_world_index = Some(i);
 
                 // Double-click detection: if same row clicked within 400ms, play it.
@@ -2160,25 +2194,13 @@ impl crate::EngineApp {
         }
 
         // Create New World
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            buttons.create_btn.0,
-            buttons.create_btn.1,
-            buttons.create_btn.2,
-            buttons.create_btn.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, buttons.create_btn) {
             self.gameplay.create_world_state = Some(crate::CreateWorldState::default());
             return;
         }
 
         // Play Selected World
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            buttons.play_btn.0,
-            buttons.play_btn.1,
-            buttons.play_btn.2,
-            buttons.play_btn.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, buttons.play_btn) {
             if let Some(idx) = self.gameplay.selected_world_index {
                 if idx < self.gameplay.world_list.len() {
                     let save_path = self.gameplay.world_list[idx].path.clone();
@@ -2327,8 +2349,15 @@ impl crate::EngineApp {
         );
         let close_x = px + panel_w - 28.0;
         let close_y = py + 8.0;
-        let close_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, close_x, close_y, 20.0, 20.0);
+        let close_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: close_x,
+                y: close_y,
+                w: 20.0,
+                h: 20.0,
+            },
+        );
         ui.quad(
             close_x,
             close_y,
@@ -2547,8 +2576,15 @@ impl crate::EngineApp {
         let cancel_x = px + panel_w - cancel_w - create_w - 20.0;
         let create_x = px + panel_w - create_w - 8.0;
 
-        let cancel_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, cancel_x, btn_y, cancel_w, btn_h);
+        let cancel_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: cancel_x,
+                y: btn_y,
+                w: cancel_w,
+                h: btn_h,
+            },
+        );
         ui.quad(
             cancel_x,
             btn_y,
@@ -2571,8 +2607,15 @@ impl crate::EngineApp {
         );
 
         let name_empty = state.name.trim().is_empty();
-        let create_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, create_x, btn_y, create_w, btn_h);
+        let create_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: create_x,
+                y: btn_y,
+                w: create_w,
+                h: btn_h,
+            },
+        );
         let create_bg = if name_empty {
             [40, 40, 40, 150]
         } else if create_hovered {
@@ -2609,13 +2652,48 @@ impl crate::EngineApp {
         // Store rects for click handling.
         if let Some(ref mut state) = self.gameplay.create_world_state {
             state.rects = Some(crate::CreateWorldRects {
-                name_input: (lx, name_y, input_w, input_h),
-                seed_input: (lx, seed_y, input_w, input_h),
-                cancel_btn: (cancel_x, btn_y, cancel_w, btn_h),
-                create_btn: (create_x, btn_y, create_w, btn_h),
-                mode_survival: (surv_x, radio_y, 80.0, 16.0),
-                mode_creative: (crea_x, radio_y, 80.0, 16.0),
-                cheats_toggle: (cheats_x, cheats_y, 120.0, 16.0),
+                name_input: Rect {
+                    x: lx,
+                    y: name_y,
+                    w: input_w,
+                    h: input_h,
+                },
+                seed_input: Rect {
+                    x: lx,
+                    y: seed_y,
+                    w: input_w,
+                    h: input_h,
+                },
+                cancel_btn: Rect {
+                    x: cancel_x,
+                    y: btn_y,
+                    w: cancel_w,
+                    h: btn_h,
+                },
+                create_btn: Rect {
+                    x: create_x,
+                    y: btn_y,
+                    w: create_w,
+                    h: btn_h,
+                },
+                mode_survival: Rect {
+                    x: surv_x,
+                    y: radio_y,
+                    w: 80.0,
+                    h: 16.0,
+                },
+                mode_creative: Rect {
+                    x: crea_x,
+                    y: radio_y,
+                    w: 80.0,
+                    h: 16.0,
+                },
+                cheats_toggle: Rect {
+                    x: cheats_x,
+                    y: cheats_y,
+                    w: 120.0,
+                    h: 16.0,
+                },
             });
         }
     }
@@ -2631,13 +2709,7 @@ impl crate::EngineApp {
         };
 
         // Name input field click.
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            rects.name_input.0,
-            rects.name_input.1,
-            rects.name_input.2,
-            rects.name_input.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, rects.name_input) {
             if let Some(ref mut state) = self.gameplay.create_world_state {
                 state.active_field = 0;
             }
@@ -2645,13 +2717,7 @@ impl crate::EngineApp {
         }
 
         // Seed input field click.
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            rects.seed_input.0,
-            rects.seed_input.1,
-            rects.seed_input.2,
-            rects.seed_input.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, rects.seed_input) {
             if let Some(ref mut state) = self.gameplay.create_world_state {
                 state.active_field = 1;
             }
@@ -2659,13 +2725,7 @@ impl crate::EngineApp {
         }
 
         // Survival radio.
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            rects.mode_survival.0,
-            rects.mode_survival.1,
-            rects.mode_survival.2,
-            rects.mode_survival.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, rects.mode_survival) {
             if let Some(ref mut state) = self.gameplay.create_world_state {
                 state.game_mode = "survival".into();
             }
@@ -2673,13 +2733,7 @@ impl crate::EngineApp {
         }
 
         // Creative radio.
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            rects.mode_creative.0,
-            rects.mode_creative.1,
-            rects.mode_creative.2,
-            rects.mode_creative.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, rects.mode_creative) {
             if let Some(ref mut state) = self.gameplay.create_world_state {
                 state.game_mode = "creative".into();
             }
@@ -2687,13 +2741,7 @@ impl crate::EngineApp {
         }
 
         // Allow Cheats toggle.
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            rects.cheats_toggle.0,
-            rects.cheats_toggle.1,
-            rects.cheats_toggle.2,
-            rects.cheats_toggle.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, rects.cheats_toggle) {
             if let Some(ref mut state) = self.gameplay.create_world_state {
                 state.allow_cheats = !state.allow_cheats;
             }
@@ -2701,25 +2749,13 @@ impl crate::EngineApp {
         }
 
         // Cancel button.
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            rects.cancel_btn.0,
-            rects.cancel_btn.1,
-            rects.cancel_btn.2,
-            rects.cancel_btn.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, rects.cancel_btn) {
             self.gameplay.create_world_state = None;
             return;
         }
 
         // Create World button.
-        if self.point_in_rect(
-            self.gameplay.mouse_pos,
-            rects.create_btn.0,
-            rects.create_btn.1,
-            rects.create_btn.2,
-            rects.create_btn.3,
-        ) {
+        if self.point_in_rect(self.gameplay.mouse_pos, rects.create_btn) {
             let (name, seed, mode, cheats) =
                 if let Some(ref state) = self.gameplay.create_world_state {
                     let name = state.name.trim().to_string();
@@ -2812,8 +2848,15 @@ impl crate::EngineApp {
         let cancel_x = px + panel_w - cancel_w - delete_w - 16.0;
         let delete_x = px + panel_w - delete_w - 8.0;
 
-        let cancel_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, cancel_x, btn_y, cancel_w, btn_h);
+        let cancel_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: cancel_x,
+                y: btn_y,
+                w: cancel_w,
+                h: btn_h,
+            },
+        );
         ui.quad(
             cancel_x,
             btn_y,
@@ -2835,8 +2878,15 @@ impl crate::EngineApp {
             &self.render.font,
         );
 
-        let delete_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, delete_x, btn_y, delete_w, btn_h);
+        let delete_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: delete_x,
+                y: btn_y,
+                w: delete_w,
+                h: btn_h,
+            },
+        );
         ui.quad(
             delete_x,
             btn_y,
@@ -2881,13 +2931,29 @@ impl crate::EngineApp {
         let delete_x = px + panel_w - delete_w - 8.0;
 
         // Cancel.
-        if self.point_in_rect(self.gameplay.mouse_pos, cancel_x, btn_y, cancel_w, btn_h) {
+        if self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: cancel_x,
+                y: btn_y,
+                w: cancel_w,
+                h: btn_h,
+            },
+        ) {
             self.gameplay.pending_delete = None;
             return;
         }
 
         // Delete World.
-        if self.point_in_rect(self.gameplay.mouse_pos, delete_x, btn_y, delete_w, btn_h) {
+        if self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: delete_x,
+                y: btn_y,
+                w: delete_w,
+                h: btn_h,
+            },
+        ) {
             if idx < self.gameplay.world_list.len() {
                 let path = self.gameplay.world_list[idx].path.clone();
                 if path.exists() {
@@ -2926,7 +2992,15 @@ impl crate::EngineApp {
 
         let back_x = px + panel_w - 70.0;
         let back_y = py + 8.0;
-        let back_hovered = self.point_in_rect(self.gameplay.mouse_pos, back_x, back_y, 60.0, 24.0);
+        let back_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: back_x,
+                y: back_y,
+                w: 60.0,
+                h: 24.0,
+            },
+        );
         ui.quad(
             back_x,
             back_y,
@@ -2953,8 +3027,8 @@ impl crate::EngineApp {
         let lx = px + 16.0;
 
         // Track interactive widget rects for click handling.
-        let mut sliders: Vec<(f32, f32, f32, f32, String, f32, f32)> = Vec::new();
-        let mut toggles: Vec<(f32, f32, f32, f32, String)> = Vec::new();
+        let mut sliders: Vec<crate::SliderWidget> = Vec::new();
+        let mut toggles: Vec<crate::ToggleWidget> = Vec::new();
 
         // GRAPHICS section
         sy = self.draw_section_header(ui, "GRAPHICS", lx, sy, panel_w - 32.0);
@@ -2967,7 +3041,7 @@ impl crate::EngineApp {
                 min: 2.0,
                 max: 16.0,
             },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -2995,7 +3069,7 @@ impl crate::EngineApp {
                 min: 100.0,
                 max: 800.0,
             },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3010,7 +3084,7 @@ impl crate::EngineApp {
             "Exposure",
             self.config.exposure,
             SliderRange { min: 0.1, max: 3.0 },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3055,7 +3129,7 @@ impl crate::EngineApp {
             "SSAO Radius",
             self.config.ssao_radius,
             SliderRange { min: 0.5, max: 5.0 },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3073,7 +3147,7 @@ impl crate::EngineApp {
                 min: 0.001,
                 max: 0.1,
             },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3088,7 +3162,7 @@ impl crate::EngineApp {
             "SSAO Strength",
             self.config.ssao_strength,
             SliderRange { min: 0.0, max: 3.0 },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3111,7 +3185,7 @@ impl crate::EngineApp {
             "MSAA Samples",
             msaa_val,
             SliderRange { min: 0.0, max: 3.0 },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3134,7 +3208,7 @@ impl crate::EngineApp {
                 min: 0.5,
                 max: 10.0,
             },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3152,7 +3226,7 @@ impl crate::EngineApp {
                 min: 1.0,
                 max: 10.0,
             },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3170,7 +3244,7 @@ impl crate::EngineApp {
                 min: 5.0,
                 max: 50.0,
             },
-            SliderRect {
+            Row {
                 x: lx,
                 y: sy,
                 w: panel_w - 32.0,
@@ -3200,10 +3274,24 @@ impl crate::EngineApp {
         let btn_w = 100.0;
         let apply_x = px + panel_w - btn_w * 2.0 - 20.0;
         let defaults_x = px + panel_w - btn_w - 8.0;
-        let apply_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, apply_x, btn_y, btn_w, 28.0);
-        let defaults_hovered =
-            self.point_in_rect(self.gameplay.mouse_pos, defaults_x, btn_y, btn_w, 28.0);
+        let apply_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: apply_x,
+                y: btn_y,
+                w: btn_w,
+                h: 28.0,
+            },
+        );
+        let defaults_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: defaults_x,
+                y: btn_y,
+                w: btn_w,
+                h: 28.0,
+            },
+        );
         ui.quad(
             apply_x,
             btn_y,
@@ -3246,19 +3334,34 @@ impl crate::EngineApp {
         );
 
         // Store rects for click handling.
-        self.gameplay.settings_back_btn = Some((back_x, back_y, 60.0, 24.0));
+        self.gameplay.settings_back_btn = Some(Rect {
+            x: back_x,
+            y: back_y,
+            w: 60.0,
+            h: 24.0,
+        });
         self.gameplay.settings_widgets = Some(crate::SettingsWidgets {
             sliders,
             toggles,
-            apply_btn: (apply_x, btn_y, btn_w, 28.0),
-            defaults_btn: (defaults_x, btn_y, btn_w, 28.0),
+            apply_btn: Rect {
+                x: apply_x,
+                y: btn_y,
+                w: btn_w,
+                h: 28.0,
+            },
+            defaults_btn: Rect {
+                x: defaults_x,
+                y: btn_y,
+                w: btn_w,
+                h: 28.0,
+            },
         });
     }
 
     pub(crate) fn handle_settings_click(&mut self) {
         // Back button
-        if let Some((bx, by, bw, bh)) = self.gameplay.settings_back_btn {
-            if self.point_in_rect(self.gameplay.mouse_pos, bx, by, bw, bh) {
+        if let Some(back_rect) = self.gameplay.settings_back_btn {
+            if self.point_in_rect(self.gameplay.mouse_pos, back_rect) {
                 match self.gameplay.settings_previous {
                     GameState::TitleScreen | GameState::WorldSelect => self.enter_title_screen(),
                     GameState::PauseMenu => self.enter_pause(),
@@ -3274,9 +3377,9 @@ impl crate::EngineApp {
         };
 
         // Toggle clicks.
-        for (tx, ty, tw, th, ref label) in &widgets.toggles {
-            if self.point_in_rect(self.gameplay.mouse_pos, *tx, *ty, *tw, *th) {
-                match label.as_str() {
+        for toggle in &widgets.toggles {
+            if self.point_in_rect(self.gameplay.mouse_pos, toggle.rect) {
+                match toggle.label.as_str() {
                     "VSync" => self.config.render.vsync = !self.config.render.vsync,
                     "Shadows" => self.config.shadow_enabled = !self.config.shadow_enabled,
                     "Vignette" => {
@@ -3295,22 +3398,17 @@ impl crate::EngineApp {
 
         // Slider clicks -- set value based on click position within the bar.
         // Also start dragging so the user can hold and drag.
-        for (i, (sx, sy, sw, sh, ref label, min, max)) in widgets.sliders.iter().enumerate() {
-            if self.point_in_rect(self.gameplay.mouse_pos, *sx, *sy, *sw, *sh) {
-                let pct = ((self.gameplay.mouse_pos.0 - *sx) / *sw).clamp(0.0, 1.0);
-                let new_val = min + pct * (max - min);
-                self.apply_slider_value(label, new_val);
+        for (i, slider) in widgets.sliders.iter().enumerate() {
+            let rect = slider.rect;
+            if self.point_in_rect(self.gameplay.mouse_pos, rect) {
+                let pct = ((self.gameplay.mouse_pos.0 - rect.x) / rect.w).clamp(0.0, 1.0);
+                let new_val = slider.range.min + pct * (slider.range.max - slider.range.min);
+                self.apply_slider_value(&slider.label, new_val);
                 self.gameplay.settings_slider_dragging = Some(i);
                 return;
             }
             // Apply button: save current settings to config.toml.
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                widgets.apply_btn.0,
-                widgets.apply_btn.1,
-                widgets.apply_btn.2,
-                widgets.apply_btn.3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, widgets.apply_btn) {
                 let path = self.config.config_path.clone();
                 let gs = self.current_game_settings();
                 match gs.save(&path) {
@@ -3326,13 +3424,7 @@ impl crate::EngineApp {
             }
 
             // Defaults button: reset all settings to defaults and save.
-            if self.point_in_rect(
-                self.gameplay.mouse_pos,
-                widgets.defaults_btn.0,
-                widgets.defaults_btn.1,
-                widgets.defaults_btn.2,
-                widgets.defaults_btn.3,
-            ) {
+            if self.point_in_rect(self.gameplay.mouse_pos, widgets.defaults_btn) {
                 let defaults = crate::settings::GameSettings::default();
                 let new_rc = defaults.to_renderer_config();
                 if let Some(r) = self.render.renderer.as_mut() {
@@ -3453,13 +3545,13 @@ impl crate::EngineApp {
             self.gameplay.settings_slider_dragging = None;
             return;
         };
-        let Some((sx, _sy, sw, _sh, ref label, min, max)) = widgets.sliders.get(drag_idx).cloned()
-        else {
+        let Some(slider) = widgets.sliders.get(drag_idx).cloned() else {
             return;
         };
-        let pct = ((self.gameplay.mouse_pos.0 - sx) / sw).clamp(0.0, 1.0);
-        let new_val = min + pct * (max - min);
-        self.apply_slider_value(label, new_val);
+        let rect = slider.rect;
+        let pct = ((self.gameplay.mouse_pos.0 - rect.x) / rect.w).clamp(0.0, 1.0);
+        let new_val = slider.range.min + pct * (slider.range.max - slider.range.min);
+        self.apply_slider_value(&slider.label, new_val);
     }
 
     fn draw_section_header(&self, ui: &mut UiDrawData, title: &str, x: f32, y: f32, w: f32) -> f32 {
@@ -3474,11 +3566,11 @@ impl crate::EngineApp {
         label: &str,
         value: f32,
         range: SliderRange,
-        rect: SliderRect,
+        rect: Row,
         is_dragging: bool,
     ) -> f32 {
         let SliderRange { min, max } = range;
-        let SliderRect { x, y, w } = rect;
+        let Row { x, y, w } = rect;
         let bar_x = x + w * 0.55;
         let bar_w = w * 0.35;
         let bar_h = 8.0;
@@ -3632,11 +3724,11 @@ impl crate::EngineApp {
         label: &str,
         value: f32,
         range: SliderRange,
-        rect: SliderRect,
+        rect: Row,
         slider_index: usize,
     ) -> (f32, crate::SliderWidget) {
         let SliderRange { min, max } = range;
-        let SliderRect { x, y, w } = rect;
+        let Row { x, y, w } = rect;
         let is_dragging = self.gameplay.settings_slider_dragging == Some(slider_index);
         let next_y = self.draw_setting_slider(ui, label, value, range, rect, is_dragging);
         let bar_x = x + w * 0.55;
@@ -3645,7 +3737,16 @@ impl crate::EngineApp {
         let bar_h = 8.0;
         (
             next_y,
-            (bar_x, bar_y, bar_w, bar_h, label.to_string(), min, max),
+            crate::SliderWidget {
+                rect: Rect {
+                    x: bar_x,
+                    y: bar_y,
+                    w: bar_w,
+                    h: bar_h,
+                },
+                label: label.to_string(),
+                range: SliderRange { min, max },
+            },
         )
     }
 
@@ -3657,7 +3758,7 @@ impl crate::EngineApp {
         x: f32,
         y: f32,
         w: f32,
-    ) -> (f32, (f32, f32, f32, f32, String)) {
+    ) -> (f32, crate::ToggleWidget) {
         let next_y = self.draw_setting_toggle(ui, label, on, x, y, w);
         let toggle_x = x + 280.0;
         let toggle_w = 36.0;
@@ -3665,7 +3766,15 @@ impl crate::EngineApp {
         let toggle_y = y + 2.0;
         (
             next_y,
-            (toggle_x, toggle_y, toggle_w, toggle_h, label.to_string()),
+            crate::ToggleWidget {
+                rect: Rect {
+                    x: toggle_x,
+                    y: toggle_y,
+                    w: toggle_w,
+                    h: toggle_h,
+                },
+                label: label.to_string(),
+            },
         )
     }
 
@@ -3697,7 +3806,15 @@ impl crate::EngineApp {
 
         // Rebind button
         let rb_x = key_x + key_w + 6.0;
-        let rb_hovered = self.point_in_rect(self.gameplay.mouse_pos, rb_x, key_y, 48.0, key_h);
+        let rb_hovered = self.point_in_rect(
+            self.gameplay.mouse_pos,
+            Rect {
+                x: rb_x,
+                y: key_y,
+                w: 48.0,
+                h: key_h,
+            },
+        );
         ui.quad(
             rb_x,
             key_y,

@@ -106,16 +106,15 @@ pub fn apply_raise(
                     break;
                 }
                 let old = world.get_block(x, y, z);
-                if old.is_air()
-                    && world.set_block(x, y, z, block) {
-                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                            x,
-                            y,
-                            z,
-                            old_block: old.0,
-                            new_block: block.0,
-                        });
-                    }
+                if old.is_air() && world.set_block(x, y, z, block) {
+                    let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                        x,
+                        y,
+                        z,
+                        old_block: old.0,
+                        new_block: block.0,
+                    });
+                }
             }
         }
     }
@@ -154,16 +153,15 @@ pub fn apply_lower(
             let remove_from = (sy - amount + 1).max(0);
             for y in remove_from..=sy {
                 let old = world.get_block(x, y, z);
-                if !old.is_air()
-                    && world.set_block(x, y, z, BlockId::AIR) {
-                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                            x,
-                            y,
-                            z,
-                            old_block: old.0,
-                            new_block: 0,
-                        });
-                    }
+                if !old.is_air() && world.set_block(x, y, z, BlockId::AIR) {
+                    let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                        x,
+                        y,
+                        z,
+                        old_block: old.0,
+                        new_block: 0,
+                    });
+                }
             }
         }
     }
@@ -203,31 +201,29 @@ pub fn apply_flatten(
                         break;
                     }
                     let old = world.get_block(x, y, z);
-                    if old.is_air()
-                        && world.set_block(x, y, z, block) {
-                            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                                x,
-                                y,
-                                z,
-                                old_block: old.0,
-                                new_block: block.0,
-                            });
-                        }
+                    if old.is_air() && world.set_block(x, y, z, block) {
+                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                            x,
+                            y,
+                            z,
+                            old_block: old.0,
+                            new_block: block.0,
+                        });
+                    }
                 }
             } else if sy > target_y {
                 // Remove down to target.
                 for y in (target_y + 1)..=sy {
                     let old = world.get_block(x, y, z);
-                    if !old.is_air()
-                        && world.set_block(x, y, z, BlockId::AIR) {
-                            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                                x,
-                                y,
-                                z,
-                                old_block: old.0,
-                                new_block: 0,
-                            });
-                        }
+                    if !old.is_air() && world.set_block(x, y, z, BlockId::AIR) {
+                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                            x,
+                            y,
+                            z,
+                            old_block: old.0,
+                            new_block: 0,
+                        });
+                    }
                 }
             }
         }
@@ -286,30 +282,28 @@ pub fn apply_smooth(
                         break;
                     }
                     let old = world.get_block(x, y, z);
-                    if old.is_air()
-                        && world.set_block(x, y, z, block) {
-                            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                                x,
-                                y,
-                                z,
-                                old_block: old.0,
-                                new_block: block.0,
-                            });
-                        }
+                    if old.is_air() && world.set_block(x, y, z, block) {
+                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                            x,
+                            y,
+                            z,
+                            old_block: old.0,
+                            new_block: block.0,
+                        });
+                    }
                 }
             } else if target < sy {
                 for y in (target + 1)..=sy {
                     let old = world.get_block(x, y, z);
-                    if !old.is_air()
-                        && world.set_block(x, y, z, BlockId::AIR) {
-                            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                                x,
-                                y,
-                                z,
-                                old_block: old.0,
-                                new_block: 0,
-                            });
-                        }
+                    if !old.is_air() && world.set_block(x, y, z, BlockId::AIR) {
+                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                            x,
+                            y,
+                            z,
+                            old_block: old.0,
+                            new_block: 0,
+                        });
+                    }
                 }
             }
         }
@@ -373,30 +367,28 @@ pub fn apply_noise(
                         break;
                     }
                     let old = world.get_block(x, y, z);
-                    if old.is_air()
-                        && world.set_block(x, y, z, block) {
-                            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                                x,
-                                y,
-                                z,
-                                old_block: old.0,
-                                new_block: block.0,
-                            });
-                        }
+                    if old.is_air() && world.set_block(x, y, z, block) {
+                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                            x,
+                            y,
+                            z,
+                            old_block: old.0,
+                            new_block: block.0,
+                        });
+                    }
                 }
             } else if target < sy {
                 for y in (target + 1)..=sy {
                     let old = world.get_block(x, y, z);
-                    if !old.is_air()
-                        && world.set_block(x, y, z, BlockId::AIR) {
-                            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                                x,
-                                y,
-                                z,
-                                old_block: old.0,
-                                new_block: 0,
-                            });
-                        }
+                    if !old.is_air() && world.set_block(x, y, z, BlockId::AIR) {
+                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                            x,
+                            y,
+                            z,
+                            old_block: old.0,
+                            new_block: 0,
+                        });
+                    }
                 }
             }
         }

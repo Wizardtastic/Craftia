@@ -24,6 +24,7 @@ use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::keybinds::physical_key_to_char;
+use crate::ui::{Rect, SliderRange};
 
 use voxel_game::input::Action;
 use voxel_game::{ChatState, CommandResult, DeveloperConsole, Hotbar, InputState, PlayerConfig};
@@ -318,7 +319,7 @@ pub(crate) struct GamePlayState {
     /// pause-menu and block-picker hit-testing against UI rects.
     pub mouse_pos: (f32, f32),
     /// Pre-computed pause-menu button rects (4 buttons: back, options, save&quit, quit).
-    pub pause_buttons: Option<[(f32, f32, f32, f32); 4]>,
+    pub pause_buttons: Option<[Rect; 4]>,
     /// Chat and command system.
     pub chat: ChatState,
     /// Undo/redo stack for block edits.
@@ -348,7 +349,7 @@ pub(crate) struct GamePlayState {
     /// Minimap / fullscreen map state.
     pub map: map::MapState,
     /// Title screen / world select / settings fields.
-    pub title_buttons: Option<[(f32, f32, f32, f32); 4]>,
+    pub title_buttons: Option<[Rect; 4]>,
     pub world_list: Vec<save::WorldInfo>,
     pub selected_world_index: Option<usize>,
     pub world_select_buttons: Option<WorldSelectButtons>,
@@ -357,7 +358,7 @@ pub(crate) struct GamePlayState {
     pub listening_rebind: Option<usize>,
     pub current_world_path: Option<std::path::PathBuf>,
     pub panorama_rotation: f32,
-    pub settings_back_btn: Option<(f32, f32, f32, f32)>,
+    pub settings_back_btn: Option<Rect>,
     pub last_click_time: Option<std::time::Instant>,
     pub last_click_row: Option<usize>,
     pub pending_delete: Option<usize>,
@@ -382,14 +383,14 @@ pub(crate) struct GamePlayState {
 /// Pre-computed interactive widget rects from the settings menu draw pass.
 #[derive(Clone, Debug)]
 pub(crate) struct SettingsWidgets {
-    /// (x, y, w, h) for each slider: render_distance, fog_distance, exposure,
-    /// mouse_sensitivity, walk_speed, fly_speed
+    /// Pre-computed slider widgets (bar rect + label + range):
+    /// render_distance, fog_distance, exposure, mouse_sensitivity, walk_speed, fly_speed
     pub sliders: Vec<SliderWidget>,
-    /// (x, y, w, h) for each toggle: vsync, shadows, vignette
-    pub toggles: Vec<(f32, f32, f32, f32, String)>, // x, y, w, h, label
+    /// Pre-computed toggle widgets (rect + label): vsync, shadows, vignette
+    pub toggles: Vec<ToggleWidget>,
     /// Apply / Defaults button rects
-    pub apply_btn: (f32, f32, f32, f32),
-    pub defaults_btn: (f32, f32, f32, f32),
+    pub apply_btn: Rect,
+    pub defaults_btn: Rect,
 }
 
 impl GamePlayState {
@@ -546,16 +547,16 @@ fn categorize_block(name: &str, def: &voxel_world::registry::BlockDef) -> String
 /// Pre-computed button rects for the world selection screen.
 #[derive(Clone, Debug)]
 pub(crate) struct WorldSelectButtons {
-    /// Per-world row rects: (x, y, w, h) for each world entry.
-    pub rows: Vec<(f32, f32, f32, f32)>,
+    /// Per-world row rects for each world entry.
+    pub rows: Vec<Rect>,
     /// Delete button rects parallel to `rows`.
-    pub delete_buttons: Vec<(f32, f32, f32, f32)>,
+    pub delete_buttons: Vec<Rect>,
     /// "Create New World" button.
-    pub create_btn: (f32, f32, f32, f32),
+    pub create_btn: Rect,
     /// "Play Selected World" button.
-    pub play_btn: (f32, f32, f32, f32),
+    pub play_btn: Rect,
     /// "Close" button.
-    pub close_btn: (f32, f32, f32, f32),
+    pub close_btn: Rect,
 }
 
 /// State for the create-world mini-dialog.
@@ -574,13 +575,13 @@ pub(crate) struct CreateWorldState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CreateWorldRects {
-    pub name_input: (f32, f32, f32, f32),
-    pub seed_input: (f32, f32, f32, f32),
-    pub cancel_btn: (f32, f32, f32, f32),
-    pub create_btn: (f32, f32, f32, f32),
-    pub mode_survival: (f32, f32, f32, f32),
-    pub mode_creative: (f32, f32, f32, f32),
-    pub cheats_toggle: (f32, f32, f32, f32),
+    pub name_input: Rect,
+    pub seed_input: Rect,
+    pub cancel_btn: Rect,
+    pub create_btn: Rect,
+    pub mode_survival: Rect,
+    pub mode_creative: Rect,
+    pub cheats_toggle: Rect,
 }
 
 impl Default for CreateWorldState {
@@ -707,8 +708,20 @@ pub fn run(config: EngineConfig) -> Result<()> {
 /// Schematic clipboard: origin corner, opposite corner, flattened block list.
 pub(crate) type Clipboard = ((i32, i32, i32), (i32, i32, i32), Vec<voxel_core::BlockId>);
 
-/// Pre-computed settings slider widget rect: (x, y, w, h, label, min, max).
-pub(crate) type SliderWidget = (f32, f32, f32, f32, String, f32, f32);
+/// Pre-computed settings slider widget: slider-bar rect, label and value range.
+#[derive(Clone, Debug)]
+pub(crate) struct SliderWidget {
+    pub rect: Rect,
+    pub label: String,
+    pub range: SliderRange,
+}
+
+/// Pre-computed settings toggle widget: toggle rect + label.
+#[derive(Clone, Debug)]
+pub(crate) struct ToggleWidget {
+    pub rect: Rect,
+    pub label: String,
+}
 
 /// Manages loaded texture packs and their UI state.
 #[derive(Default)]
@@ -737,7 +750,6 @@ pub struct TexturePackInfo {
     /// Whether this pack is currently enabled.
     pub enabled: bool,
 }
-
 
 pub(crate) struct EngineApp {
     config: EngineConfig,
