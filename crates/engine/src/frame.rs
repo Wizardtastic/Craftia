@@ -266,7 +266,11 @@ impl crate::EngineApp {
         // outer Vec whose capacity survives across frames) requires
         // `upload_chunks` to accept `&mut Vec<ChunkUpload>` + drain; until
         // then we allocate locally and let the renderer consume it.
+        // Wall-clock ms spent polling streamer events + uploading chunk
+        // meshes this frame, reported in the telemetry dashboard.
+        let mut chunk_upload_ms = 0.0f32;
         if let Some(streamer) = &self.world_state.streamer {
+            let upload_t0 = Instant::now();
             let events = streamer.poll_events();
             let mut uploads = Vec::new();
             for ev in events {
@@ -291,6 +295,7 @@ impl crate::EngineApp {
                     r.upload_chunks(uploads);
                 }
             }
+            chunk_upload_ms = upload_t0.elapsed().as_secs_f32() * 1000.0;
         }
 
         // Fixed-timestep simulation.
@@ -520,6 +525,9 @@ impl crate::EngineApp {
                 }
             }
         }
+
+        // Wall-clock ms spent in `tick_water` across this frame's fixed steps.
+        let water_tick_ms = self.simulation.take_water_tick_ms();
 
         // Refresh the cached camera resource from the player's transform +
         // current eye offset. This is the camera the renderer will use.
@@ -1476,7 +1484,11 @@ impl crate::EngineApp {
                     streamer_gen_queue: streamer_stats.gen_queue,
                     streamer_mesh_queue: streamer_stats.mesh_queue,
                     streamer_pending_remesh: streamer_stats.pending_remesh,
+                    streamer_gen_ms: streamer_stats.gen_ms,
+                    streamer_mesh_ms: streamer_stats.mesh_ms,
+                    water_tick_ms,
                     water_pending_flow: self.world_state.world.pending_flow_count() as u32,
+                    chunk_upload_ms,
                     entity_count: ecs.entity_count(),
                     archetype_count: ecs.archetype_count() as u32,
                 };

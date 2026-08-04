@@ -25,6 +25,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use glam::Vec3;
 use voxel_core::ChunkPos;
@@ -126,6 +127,9 @@ pub struct Simulation {
     /// `tick_fixed`. Owned by `Simulation` so the engine no longer
     /// threads a per-frame double through `EngineInputState`.
     sim_accumulator: f64,
+    /// Wall-clock ms spent in `tick_water` across fixed steps since the
+    /// last `take_water_tick_ms` read (fed to the telemetry dashboard).
+    water_tick_ms: f32,
 }
 
 impl Simulation {
@@ -262,6 +266,7 @@ impl Simulation {
             schedule: Some(schedule),
             world,
             sim_accumulator: 0.0,
+            water_tick_ms: 0.0,
         }
     }
 
@@ -329,7 +334,19 @@ impl Simulation {
         // the rate is governed by elapsed wall-clock seconds, not by
         // step frequency — calling per fixed step vs per frame is
         // equivalent for the simulation itself.
-        self.world.tick_water(dt as f32)
+        let t0 = Instant::now();
+        let affected = self.world.tick_water(dt as f32);
+        self.water_tick_ms += t0.elapsed().as_secs_f32() * 1000.0;
+        affected
+    }
+
+    /// Wall-clock ms spent in `tick_water` across all fixed steps since the
+    /// last call. Returns and resets the accumulator so the engine can
+    /// report a per-frame water-sim duration.
+    pub fn take_water_tick_ms(&mut self) -> f32 {
+        let v = self.water_tick_ms;
+        self.water_tick_ms = 0.0;
+        v
     }
 
     /// Accumulate `frame_dt` and run as many fixed steps as needed

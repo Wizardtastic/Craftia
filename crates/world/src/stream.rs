@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use flume::{unbounded, Receiver, Sender};
@@ -99,13 +100,20 @@ enum Cmd {
     Shutdown,
 }
 
-/// Snapshot of streamer queue depths and state counts.
+/// Snapshot of streamer queue depths, state counts, and — since the last
+/// `Cmd::Stats` read — the wall-clock ms spent inside generation / meshing
+/// batches (useful for judging how much of the frame budget streaming eats).
 #[derive(Clone, Debug, Default)]
 pub struct StreamerStats {
     pub gen_queue: u32,
     pub mesh_queue: u32,
     pub pending_remesh: u32,
     pub total_tracked: u32,
+    /// Wall-clock ms spent in generation batches since the last stats read.
+    pub gen_ms: f32,
+    /// Wall-clock ms spent in mesh batches (incl. priority remeshes) since
+    /// the last stats read.
+    pub mesh_ms: f32,
 }
 
 /// Owns the worker thread. Drop shuts it down.
@@ -201,6 +209,10 @@ fn run_worker(
     let mut frustum = None::<Frustum>;
     let mut load_radius = config.load_radius;
     let mut state: HashMap<ChunkPos, State> = HashMap::new();
+    // Wall-clock ms spent generating / meshing since the last `Cmd::Stats`
+    // read; reported in `StreamerStats` and reset there.
+    let mut gen_accum_ms: f32 = 0.0;
+    let mut mesh_accum_ms: f32 = 0.0;
 
     loop {
         // --- drain commands ---
@@ -234,6 +246,10 @@ fn run_worker(
                         }
                     }
                     stats.pending_remesh = remesh_requests.len() as u32;
+                    stats.gen_ms = gen_accum_ms;
+                    stats.mesh_ms = mesh_accum_ms;
+                    gen_accum_ms = 0.0;
+                    mesh_accum_ms = 0.0;
                     let _ = tx.try_send(stats);
                 }
                 Cmd::Shutdown => return,
@@ -295,6 +311,7 @@ fn run_worker(
             for pos in &priority_remesh {
                 state.insert(*pos, State::Meshing);
             }
+            let mesh_t0 = Instant::now();
             let meshes: Vec<(ChunkPos, ChunkMeshBundle)> = pool.install(|| {
                 priority_remesh
                     .par_iter()
@@ -316,6 +333,7 @@ fn run_worker(
                     })
                     .collect()
             });
+            mesh_accum_ms += mesh_t0.elapsed().as_secs_f32() * 1000.0;
             for (pos, bundle) in meshes {
                 world.insert_mesh(pos);
                 state.insert(pos, State::Meshed);
@@ -342,6 +360,7 @@ fn run_worker(
             let gen = gen.clone();
             let reg = reg.clone();
             let world_for_light = world.clone();
+            let gen_t0 = Instant::now();
             let generated: Vec<std::result::Result<(ChunkPos, Chunk), WorldError>> =
                 pool.install(|| {
                     gen_batch
@@ -384,6 +403,7 @@ fn run_worker(
                         })
                         .collect()
                 });
+            gen_accum_ms += gen_t0.elapsed().as_secs_f32() * 1000.0;
             for res in generated {
                 let (pos, chunk) = match res {
                     Ok(generated) => generated,
@@ -514,6 +534,7 @@ fn run_worker(
             let reg = reg.clone();
             let mesher = &mesher;
             let sun_dir_for_mesh = sun_dir;
+            let mesh_t0 = Instant::now();
             let meshes: Vec<(ChunkPos, ChunkMeshBundle)> = pool.install(|| {
                 mesh_batch
                     .par_iter()
@@ -535,6 +556,7 @@ fn run_worker(
                     })
                     .collect()
             });
+            mesh_accum_ms += mesh_t0.elapsed().as_secs_f32() * 1000.0;
             for (pos, bundle) in meshes {
                 world.insert_mesh(pos);
                 state.insert(pos, State::Meshed);
@@ -580,6 +602,10 @@ fn run_worker(
                             }
                         }
                         stats.pending_remesh = remesh_requests.len() as u32;
+                        stats.gen_ms = gen_accum_ms;
+                        stats.mesh_ms = mesh_accum_ms;
+                        gen_accum_ms = 0.0;
+                        mesh_accum_ms = 0.0;
                         let _ = tx.try_send(stats);
                     }
                     Cmd::Shutdown => return,

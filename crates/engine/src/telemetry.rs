@@ -40,9 +40,21 @@ pub struct TelemetrySnapshot {
     pub streamer_gen_queue: u32,
     pub streamer_mesh_queue: u32,
     pub streamer_pending_remesh: u32,
+    /// Wall-clock ms spent in generation batches since the last frame.
+    pub streamer_gen_ms: f32,
+    /// Wall-clock ms spent in mesh batches (incl. priority remeshes) since
+    /// the last frame.
+    pub streamer_mesh_ms: f32,
 
     // -- Water --
+    /// Wall-clock ms spent in `tick_water` across the frame's fixed steps.
+    pub water_tick_ms: f32,
     pub water_pending_flow: u32,
+
+    // -- Upload --
+    /// Wall-clock ms spent draining streamer events and uploading chunk
+    /// meshes to the GPU this frame.
+    pub chunk_upload_ms: f32,
 
     // -- ECS --
     pub entity_count: u32,
@@ -72,7 +84,11 @@ impl Default for TelemetrySnapshot {
             streamer_gen_queue: 0,
             streamer_mesh_queue: 0,
             streamer_pending_remesh: 0,
+            streamer_gen_ms: 0.0,
+            streamer_mesh_ms: 0.0,
+            water_tick_ms: 0.0,
             water_pending_flow: 0,
+            chunk_upload_ms: 0.0,
             entity_count: 0,
             archetype_count: 0,
         }
@@ -113,7 +129,11 @@ pub enum MetricSelector {
     StreamerGenQueue,
     StreamerMeshQueue,
     StreamerPendingRemesh,
+    StreamerGenMs,
+    StreamerMeshMs,
+    WaterTickMs,
     WaterPendingFlow,
+    ChunkUploadMs,
     EntityCount,
     ArchetypeCount,
 }
@@ -222,7 +242,11 @@ impl TelemetryCollector {
                 MetricSelector::StreamerGenQueue => s.streamer_gen_queue as f32,
                 MetricSelector::StreamerMeshQueue => s.streamer_mesh_queue as f32,
                 MetricSelector::StreamerPendingRemesh => s.streamer_pending_remesh as f32,
+                MetricSelector::StreamerGenMs => s.streamer_gen_ms,
+                MetricSelector::StreamerMeshMs => s.streamer_mesh_ms,
+                MetricSelector::WaterTickMs => s.water_tick_ms,
                 MetricSelector::WaterPendingFlow => s.water_pending_flow as f32,
+                MetricSelector::ChunkUploadMs => s.chunk_upload_ms,
                 MetricSelector::EntityCount => s.entity_count as f32,
                 MetricSelector::ArchetypeCount => s.archetype_count as f32,
             })

@@ -4495,6 +4495,14 @@ impl crate::EngineApp {
                     "Streamer: {} gen, {} mesh, {} remesh",
                     s.streamer_gen_queue, s.streamer_mesh_queue, s.streamer_pending_remesh
                 ),
+                format!(
+                    "Gen {:.1}ms  Mesh {:.1}ms",
+                    s.streamer_gen_ms, s.streamer_mesh_ms
+                ),
+                format!(
+                    "Water {:.2}ms  Upload {:.2}ms",
+                    s.water_tick_ms, s.chunk_upload_ms
+                ),
                 format!("Water pending: {}", s.water_pending_flow),
                 format!(
                     "GPU mem: {:.1} MB alloc / {:.1} MB reserved",
