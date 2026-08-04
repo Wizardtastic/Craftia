@@ -317,7 +317,7 @@ fn run_worker(
                     .collect()
             });
             for (pos, bundle) in meshes {
-                world.insert_mesh(pos, bundle.clone());
+                world.insert_mesh(pos);
                 state.insert(pos, State::Meshed);
                 let _ = event_tx.send(ChunkStreamEvent::MeshReady { pos, bundle });
             }
@@ -348,10 +348,15 @@ fn run_worker(
                         .par_iter()
                         .map(|&pos| {
                             let mut chunk = Chunk::new(pos);
-                            gen.generate(&mut chunk, &reg)?;
+                            // Sample the expensive per-column height/biome noise
+                            // exactly once per chunk; `generate` and `decorate`
+                            // both consume the shared table.
+                            let columns = gen.column_table(chunk_origin(pos));
+                            gen.generate(&mut chunk, &reg, &columns)?;
                             gen.decorate(
                                 &mut chunk,
                                 &reg,
+                                &columns,
                                 |wx, wy, wz| world_for_light.get_block(wx, wy, wz),
                                 |wx, wy, wz, id| world_for_light.set_block_no_light(wx, wy, wz, id),
                             );
@@ -531,7 +536,7 @@ fn run_worker(
                     .collect()
             });
             for (pos, bundle) in meshes {
-                world.insert_mesh(pos, bundle.clone());
+                world.insert_mesh(pos);
                 state.insert(pos, State::Meshed);
                 let _ = event_tx.send(ChunkStreamEvent::MeshReady { pos, bundle });
             }

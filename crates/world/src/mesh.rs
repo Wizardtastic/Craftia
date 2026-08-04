@@ -171,7 +171,7 @@ impl ChunkMesher {
                                 wl,
                             );
                         }
-                        _ if def.name.as_ref() == "cactus" => {
+                        BlockKind::Cactus => {
                             emit_cactus_block(
                                 &mut bundle,
                                 &ctx,
@@ -208,9 +208,8 @@ impl ChunkMesher {
                     }
                 }
                 greedy_emit(&mut bundle, &mask, face, slice, reg, directional);
-                for cell in mask.iter_mut().flat_map(|r| r.iter_mut()) {
-                    *cell = EMPTY_CELL;
-                }
+                // Note: no need to clear the mask here — the next slice
+                // unconditionally rebuilds every cell via `build_mask_cell`.
             }
         }
 
@@ -253,7 +252,7 @@ fn build_mask_cell(
     if !def.is_rendered()
         || def.kind == BlockKind::Liquid
         || def.kind == BlockKind::Foliage
-        || def.name.as_ref() == "cactus"
+        || def.kind == BlockKind::Cactus
     {
         return EMPTY_CELL;
     }
@@ -782,10 +781,12 @@ fn emit_water_block(
                 continue;
             }
         }
-        if *face == Face::NegY && neighbour_def.kind == BlockKind::Solid {
+        // Cactus counts as solid for water face-culling (it is solid + opaque).
+        let solid_neighbour = matches!(neighbour_def.kind, BlockKind::Solid | BlockKind::Cactus);
+        if *face == Face::NegY && solid_neighbour {
             continue;
         }
-        if *face != Face::PosY && *face != Face::NegY && neighbour_def.kind == BlockKind::Solid {
+        if *face != Face::PosY && *face != Face::NegY && solid_neighbour {
             continue;
         }
 

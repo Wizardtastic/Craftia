@@ -57,6 +57,9 @@ pub enum BlockKind {
     Liquid,
     Foliage,
     Transparent,
+    /// Rendered per-block by the mesher (no greedy merging) so stacked
+    /// cactus segments keep the small gap between them.
+    Cactus,
 }
 
 /// Per-face texture tile index into the texture atlas.
@@ -798,7 +801,7 @@ impl BlockRegistry {
             BlockDef {
                 id: BlockId(0),
                 name: Arc::from("cactus"),
-                kind: BlockKind::Solid,
+                kind: BlockKind::Cactus,
                 solid: true,
                 opaque: true,
                 breakable: true,
@@ -1102,6 +1105,7 @@ impl BlockRegistry {
                 "liquid" => BlockKind::Liquid,
                 "foliage" => BlockKind::Foliage,
                 "transparent" => BlockKind::Transparent,
+                "cactus" => BlockKind::Cactus,
                 _ => BlockKind::Solid,
             };
             let textures = match &bd.textures {

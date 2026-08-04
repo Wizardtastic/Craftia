@@ -66,6 +66,31 @@ impl BiomeId {
     }
 }
 
+/// Precomputed per-column terrain data for one chunk: the base terrain height
+/// (world-Y float, unrounded) and the surface biome for each of the chunk's
+/// 16×16 columns. Built once per chunk via [`TerrainGenerator::column_table`]
+/// and shared by [`TerrainGenerator::generate`] and
+/// [`TerrainGenerator::decorate`] so the expensive fractal-noise samplers
+/// (`base_height` + `biome_at`) run exactly once per column instead of once
+/// per pass.
+#[derive(Clone, Debug)]
+pub struct ColumnTable {
+    /// `(base_height, biome)` per column, indexed by `lx * CHUNK_SIZE + lz`.
+    entries: Vec<(f32, BiomeId)>,
+}
+
+impl ColumnTable {
+    /// Terrain data for the column at chunk-local `(lx, lz)`.
+    #[inline]
+    pub fn get(&self, lx: i32, lz: i32) -> (f32, BiomeId) {
+        debug_assert!(
+            (0..CHUNK_SIZE).contains(&lx) && (0..CHUNK_SIZE).contains(&lz),
+            "column ({lx}, {lz}) out of chunk range"
+        );
+        self.entries[(lx as usize) * CHUNK_SIZE as usize + lz as usize]
+    }
+}
+
 /// Configurable terrain generator. Owns precomputed noise samplers.
 /// World-space coordinate + surface height for one cave-carve evaluation.
 /// Bundled so [`TerrainGenerator::carve`] stays under the
@@ -276,6 +301,24 @@ impl TerrainGenerator {
         let t = (self.temperature.get_noise_2d(x as f32, z as f32) + 1.0) * 0.5;
         let h = (self.humidity.get_noise_2d(x as f32, z as f32) + 1.0) * 0.5;
         BiomeId::classify(t, h, height)
+    }
+
+    /// Sample `base_height` + `biome_at` once for every column of the chunk
+    /// whose corner is at world-space `origin`. The result is handed to
+    /// `generate` / `decorate` (and via `generate` to `decorate_caves`) so
+    /// the per-column fractal-noise samplers run once per chunk instead of
+    /// once per pass.
+    pub fn column_table(&self, origin: glam::IVec3) -> ColumnTable {
+        let mut entries = Vec::with_capacity(CHUNK_SIZE as usize * CHUNK_SIZE as usize);
+        for lx in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                let wx = origin.x + lx;
+                let wz = origin.z + lz;
+                let h = self.base_height(wx, wz);
+                entries.push((h, self.biome_at(wx, wz, h)));
+            }
+        }
+        ColumnTable { entries }
     }
 
     /// Multi-pass cave carver. Returns true if this block should be replaced
@@ -550,7 +593,12 @@ impl TerrainGenerator {
 
     /// Decorate carved caves with water/lava pools, scattered floor blocks,
     /// extra ore near walls, and simple stalactites/stalagmites.
-    pub fn decorate_caves(&self, chunk: &mut Chunk, reg: &BlockRegistry) {
+    pub fn decorate_caves(
+        &self,
+        chunk: &mut Chunk,
+        reg: &BlockRegistry,
+        columns: &ColumnTable,
+    ) {
         let origin = chunk_origin(chunk.pos);
         let Some(stone) = reg.id_of("stone") else {
             return;
@@ -660,14 +708,12 @@ impl TerrainGenerator {
         // the surface.
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
-                // Hoist `base_height` (called inside the ly loop previously)
-                // so it runs once per column instead of once per AIR cell.
-                // `base_height` itself invokes 3 fractal-noise samplers, so
-                // for an air-heavy chunk this eliminates ~13 × 3 ≈ 40 noise
-                // calls per column × 256 columns = ~10K noise calls total.
                 let wx = origin.x + lx;
                 let wz = origin.z + lz;
-                let surface = self.base_height(wx, wz).round() as i32;
+                // Surface height comes from the shared per-column table built
+                // once per chunk (see `column_table`) instead of re-sampling
+                // `base_height` (3 fractal-noise samplers per column).
+                let surface = columns.get(lx, lz).0.round() as i32;
                 for ly in 1..(CHUNK_SIZE - 1) {
                     let wy = origin.y + ly;
                     let id = chunk.get(lx, ly, lz);
@@ -798,10 +844,19 @@ impl TerrainGenerator {
     /// Generate a full chunk in place. Does NOT touch neighbours; cross-chunk
     /// decorations (trees) are applied by `decorate` after neighbours exist.
     ///
+    /// `columns` is the per-column height/biome table for this chunk (built
+    /// once via [`TerrainGenerator::column_table`]); it is also passed on to
+    /// `decorate_caves` so the column noise is never sampled twice.
+    ///
     /// Returns an error if the registry is missing any builtin block that
     /// generation depends on (stone, dirt, grass, sand, water, bedrock, snow,
     /// gravel), instead of panicking inside the streaming thread pool.
-    pub fn generate(&self, chunk: &mut Chunk, reg: &BlockRegistry) -> Result<()> {
+    pub fn generate(
+        &self,
+        chunk: &mut Chunk,
+        reg: &BlockRegistry,
+        columns: &ColumnTable,
+    ) -> Result<()> {
         let origin = chunk_origin(chunk.pos);
         let stone = reg.id_of("stone").ok_or_else(|| {
             crate::error::WorldError::Registry("stone block must be registered".into())
@@ -832,9 +887,8 @@ impl TerrainGenerator {
             for lz in 0..CHUNK_SIZE {
                 let wx = origin.x + lx;
                 let wz = origin.z + lz;
-                let height_f = self.base_height(wx, wz);
+                let (height_f, biome) = columns.get(lx, lz);
                 let height = height_f.round() as i32;
-                let biome = self.biome_at(wx, wz, height_f);
 
                 for ly in 0..CHUNK_SIZE {
                     let wy = origin.y + ly;
@@ -913,7 +967,7 @@ impl TerrainGenerator {
         self.carve_ravines(chunk, reg);
 
         // Add cave-specific decorations (pools, ores, stalactites).
-        self.decorate_caves(chunk, reg);
+        self.decorate_caves(chunk, reg, columns);
 
         chunk.generated = true;
         chunk.dirty = true;
@@ -927,6 +981,7 @@ impl TerrainGenerator {
         &self,
         chunk: &mut Chunk,
         reg: &BlockRegistry,
+        columns: &ColumnTable,
         neighbour_sample: impl Fn(i32, i32, i32) -> BlockId,
         neighbour_set: impl Fn(i32, i32, i32, BlockId) -> bool,
     ) {
@@ -951,10 +1006,10 @@ impl TerrainGenerator {
                 // Tree density: cellular value high + per-position hash.
                 let n = self.tree.get_noise_2d(wx as f32, wz as f32);
                 let h = hash2(self.seed, wx, wz);
-                // Biome is derived from the base height field (same source as
-                // `generate`), so decorations match the surface biome exactly.
-                let height_f = self.base_height(wx, wz);
-                let biome = self.biome_at(wx, wz, height_f);
+                // Biome comes from the shared per-column table (same source
+                // as `generate`), so decorations match the surface biome
+                // exactly — without re-running the fractal-noise samplers.
+                let biome = columns.get(lx, lz).1;
 
                 // ---- Trees (delegated to `tree` module) --------------------
                 if let Some(tree_type) = tree::pick_tree_type(self.seed, wx, wz, biome, n, h) {
@@ -1266,4 +1321,29 @@ pub(crate) fn hash2(seed: i32, x: i32, z: i32) -> f32 {
 /// Convert a world block position to its owning chunk position.
 pub fn chunk_of(block: BlockPos) -> ChunkPos {
     voxel_core::math::block_to_chunk(block.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `ColumnTable` refactor relies on `generate` / `decorate` reading
+    /// exactly what the direct per-column samplers would have produced, so
+    /// lock that equivalence in: every table entry must equal
+    /// `base_height(wx, wz)` / `biome_at(wx, wz, height)` for the same column.
+    #[test]
+    fn column_table_matches_direct_sampling() {
+        let gen = TerrainGenerator::new(42);
+        for origin in [glam::IVec3::new(0, 0, 0), glam::IVec3::new(-48, 64, 32)] {
+            let table = gen.column_table(origin);
+            for lx in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    let wx = origin.x + lx;
+                    let wz = origin.z + lz;
+                    let h = gen.base_height(wx, wz);
+                    assert_eq!(table.get(lx, lz), (h, gen.biome_at(wx, wz, h)));
+                }
+            }
+        }
+    }
 }
