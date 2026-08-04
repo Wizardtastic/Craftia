@@ -9,6 +9,7 @@ use crate::edit::paint::{GradientShape, InterpolationMode};
 use crate::edit::terrain::TerrainOp;
 use crate::edit::{BrushShape, EditState, PaintMode};
 use crate::ui::{Row, SliderRange};
+use voxel_core::Point;
 use voxel_render::{FontAtlas, UiDrawData};
 
 use super::theme;
@@ -63,7 +64,7 @@ pub fn draw_right_panel(
     ui: &mut UiDrawData,
     edit: &mut EditState,
     screen: (f32, f32),
-    mouse: (f32, f32),
+    mouse: Point,
     font: &FontAtlas,
     cursor_pos: Option<(i32, i32, i32)>,
     pack_infos: &[crate::TexturePackInfo],
@@ -78,7 +79,7 @@ pub fn draw_right_panel(
     ui.quad(panel_x, panel_y, panel_w, panel_h, theme::PANEL_BG);
     ui.quad(panel_x, panel_y, 1.0, panel_h, theme::BORDER);
 
-    let (mx, my) = mouse;
+    let Point { x: mx, y: my } = mouse;
     let ctx = PanelCtx {
         font,
         mx,
@@ -202,7 +203,8 @@ pub fn draw_right_panel(
     // ── Tool Mask section ──
     y = draw_separator(ui, panel_x, y, panel_w);
     y = draw_header(ui, "Tool Mask", panel_x, y, panel_w, font);
-    let (ny, _mask_clicked) = draw_toggle_row(ui, &ctx, "Enable Mask", false, (panel_x, y));
+    let (ny, _mask_clicked) =
+        draw_toggle_row(ui, &ctx, "Enable Mask", false, Point::new(panel_x, y));
     y = ny;
     ui.text("No mask active", lx, y + 4.0, 0.6, theme::TEXT_DIM, font);
     y += 22.0;
@@ -240,20 +242,31 @@ pub fn draw_right_panel(
             w: panel_w,
         },
     );
-    let (ny, grid_clicked) = draw_toggle_row(ui, &ctx, "Show Grid", edit.show_grid, (panel_x, y));
+    let (ny, grid_clicked) = draw_toggle_row(
+        ui,
+        &ctx,
+        "Show Grid",
+        edit.show_grid,
+        Point::new(panel_x, y),
+    );
     y = ny;
     if grid_clicked {
         action = RightPanelAction::ToggleShowGrid;
     }
-    let (ny, chunks_clicked) =
-        draw_toggle_row(ui, &ctx, "Show Chunks", edit.show_chunks, (panel_x, y));
+    let (ny, chunks_clicked) = draw_toggle_row(
+        ui,
+        &ctx,
+        "Show Chunks",
+        edit.show_chunks,
+        Point::new(panel_x, y),
+    );
     y = ny;
     if chunks_clicked {
         action = RightPanelAction::ToggleShowChunks;
     }
 
     // Texture pack manager section
-    draw_pack_manager_section(ui, &ctx, pack_infos, (screen_w, y));
+    draw_pack_manager_section(ui, &ctx, pack_infos, screen_w, y);
 
     action
 }
@@ -319,18 +332,24 @@ fn draw_brush_options(
     y = draw_separator(ui, x, y, w);
 
     // Toggles
-    let (ny, hollow_clicked) = draw_toggle_row(ui, ctx, "Hollow", brush.hollow, (x, y));
+    let (ny, hollow_clicked) = draw_toggle_row(ui, ctx, "Hollow", brush.hollow, Point::new(x, y));
     y = ny;
     if hollow_clicked {
         *action = RightPanelAction::ToggleHollow;
     }
-    let (ny, surface_clicked) =
-        draw_toggle_row(ui, ctx, "Surface Only", brush.surface_only, (x, y));
+    let (ny, surface_clicked) = draw_toggle_row(
+        ui,
+        ctx,
+        "Surface Only",
+        brush.surface_only,
+        Point::new(x, y),
+    );
     y = ny;
     if surface_clicked {
         *action = RightPanelAction::ToggleSurfaceOnly;
     }
-    let (ny, replace_clicked) = draw_toggle_row(ui, ctx, "Replace Mode", brush.replace, (x, y));
+    let (ny, replace_clicked) =
+        draw_toggle_row(ui, ctx, "Replace Mode", brush.replace, Point::new(x, y));
     y = ny;
     if replace_clicked {
         *action = RightPanelAction::ToggleReplace;
@@ -363,8 +382,13 @@ fn draw_brush_options(
     y = draw_separator(ui, x, y, w);
 
     // Phase 3: Multi-block palette
-    let (ny, multi_clicked) =
-        draw_toggle_row(ui, ctx, "Multi-block", brush.palette.enabled, (x, y));
+    let (ny, multi_clicked) = draw_toggle_row(
+        ui,
+        ctx,
+        "Multi-block",
+        brush.palette.enabled,
+        Point::new(x, y),
+    );
     y = ny;
     if multi_clicked {
         *action = RightPanelAction::ToggleMultiBlock;
@@ -947,7 +971,7 @@ fn draw_toggle_row(
     ctx: &PanelCtx<'_>,
     label: &str,
     on: bool,
-    pos: (f32, f32),
+    pos: Point,
 ) -> (f32, bool) {
     let PanelCtx {
         font,
@@ -955,7 +979,7 @@ fn draw_toggle_row(
         my,
         ui_click,
     } = *ctx;
-    let (x, y) = pos;
+    let Point { x, y } = pos;
     let lx = x + 8.0;
     let box_size = 11.0;
     let bx = lx;
@@ -1116,10 +1140,10 @@ fn draw_pack_manager_section(
     ui: &mut UiDrawData,
     ctx: &PanelCtx<'_>,
     packs: &[crate::TexturePackInfo],
-    pos: (f32, f32),
+    screen_w: f32,
+    y: f32,
 ) -> f32 {
     let PanelCtx { font, .. } = *ctx;
-    let (screen_w, y) = pos;
     let x = screen_w - theme::RIGHT_PANEL_W;
     let w = theme::RIGHT_PANEL_W;
     let header_h = theme::SECTION_HEADER_H;

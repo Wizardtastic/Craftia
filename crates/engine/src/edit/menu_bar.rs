@@ -3,6 +3,7 @@
 //! Left: logo + menu items. Right: FPS counter + Exit Editor button.
 
 use crate::edit::EditState;
+use voxel_core::Point;
 use voxel_render::{FontAtlas, UiDrawData};
 
 use super::theme;
@@ -17,7 +18,7 @@ pub fn draw_menu_bar(
     ui: &mut UiDrawData,
     edit: &EditState,
     screen_w: f32,
-    mouse: (f32, f32),
+    mouse: Point,
     font: &FontAtlas,
     fps: f64,
 ) -> MenuAction {
@@ -35,7 +36,10 @@ pub fn draw_menu_bar(
 
     let menus = ["File", "Edit", "Select", "View", "Operations", "Help"];
     let mut mx = logo_x + logo_w + 16.0;
-    let (mouse_x, mouse_y) = mouse;
+    let Point {
+        x: mouse_x,
+        y: mouse_y,
+    } = mouse;
 
     for label in &menus {
         let lw = font.text_width(label, 0.75);

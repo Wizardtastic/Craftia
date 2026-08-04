@@ -4,7 +4,7 @@
 //! (`handle_*_click`) live here. The split keeps the frame loop in
 //! `lib.rs` focused on per-frame orchestration rather than HUD layout.
 
-use voxel_core::Rect;
+use voxel_core::{Point, Rect};
 use voxel_render::{GraphStyle, UiDrawData};
 
 use crate::edit;
@@ -1438,8 +1438,8 @@ impl crate::EngineApp {
         let panel_x = (w - panel_w) * 0.5;
         let panel_y = (h - panel_h) * 0.5 - 10.0;
 
-        let mx = self.gameplay.mouse_pos.0;
-        let my = self.gameplay.mouse_pos.1;
+        let mx = self.gameplay.mouse_pos.x;
+        let my = self.gameplay.mouse_pos.y;
 
         // ── Check tab clicks ──
         let tab_w = 40.0f32;
@@ -1513,19 +1513,14 @@ impl crate::EngineApp {
     }
 
     /// Resolve the entity rendered at the mouse cursor position in the ECS inspector panel.
-    pub(crate) fn entity_at_slot(
-        &self,
-        w: f32,
-        h: f32,
-        mouse: (f32, f32),
-    ) -> Option<voxel_ecs::Entity> {
+    pub(crate) fn entity_at_slot(&self, w: f32, h: f32, mouse: Point) -> Option<voxel_ecs::Entity> {
         let panel_w = 380.0;
         let panel_x = w - panel_w - 8.0;
         let panel_y = 8.0;
         let line_h = 14.0;
         let pad = 4.0;
         let cutoff = h - 12.0;
-        let (mx, my) = mouse;
+        let Point { x: mx, y: my } = mouse;
 
         if !(mx >= panel_x && mx <= panel_x + panel_w) {
             return None;
@@ -3532,7 +3527,7 @@ impl crate::EngineApp {
         let bar_y = y + 4.0;
 
         // Detect hover: mouse over the bar area (with some vertical padding).
-        let (mx, my) = self.gameplay.mouse_pos;
+        let Point { x: mx, y: my } = self.gameplay.mouse_pos;
         let is_hovered = !is_dragging
             && mx >= bar_x
             && mx <= bar_x + bar_w
@@ -4043,15 +4038,26 @@ impl crate::EngineApp {
         let grid_y0 = cy;
         let mut hovered_item_name: Option<&str> = None;
         let mut hovered_item_cat: Option<&str> = None;
-        let mut hovered_slot_pos: Option<(f32, f32)> = None;
+        let mut hovered_slot_index: Option<usize> = None;
 
         // Calculate scroll bounds.
         let total_rows = filtered_items.len().div_ceil(cols);
         let max_scroll = total_rows.saturating_sub(visible_rows);
         let scroll_offset = self.gameplay.creative_scroll.min(max_scroll);
 
-        for (i, item) in filtered_items.iter().enumerate() {
+        // Map an item index to its on-screen slot position. Shared by the
+        // hover loop and the tooltip so the layout math can't drift.
+        let slot_screen_pos = |i: usize| {
             let col = i % cols;
+            let row = i / cols;
+            let display_row = row - scroll_offset;
+            Point::new(
+                grid_x0 + col as f32 * (slot_size + slot_gap),
+                grid_y0 + display_row as f32 * (slot_size + slot_gap),
+            )
+        };
+
+        for (i, item) in filtered_items.iter().enumerate() {
             let row = i / cols;
             // Apply scroll offset.
             if row < scroll_offset {
@@ -4061,14 +4067,13 @@ impl crate::EngineApp {
             if display_row >= visible_rows {
                 break;
             }
-            let sx = grid_x0 + col as f32 * (slot_size + slot_gap);
-            let sy = grid_y0 + display_row as f32 * (slot_size + slot_gap);
+            let Point { x: sx, y: sy } = slot_screen_pos(i);
 
             // Check if mouse is hovering over this slot.
-            let is_hovered = self.gameplay.mouse_pos.0 >= sx
-                && self.gameplay.mouse_pos.0 < sx + slot_size
-                && self.gameplay.mouse_pos.1 >= sy
-                && self.gameplay.mouse_pos.1 < sy + slot_size;
+            let is_hovered = self.gameplay.mouse_pos.x >= sx
+                && self.gameplay.mouse_pos.x < sx + slot_size
+                && self.gameplay.mouse_pos.y >= sy
+                && self.gameplay.mouse_pos.y < sy + slot_size;
 
             // Slot background
             if is_hovered {
@@ -4077,7 +4082,7 @@ impl crate::EngineApp {
                 ui.rect_border(sx, sy, slot_size, slot_size, 2.0, ember);
                 hovered_item_name = Some(&item.name);
                 hovered_item_cat = Some(&item.category);
-                hovered_slot_pos = Some((sx, sy));
+                hovered_slot_index = Some(i);
             } else {
                 ui.quad(sx, sy, slot_size, slot_size, slot_bg);
                 // 3D inset effect
@@ -4099,12 +4104,14 @@ impl crate::EngineApp {
         }
 
         // ── Tooltip (shown when hovering over an item) ──
-        if let (Some(name), Some(cat)) = (hovered_item_name, hovered_item_cat) {
+        if let (Some(name), Some(cat), Some(slot)) =
+            (hovered_item_name, hovered_item_cat, hovered_slot_index)
+        {
             let tooltip_pad = 8.0f32;
             let tooltip_w = 140.0f32;
             let tooltip_h = 36.0f32;
             // Position tooltip near the hovered slot, but not off-screen.
-            let (sx, sy) = hovered_slot_pos.unwrap_or((0.0, 0.0));
+            let Point { x: sx, y: sy } = slot_screen_pos(slot);
             let mut tooltip_x = sx + slot_size + 6.0;
             let mut tooltip_y = sy - 4.0;
             if tooltip_x + tooltip_w > w - 10.0 {

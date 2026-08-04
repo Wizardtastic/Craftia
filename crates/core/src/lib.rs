@@ -11,7 +11,7 @@ pub mod math;
 pub use block::BlockId;
 pub use camera::{Camera, Frustum};
 pub use constants::*;
-pub use math::{Aabb, BlockPos, ChunkPos, Ray, Rect};
+pub use math::{Aabb, BlockPos, ChunkPos, Point, Ray, Rect};
 
 /// Engine version string, baked at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

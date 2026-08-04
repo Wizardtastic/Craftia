@@ -9,7 +9,7 @@
 use crate::edit::ctx::PanelCtx;
 use crate::edit::{tools_for_category, EditState};
 use crate::ui::Row;
-use voxel_core::BlockId;
+use voxel_core::{BlockId, Point};
 use voxel_render::{FontAtlas, UiDrawData};
 use voxel_world::registry::BlockRegistry;
 
@@ -26,7 +26,7 @@ pub fn draw_left_panel(
     ui: &mut UiDrawData,
     edit: &mut EditState,
     screen_h: f32,
-    mouse: (f32, f32),
+    mouse: Point,
     font: &FontAtlas,
     registry: &BlockRegistry,
 ) -> LeftPanelAction {
@@ -45,7 +45,7 @@ pub fn draw_left_panel(
         theme::BORDER,
     );
 
-    let (_mx, _my) = mouse;
+    let Point { x: _mx, y: _my } = mouse;
     let mut y = panel_y;
 
     // 1. Tool section
@@ -69,8 +69,8 @@ pub fn draw_left_panel(
         },
         PanelCtx {
             font,
-            mx: mouse.0,
-            my: mouse.1,
+            mx: mouse.x,
+            my: mouse.y,
             ui_click: edit.ui_click,
         },
         &mut action,
@@ -91,8 +91,8 @@ pub fn draw_left_panel(
         },
         PanelCtx {
             font,
-            mx: mouse.0,
-            my: mouse.1,
+            mx: mouse.x,
+            my: mouse.y,
             ui_click: edit.ui_click,
         },
         registry,

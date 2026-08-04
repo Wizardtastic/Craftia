@@ -7,6 +7,7 @@ use std::time::Instant;
 use crate::edit;
 use crate::edit::terrain::TerrainOp;
 use crate::{spawn_particles_break, spawn_particles_place, update_particles};
+use voxel_core::Point;
 use voxel_render::UiDrawData;
 use voxel_world::ChunkStreamEvent;
 
@@ -921,7 +922,7 @@ impl crate::EngineApp {
                     // Check if click is outside UI panels. The editor draws
                     // in logical pixels now, so compare against the logical
                     // window size to match the panel rects.
-                    let (mx, my) = self.gameplay.mouse_pos;
+                    let Point { x: mx, y: my } = self.gameplay.mouse_pos;
                     let (sw, sh) = self.render.logical_size();
                     let in_menu_bar = my < edit::theme::MENU_BAR_H;
                     let in_status_bar = my > sh - edit::theme::STATUS_BAR_H;

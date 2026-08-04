@@ -25,7 +25,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowAttributes, Window
 
 use crate::keybinds::physical_key_to_char;
 use crate::ui::SliderRange;
-use voxel_core::Rect;
+use voxel_core::{Point, Rect};
 
 use voxel_game::input::Action;
 use voxel_game::{ChatState, CommandResult, DeveloperConsole, Hotbar, InputState, PlayerConfig};
@@ -318,7 +318,7 @@ pub(crate) struct GamePlayState {
     pub day_length: f64,
     /// Mouse position in logical UI pixels (physical / ui_scale), for
     /// pause-menu and block-picker hit-testing against UI rects.
-    pub mouse_pos: (f32, f32),
+    pub mouse_pos: Point,
     /// Pre-computed pause-menu button rects (4 buttons: back, options, save&quit, quit).
     pub pause_buttons: Option<[Rect; 4]>,
     /// Chat and command system.
@@ -402,7 +402,7 @@ impl GamePlayState {
             game_state: GameState::TitleScreen,
             game_time: 300.0, // start at dawn
             day_length,
-            mouse_pos: (0.0, 0.0),
+            mouse_pos: Point::default(),
             pause_buttons: None,
             chat: ChatState::default(),
             undo_redo: voxel_game::UndoRedoState::default(),
@@ -719,8 +719,8 @@ pub(crate) struct SliderWidget {
 
 impl SliderWidget {
     /// Value for a pointer position inside the slider bar (clamped to range).
-    pub fn value_at(&self, pos: (f32, f32)) -> f32 {
-        let pct = ((pos.0 - self.rect.x) / self.rect.w).clamp(0.0, 1.0);
+    pub fn value_at(&self, pos: Point) -> f32 {
+        let pct = ((pos.x - self.rect.x) / self.rect.w).clamp(0.0, 1.0);
         self.range.min + pct * (self.range.max - self.range.min)
     }
 }
@@ -1872,7 +1872,7 @@ impl ApplicationHandler for EngineApp {
                 // Track mouse position for UI hit-testing, in logical pixels
                 // (divided by the DPI scale) to match UI layout coordinates.
                 let s = self.render.ui_scale.max(0.25);
-                self.gameplay.mouse_pos = (position.x as f32 / s, position.y as f32 / s);
+                self.gameplay.mouse_pos = Point::new(position.x as f32 / s, position.y as f32 / s);
             }
             WindowEvent::RedrawRequested => {
                 if self.input.running {

@@ -104,6 +104,20 @@ impl Aabb {
     }
 }
 
+/// 2D screen-space point.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Point {
+    #[inline]
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
 /// Axis-aligned 2D rectangle in screen/UI space (x, y, width, height).
 ///
 /// Shared by the render crate's UI primitives and the engine's HUD/menu
@@ -124,8 +138,8 @@ impl Rect {
 
     /// True when `pos` (screen-space) falls inside this rectangle.
     #[inline]
-    pub fn contains(self, pos: (f32, f32)) -> bool {
-        pos.0 >= self.x && pos.0 <= self.x + self.w && pos.1 >= self.y && pos.1 <= self.y + self.h
+    pub fn contains(self, pos: Point) -> bool {
+        pos.x >= self.x && pos.x <= self.x + self.w && pos.y >= self.y && pos.y <= self.y + self.h
     }
 
     /// True when this rectangle overlaps `other` (shares any area).
@@ -265,12 +279,12 @@ mod proptests {
     fn rect_contains_and_intersects() {
         let r = Rect::from_xywh(10.0, 20.0, 30.0, 40.0);
         // Inside / on the inclusive edges.
-        assert!(r.contains((10.0, 20.0)));
-        assert!(r.contains((40.0, 60.0)));
-        assert!(r.contains((25.0, 30.0)));
+        assert!(r.contains(Point::new(10.0, 20.0)));
+        assert!(r.contains(Point::new(40.0, 60.0)));
+        assert!(r.contains(Point::new(25.0, 30.0)));
         // Outside.
-        assert!(!r.contains((9.99, 30.0)));
-        assert!(!r.contains((25.0, 60.01)));
+        assert!(!r.contains(Point::new(9.99, 30.0)));
+        assert!(!r.contains(Point::new(25.0, 60.01)));
 
         let inside = Rect::from_xywh(20.0, 30.0, 5.0, 5.0);
         let overlapping = Rect::from_xywh(35.0, 50.0, 10.0, 10.0);
