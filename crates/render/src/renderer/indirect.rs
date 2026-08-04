@@ -924,7 +924,7 @@ impl GpuDriven {
             if let Some(s) = ch.opaque {
                 cmds[oi] = DrawIndexedIndirectCommand {
                     index_count: s.index_count,
-                    instance_count: 0,
+                    instance_count: 1,
                     first_index: (s.ibo_offset / INDEX_STRIDE) as u32,
                     vertex_offset: (s.vbo_offset / VERTEX_STRIDE) as i32,
                     first_instance: oi as u32,
@@ -936,7 +936,7 @@ impl GpuDriven {
             if let Some(s) = ch.transparent {
                 cmds[ti] = DrawIndexedIndirectCommand {
                     index_count: s.index_count,
-                    instance_count: 0,
+                    instance_count: 1,
                     first_index: (s.ibo_offset / INDEX_STRIDE) as u32,
                     vertex_offset: (s.vbo_offset / VERTEX_STRIDE) as i32,
                     first_instance: ti as u32,
