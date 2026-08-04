@@ -104,6 +104,40 @@ impl Aabb {
     }
 }
 
+/// Axis-aligned 2D rectangle in screen/UI space (x, y, width, height).
+///
+/// Shared by the render crate's UI primitives and the engine's HUD/menu
+/// hit-testing so both crates agree on one rect type.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Rect {
+    #[inline]
+    pub const fn from_xywh(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    /// True when `pos` (screen-space) falls inside this rectangle.
+    #[inline]
+    pub fn contains(self, pos: (f32, f32)) -> bool {
+        pos.0 >= self.x && pos.0 <= self.x + self.w && pos.1 >= self.y && pos.1 <= self.y + self.h
+    }
+
+    /// True when this rectangle overlaps `other` (shares any area).
+    #[inline]
+    pub fn intersects(self, other: Rect) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+}
+
 /// A ray with a normalised direction and a maximum reach.
 #[derive(Clone, Copy, Debug)]
 pub struct Ray {
@@ -225,5 +259,26 @@ mod proptests {
             let aabb = Aabb::new(min, min + size_v);
             prop_assert!(aabb.contains_point(aabb.center()));
         }
+    }
+
+    #[test]
+    fn rect_contains_and_intersects() {
+        let r = Rect::from_xywh(10.0, 20.0, 30.0, 40.0);
+        // Inside / on the inclusive edges.
+        assert!(r.contains((10.0, 20.0)));
+        assert!(r.contains((40.0, 60.0)));
+        assert!(r.contains((25.0, 30.0)));
+        // Outside.
+        assert!(!r.contains((9.99, 30.0)));
+        assert!(!r.contains((25.0, 60.01)));
+
+        let inside = Rect::from_xywh(20.0, 30.0, 5.0, 5.0);
+        let overlapping = Rect::from_xywh(35.0, 50.0, 10.0, 10.0);
+        let touching_edge = Rect::from_xywh(40.0, 20.0, 10.0, 10.0);
+        let disjoint = Rect::from_xywh(50.0, 70.0, 10.0, 10.0);
+        assert!(r.intersects(inside));
+        assert!(r.intersects(overlapping));
+        assert!(!r.intersects(touching_edge)); // edge contact is not overlap
+        assert!(!r.intersects(disjoint));
     }
 }

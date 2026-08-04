@@ -6,7 +6,7 @@
 //! after the chunk pass.
 
 use bytemuck::{Pod, Zeroable};
-use voxel_core::ATLAS_TILE_SIZE;
+use voxel_core::{Rect, ATLAS_TILE_SIZE};
 
 use crate::atlas::{Atlas, ATLAS_TILES};
 
@@ -194,13 +194,8 @@ impl UiDrawData {
     /// across the rect width. `min_y`/`max_y` clamp the range
     /// (None = auto-scale to data). Each segment is drawn as a thin
     /// quad between adjacent points.
-    pub fn line_graph(
-        &mut self,
-        rect: (f32, f32, f32, f32),
-        values: &[f32],
-        style: GraphStyle,
-    ) {
-        let (x, y, w, h) = rect;
+    pub fn line_graph(&mut self, rect: Rect, values: &[f32], style: GraphStyle) {
+        let Rect { x, y, w, h } = rect;
         if values.len() < 2 {
             return;
         }
@@ -261,13 +256,8 @@ impl UiDrawData {
     }
 
     /// Filled area graph. Same as line_graph but filled to the baseline.
-    pub fn area_graph(
-        &mut self,
-        rect: (f32, f32, f32, f32),
-        values: &[f32],
-        style: GraphStyle,
-    ) {
-        let (x, y, w, h) = rect;
+    pub fn area_graph(&mut self, rect: Rect, values: &[f32], style: GraphStyle) {
+        let Rect { x, y, w, h } = rect;
         if values.is_empty() {
             return;
         }
@@ -287,15 +277,8 @@ impl UiDrawData {
     /// Stacked area graph from multiple series. Each series is drawn
     /// as an area graph where the baseline is the cumulative sum of
     /// all previous series.
-    pub fn stacked_area(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        series: &[&[f32]],
-        colors: &[[u8; 4]],
-    ) {
+    pub fn stacked_area(&mut self, rect: Rect, series: &[&[f32]], colors: &[[u8; 4]]) {
+        let Rect { x, y, w, h } = rect;
         if series.is_empty() {
             return;
         }

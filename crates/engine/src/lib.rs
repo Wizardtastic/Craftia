@@ -24,7 +24,8 @@ use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::keybinds::physical_key_to_char;
-use crate::ui::{Rect, SliderRange};
+use crate::ui::SliderRange;
+use voxel_core::Rect;
 
 use voxel_game::input::Action;
 use voxel_game::{ChatState, CommandResult, DeveloperConsole, Hotbar, InputState, PlayerConfig};
@@ -714,6 +715,14 @@ pub(crate) struct SliderWidget {
     pub rect: Rect,
     pub label: String,
     pub range: SliderRange,
+}
+
+impl SliderWidget {
+    /// Value for a pointer position inside the slider bar (clamped to range).
+    pub fn value_at(&self, pos: (f32, f32)) -> f32 {
+        let pct = ((pos.0 - self.rect.x) / self.rect.w).clamp(0.0, 1.0);
+        self.range.min + pct * (self.range.max - self.range.min)
+    }
 }
 
 /// Pre-computed settings toggle widget: toggle rect + label.
