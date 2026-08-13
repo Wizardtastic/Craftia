@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use flume::{unbounded, Receiver, Sender};
@@ -108,6 +109,11 @@ pub struct StreamerStats {
     pub mesh_queue: u32,
     pub pending_remesh: u32,
     pub total_tracked: u32,
+    /// Wall-clock ms spent in generation batches since the last stats read.
+    pub gen_ms: f32,
+    /// Wall-clock ms spent in mesh batches (incl. priority remeshes) since
+    /// the last stats read.
+    pub mesh_ms: f32,
 }
 
 /// Owns the worker thread. Drop shuts it down.
@@ -203,6 +209,10 @@ fn run_worker(
     let mut frustum = None::<Frustum>;
     let mut load_radius = config.load_radius;
     let mut state: HashMap<ChunkPos, State> = HashMap::new();
+    // Wall-clock ms spent generating / meshing since the last `Cmd::Stats`
+    // read; reported in `StreamerStats` and reset there.
+    let mut gen_accum_ms: f32 = 0.0;
+    let mut mesh_accum_ms: f32 = 0.0;
 
     loop {
         // --- drain commands ---
@@ -236,6 +246,10 @@ fn run_worker(
                         }
                     }
                     stats.pending_remesh = remesh_requests.len() as u32;
+                    stats.gen_ms = gen_accum_ms;
+                    stats.mesh_ms = mesh_accum_ms;
+                    gen_accum_ms = 0.0;
+                    mesh_accum_ms = 0.0;
                     let _ = tx.try_send(stats);
                 }
                 Cmd::Shutdown => return,
@@ -297,6 +311,7 @@ fn run_worker(
             for pos in &priority_remesh {
                 state.insert(*pos, State::Meshing);
             }
+            let mesh_t0 = Instant::now();
             let meshes: Vec<(ChunkPos, ChunkMeshBundle)> = pool.install(|| {
                 priority_remesh
                     .par_iter()
@@ -318,8 +333,9 @@ fn run_worker(
                     })
                     .collect()
             });
+            mesh_accum_ms += mesh_t0.elapsed().as_secs_f32() * 1000.0;
             for (pos, bundle) in meshes {
-                world.insert_mesh(pos, bundle.clone());
+                world.insert_mesh(pos);
                 state.insert(pos, State::Meshed);
                 let _ = event_tx.send(ChunkStreamEvent::MeshReady { pos, bundle });
             }
@@ -347,13 +363,18 @@ fn run_worker(
             // closure below is called per ray-step in compute_sunlight, so
             // this avoids a HashMap lookup on every unloaded-chunk query.
             let stone = reg.id_of("stone").unwrap_or(BlockId(2));
+            let gen_t0 = Instant::now();
             let generated: Vec<(ChunkPos, Chunk)> = pool.install(|| {
                 gen_batch
                     .par_iter()
-                    .map(|&pos| {
+                    .filter_map(|&pos| {
                         let mut chunk = Chunk::new(pos);
-                        gen.generate(&mut chunk, &reg);
-                        gen.decorate(&mut chunk, &reg, |wx, wy, wz| {
+                        let columns = gen.column_table(chunk_origin(pos));
+                        if gen.generate(&mut chunk, &reg, &columns).is_err() {
+                            log::error!("chunk generation failed for {pos:?}");
+                            return None;
+                        }
+                        gen.decorate(&mut chunk, &reg, &columns, |wx, wy, wz| {
                             world_for_light.get_block(wx, wy, wz)
                         }, |wx, wy, wz, id| {
                             world_for_light.set_block_no_light(wx, wy, wz, id)
@@ -386,10 +407,11 @@ fn run_worker(
                             world_for_light.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
                             world_for_light.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
                         }
-                        (pos, chunk)
+                        Some((pos, chunk))
                     })
                     .collect()
             });
+            gen_accum_ms += gen_t0.elapsed().as_secs_f32() * 1000.0;
             for (pos, chunk) in generated {
                 world.insert_chunk(pos, chunk);
                 state.insert(pos, State::Generated);
@@ -513,6 +535,7 @@ fn run_worker(
             let reg = reg.clone();
             let mesher = &mesher;
             let sun_dir_for_mesh = sun_dir;
+            let mesh_t0 = Instant::now();
             let meshes: Vec<(ChunkPos, ChunkMeshBundle)> = pool.install(|| {
                 mesh_batch
                     .par_iter()
@@ -534,8 +557,9 @@ fn run_worker(
                     })
                     .collect()
             });
+            mesh_accum_ms += mesh_t0.elapsed().as_secs_f32() * 1000.0;
             for (pos, bundle) in meshes {
-                world.insert_mesh(pos, bundle.clone());
+                world.insert_mesh(pos);
                 state.insert(pos, State::Meshed);
                 let _ = event_tx.send(ChunkStreamEvent::MeshReady { pos, bundle });
             }
@@ -569,6 +593,10 @@ fn run_worker(
                             }
                         }
                         stats.pending_remesh = remesh_requests.len() as u32;
+                        stats.gen_ms = gen_accum_ms;
+                        stats.mesh_ms = mesh_accum_ms;
+                        gen_accum_ms = 0.0;
+                        mesh_accum_ms = 0.0;
                         let _ = tx.try_send(stats);
                     }
                     Cmd::Shutdown => return,
