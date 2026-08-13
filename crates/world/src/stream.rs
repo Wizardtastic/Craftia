@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use glam::Vec3;
 use voxel_core::{
     math::{block_to_chunk, chunk_origin, world_to_block, ChunkPos},
-    Frustum, CHUNK_SIZE,
+    BlockId, Frustum, CHUNK_SIZE,
 };
 
 use crate::{
@@ -340,10 +340,13 @@ fn run_worker(
             })
             .collect();
 
-        if !gen_batch.is_empty() {
-            let gen = gen.clone();
+        if !gen_batch.is_empty() {                    let gen = gen.clone();
             let reg = reg.clone();
             let world_for_light = world.clone();
+            // Cache the stone block ID once per batch — the sample_block
+            // closure below is called per ray-step in compute_sunlight, so
+            // this avoids a HashMap lookup on every unloaded-chunk query.
+            let stone = reg.id_of("stone").unwrap_or(BlockId(2));
             let generated: Vec<(ChunkPos, Chunk)> = pool.install(|| {
                 gen_batch
                     .par_iter()
@@ -361,8 +364,18 @@ fn run_worker(
                             &mut chunk,
                             &reg,
                             sun_dir,
-                            // sample_block: for cross-chunk block lookups
-                            &|wx, wy, wz| world_for_light.get_block(wx, wy, wz),
+                            // sample_block: for cross-chunk block lookups during
+                            // sunlight ray marching. Unloaded chunks are treated as
+                            // opaque to prevent rays from punching through ungenerated
+                            // terrain, which would cause bright-white flashing columns
+                            // at chunk edges.
+                            &|wx, wy, wz| {
+                                if world_for_light.is_block_loaded(wx, wy, wz) {
+                                    world_for_light.get_block(wx, wy, wz)
+                                } else {
+                                    stone
+                                }
+                            },
                             // sample_torchlight: for cross-chunk torchlight
                             &|wx, wy, wz| world_for_light.get_torchlight_world(wx, wy, wz),
                             // cross_chunk_update: collect pending torchlight updates

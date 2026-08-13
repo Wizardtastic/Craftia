@@ -274,26 +274,34 @@ fn build_mask_cell(
         return EMPTY_CELL;
     }
     let n = face.normal();
-    let nlx = lx + n.x;
-    let nly = ly + n.y;
-    let nlz = lz + n.z;
-    let neighbour = if nlx >= 0
-        && nlx < CHUNK_SIZE
-        && nly >= 0
-        && nly < CHUNK_SIZE
-        && nlz >= 0
-        && nlz < CHUNK_SIZE
-    {
-        chunk.get(nlx, nly, nlz)
-    } else {
-        sample(wx + n.x, wy + n.y, wz + n.z)
-    };
-    let neighbour_def = reg.get(neighbour);
-    if neighbour_def.opaque {
-        return EMPTY_CELL;
-    }
-    if !neighbour.is_air() && neighbour_def.kind == def.kind {
-        return EMPTY_CELL;
+    // For NegX / NegZ / NegY faces at chunk borders, should_emit_face
+    // already verified the neighbour is air or not loaded — the
+    // neighbour-sample + opaque check below would be a no-op. Skip it.
+    let is_neg_border = (face == Face::NegX && lx == 0)
+        || (face == Face::NegZ && lz == 0)
+        || (face == Face::NegY && ly == 0 && chunk.pos.y() > 0);
+    if !is_neg_border {
+        let nlx = lx + n.x;
+        let nly = ly + n.y;
+        let nlz = lz + n.z;
+        let neighbour = if nlx >= 0
+            && nlx < CHUNK_SIZE
+            && nly >= 0
+            && nly < CHUNK_SIZE
+            && nlz >= 0
+            && nlz < CHUNK_SIZE
+        {
+            chunk.get(nlx, nly, nlz)
+        } else {
+            sample(wx + n.x, wy + n.y, wz + n.z)
+        };
+        let neighbour_def = reg.get(neighbour);
+        if neighbour_def.opaque {
+            return EMPTY_CELL;
+        }
+        if !neighbour.is_air() && neighbour_def.kind == def.kind {
+            return EMPTY_CELL;
+        }
     }
     let face_normal = IVec3::new(n.x, n.y, n.z);
     let corners = FACE_CORNERS[fi_from_face(face)];
@@ -376,7 +384,7 @@ fn should_emit_face(
     ly: i32,
     lz: i32,
     chunk: &Chunk,
-    reg: &BlockRegistry,
+    _reg: &BlockRegistry,
     sample: &impl Fn(i32, i32, i32) -> BlockId,
     sample_loaded: &impl Fn(i32, i32, i32) -> bool,
 ) -> bool {
@@ -385,19 +393,33 @@ fn should_emit_face(
     let wy = origin.y + ly;
     let wz = origin.z + lz;
     let n = face.normal();
+    // Chunk-border face ownership convention: for each pair of adjacent
+    // chunks, the chunk on the NEGATIVE side (lower coordinate) owns the
+    // border face. This chunk is on the POSITIVE side, so its NegX / NegZ /
+    // NegY faces must be suppressed whenever the owning neighbour is
+    // loaded AND has a non-air block there — the neighbour's PosX face
+    // handles rendering.
+    //
+    // When the neighbour block IS air the positive-side PosX face isn't
+    // emitted (air blocks are skipped), so WE must emit the NegX face.
+    //
+    // The old code only suppressed when the neighbour was opaque, which
+    // left both chunks emitting the same face for air/transparent
+    // neighbours — causing GPU Z-fighting (constant flickering/flashing).
     match face {
         Face::NegX if lx == 0 => {
             if sample_loaded(wx - 1, wy, wz) {
                 let nb = sample(wx + n.x, wy + n.y, wz + n.z);
-                if reg.get(nb).opaque {
-                    return false;
+                if !nb.is_air() {
+                    return false; // neighbour has a real block — it owns the face
                 }
+                // neighbour is air — we must emit (positive side won't)
             }
         }
         Face::NegZ if lz == 0 => {
             if sample_loaded(wx, wy, wz - 1) {
                 let nb = sample(wx + n.x, wy + n.y, wz + n.z);
-                if reg.get(nb).opaque {
+                if !nb.is_air() {
                     return false;
                 }
             }
@@ -405,7 +427,7 @@ fn should_emit_face(
         Face::NegY if ly == 0 && chunk.pos.y() > 0 => {
             if sample_loaded(wx, wy - 1, wz) {
                 let nb = sample(wx + n.x, wy + n.y, wz + n.z);
-                if reg.get(nb).opaque {
+                if !nb.is_air() {
                     return false;
                 }
             }
@@ -786,7 +808,18 @@ fn emit_water_block(
             continue;
         }
         let n = face.normal();
-        let neighbour = sample(wx + n.x, wy + n.y, wz + n.z);
+        // For NegX / NegZ / NegY faces at chunk borders, should_emit_face
+        // already verified the neighbour is air or not loaded. Skip the
+        // redundant cross-chunk sample — use AIR as a dummy since all
+        // checks below (opaque, same-liquid, solid) are no-ops for air.
+        let is_neg_border = (*face == Face::NegX && lx == 0)
+            || (*face == Face::NegZ && lz == 0)
+            || (*face == Face::NegY && ly == 0 && chunk.pos.y() > 0);
+        let neighbour = if is_neg_border {
+            BlockId::AIR
+        } else {
+            sample(wx + n.x, wy + n.y, wz + n.z)
+        };
         let neighbour_def = reg.get(neighbour);
         if neighbour_def.opaque {
             continue;
