@@ -49,10 +49,7 @@ pub enum InterpolationMethod {
 }
 
 /// Read a float accessor into a Vec<f32>.
-fn read_accessor_f32(
-    accessor: &gltf::Accessor,
-    buffers: &[gltf::buffer::Data],
-) -> Vec<f32> {
+fn read_accessor_f32(accessor: &gltf::Accessor, buffers: &[gltf::buffer::Data]) -> Vec<f32> {
     let view = match accessor.view() {
         Some(v) => v,
         None => return Vec::new(),
@@ -79,10 +76,7 @@ fn read_accessor_f32(
 
 /// Read a Vec3 accessor into Vec<[f32; 3]>.
 #[allow(dead_code)]
-fn read_accessor_vec3(
-    accessor: &gltf::Accessor,
-    buffers: &[gltf::buffer::Data],
-) -> Vec<[f32; 3]> {
+fn read_accessor_vec3(accessor: &gltf::Accessor, buffers: &[gltf::buffer::Data]) -> Vec<[f32; 3]> {
     let view = match accessor.view() {
         Some(v) => v,
         None => return Vec::new(),
@@ -120,10 +114,7 @@ fn read_accessor_vec3(
 }
 
 /// Read a Vec4 accessor into Vec<[f32; 4]>.
-fn read_accessor_vec4(
-    accessor: &gltf::Accessor,
-    buffers: &[gltf::buffer::Data],
-) -> Vec<[f32; 4]> {
+fn read_accessor_vec4(accessor: &gltf::Accessor, buffers: &[gltf::buffer::Data]) -> Vec<[f32; 4]> {
     let view = match accessor.view() {
         Some(v) => v,
         None => return Vec::new(),

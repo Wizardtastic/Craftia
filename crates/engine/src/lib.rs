@@ -1,4 +1,4 @@
-//! `voxel-engine` ΓÇö application shell.
+//! `voxel-engine` — application shell.
 //!
 //! Owns the winit window, the Vulkan [`Renderer`], the shared [`World`], the
 //! background [`ChunkStreamer`], and the gameplay state ([`Player`], [`Hotbar`],
@@ -24,6 +24,8 @@ use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::keybinds::physical_key_to_char;
+use crate::ui::SliderRange;
+use voxel_core::{Point, Rect};
 
 use voxel_game::input::Action;
 use voxel_game::{ChatState, CommandResult, DeveloperConsole, Hotbar, InputState, PlayerConfig};
@@ -49,15 +51,15 @@ mod ui;
 /// routed. The flow is:
 ///
 /// ```text
-/// TitleScreen ΓöÇΓöÇSingleplayerΓöÇΓöÇΓåÆ WorldSelect ΓöÇΓöÇPick WorldΓöÇΓöÇΓåÆ Playing
+/// TitleScreen ──Singleplayer──ΓåÆ WorldSelect ──Pick World──ΓåÆ Playing
 ///      Γöé                            Γöé
-///      Γö£ΓöÇΓöÇOptionsΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓåÆ SettingsMenu ΓåÉΓöÇΓöÇΓöÉ
-///      ΓööΓöÇΓöÇQuitΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓåÆ exit            Γöé
+///      Γö£──Options──────ΓåÆ SettingsMenu ΓåÉ──ΓöÉ
+///      Γöö──Quit─────────ΓåÆ exit            Γöé
 ///                                        Γöé
-/// Playing ΓöÇΓöÇEscapeΓöÇΓöÇΓåÆ PauseMenu ΓöÇΓöÇBack to GameΓöÇΓöÇΓåÆ Playing
-///                             Γö£ΓöÇΓöÇOptionsΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓåÆ SettingsMenu
-///                             Γö£ΓöÇΓöÇSave & Quit to TitleΓöÇΓöÇΓåÆ TitleScreen
-///                             ΓööΓöÇΓöÇQuit GameΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓåÆ exit
+/// Playing ──Escape──ΓåÆ PauseMenu ──Back to Game──ΓåÆ Playing
+///                             Γö£──Options──────────────ΓåÆ SettingsMenu
+///                             Γö£──Save & Quit to Title──ΓåÆ TitleScreen
+///                             Γöö──Quit Game─────────────ΓåÆ exit
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GameState {
@@ -151,6 +153,11 @@ struct RenderState {
     pub renderer: Option<Renderer>,
     pub window: Option<Window>,
     pub window_size: (u32, u32),
+    /// Monitor DPI scale factor of the window (e.g. 1.0 = 100%, 2.0 = 200%
+    /// HiDPI). UI is laid out in *logical* pixels (`window_size / ui_scale`)
+    /// and vertex positions are multiplied back by `ui_scale` before upload,
+    /// so HUD/menus stay the same physical size on high-DPI displays.
+    pub ui_scale: f32,
     pub font: FontAtlas,
 }
 
@@ -160,13 +167,22 @@ impl RenderState {
             renderer: None,
             window: None,
             window_size: (1280, 720),
+            ui_scale: 1.0,
             font: FontAtlas::new(),
         }
     }
 
-    fn resize(&mut self) {
+    /// Logical (DPI-independent) UI size in pixels: the physical window size
+    /// divided by the monitor scale factor. All UI layout happens in this
+    /// space so the HUD/menus render at a consistent size on HiDPI displays.
+    fn logical_size(&self) -> (f32, f32) {
+        let s = self.ui_scale.max(0.25);
+        (self.window_size.0 as f32 / s, self.window_size.1 as f32 / s)
+    }
+
+    fn resize(&mut self, size: (u32, u32)) {
         if let Some(r) = self.renderer.as_mut() {
-            r.resize();
+            r.resize(size);
         }
     }
 }
@@ -300,10 +316,11 @@ pub(crate) struct GamePlayState {
     pub game_time: f64,
     /// Length of a full day/night cycle in seconds.
     pub day_length: f64,
-    /// Mouse position in physical pixels (for pause-menu and block-picker hit-testing).
-    pub mouse_pos: (f32, f32),
+    /// Mouse position in logical UI pixels (physical / ui_scale), for
+    /// pause-menu and block-picker hit-testing against UI rects.
+    pub mouse_pos: Point,
     /// Pre-computed pause-menu button rects (4 buttons: back, options, save&quit, quit).
-    pub pause_buttons: Option<[(f32, f32, f32, f32); 4]>,
+    pub pause_buttons: Option<[Rect; 4]>,
     /// Chat and command system.
     pub chat: ChatState,
     /// Undo/redo stack for block edits.
@@ -333,7 +350,7 @@ pub(crate) struct GamePlayState {
     /// Minimap / fullscreen map state.
     pub map: map::MapState,
     /// Title screen / world select / settings fields.
-    pub title_buttons: Option<[(f32, f32, f32, f32); 4]>,
+    pub title_buttons: Option<[Rect; 4]>,
     pub world_list: Vec<save::WorldInfo>,
     pub selected_world_index: Option<usize>,
     pub world_select_buttons: Option<WorldSelectButtons>,
@@ -342,7 +359,7 @@ pub(crate) struct GamePlayState {
     pub listening_rebind: Option<usize>,
     pub current_world_path: Option<std::path::PathBuf>,
     pub panorama_rotation: f32,
-    pub settings_back_btn: Option<(f32, f32, f32, f32)>,
+    pub settings_back_btn: Option<Rect>,
     pub last_click_time: Option<std::time::Instant>,
     pub last_click_row: Option<usize>,
     pub pending_delete: Option<usize>,
@@ -353,12 +370,9 @@ pub(crate) struct GamePlayState {
     /// Whether the left mouse button is currently held in the settings menu.
     pub settings_left_mouse_held: bool,
     pub cheats_enabled: bool,
-    pub death_buttons: Option<((f32, f32, f32, f32), (f32, f32, f32, f32))>,
     // Visual polish state
     pub looked_at_block: Option<[i32; 3]>,
     pub mining_crack: Option<([i32; 3], u8)>,
-    #[allow(dead_code)]
-    pub mining_swing_timer: Option<f32>,
     pub crosshair_mode: CrosshairMode,
     // Creative inventory
     pub creative_items: Vec<CreativeItem>,
@@ -370,14 +384,14 @@ pub(crate) struct GamePlayState {
 /// Pre-computed interactive widget rects from the settings menu draw pass.
 #[derive(Clone, Debug)]
 pub(crate) struct SettingsWidgets {
-    /// (x, y, w, h) for each slider: render_distance, fog_distance, exposure,
-    /// mouse_sensitivity, walk_speed, fly_speed
-    pub sliders: Vec<(f32, f32, f32, f32, String, f32, f32)>, // x, y, w, h, label, min, max
-    /// (x, y, w, h) for each toggle: vsync, shadows, vignette
-    pub toggles: Vec<(f32, f32, f32, f32, String)>, // x, y, w, h, label
+    /// Pre-computed slider widgets (bar rect + label + range):
+    /// render_distance, fog_distance, exposure, mouse_sensitivity, walk_speed, fly_speed
+    pub sliders: Vec<SliderWidget>,
+    /// Pre-computed toggle widgets (rect + label): vsync, shadows, vignette
+    pub toggles: Vec<ToggleWidget>,
     /// Apply / Defaults button rects
-    pub apply_btn: (f32, f32, f32, f32),
-    pub defaults_btn: (f32, f32, f32, f32),
+    pub apply_btn: Rect,
+    pub defaults_btn: Rect,
 }
 
 impl GamePlayState {
@@ -388,7 +402,7 @@ impl GamePlayState {
             game_state: GameState::TitleScreen,
             game_time: 300.0, // start at dawn
             day_length,
-            mouse_pos: (0.0, 0.0),
+            mouse_pos: Point::default(),
             pause_buttons: None,
             chat: ChatState::default(),
             undo_redo: voxel_game::UndoRedoState::default(),
@@ -422,14 +436,12 @@ impl GamePlayState {
             settings_slider_dragging: None,
             settings_left_mouse_held: false,
             cheats_enabled: false,
-            death_buttons: None,
             creative_items: Vec::new(),
             creative_tab: 0,
             creative_search: String::new(),
             creative_scroll: 0,
             looked_at_block: None,
             mining_crack: None,
-            mining_swing_timer: None,
             crosshair_mode: CrosshairMode::Default,
         }
     }
@@ -536,16 +548,16 @@ fn categorize_block(name: &str, def: &voxel_world::registry::BlockDef) -> String
 /// Pre-computed button rects for the world selection screen.
 #[derive(Clone, Debug)]
 pub(crate) struct WorldSelectButtons {
-    /// Per-world row rects: (x, y, w, h) for each world entry.
-    pub rows: Vec<(f32, f32, f32, f32)>,
+    /// Per-world row rects for each world entry.
+    pub rows: Vec<Rect>,
     /// Delete button rects parallel to `rows`.
-    pub delete_buttons: Vec<(f32, f32, f32, f32)>,
+    pub delete_buttons: Vec<Rect>,
     /// "Create New World" button.
-    pub create_btn: (f32, f32, f32, f32),
+    pub create_btn: Rect,
     /// "Play Selected World" button.
-    pub play_btn: (f32, f32, f32, f32),
+    pub play_btn: Rect,
     /// "Close" button.
-    pub close_btn: (f32, f32, f32, f32),
+    pub close_btn: Rect,
 }
 
 /// State for the create-world mini-dialog.
@@ -564,13 +576,13 @@ pub(crate) struct CreateWorldState {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CreateWorldRects {
-    pub name_input: (f32, f32, f32, f32),
-    pub seed_input: (f32, f32, f32, f32),
-    pub cancel_btn: (f32, f32, f32, f32),
-    pub create_btn: (f32, f32, f32, f32),
-    pub mode_survival: (f32, f32, f32, f32),
-    pub mode_creative: (f32, f32, f32, f32),
-    pub cheats_toggle: (f32, f32, f32, f32),
+    pub name_input: Rect,
+    pub seed_input: Rect,
+    pub cancel_btn: Rect,
+    pub create_btn: Rect,
+    pub mode_survival: Rect,
+    pub mode_creative: Rect,
+    pub cheats_toggle: Rect,
 }
 
 impl Default for CreateWorldState {
@@ -695,7 +707,58 @@ pub fn run(config: EngineConfig) -> Result<()> {
 }
 
 /// Schematic clipboard: origin corner, opposite corner, flattened block list.
-type Clipboard = ((i32, i32, i32), (i32, i32, i32), Vec<voxel_core::BlockId>);
+pub(crate) type Clipboard = ((i32, i32, i32), (i32, i32, i32), Vec<voxel_core::BlockId>);
+
+/// Pre-computed settings slider widget: slider-bar rect, label and value range.
+#[derive(Clone, Debug)]
+pub(crate) struct SliderWidget {
+    pub rect: Rect,
+    pub label: String,
+    pub range: SliderRange,
+}
+
+impl SliderWidget {
+    /// Value for a pointer position inside the slider bar (clamped to range).
+    pub fn value_at(&self, pos: Point) -> f32 {
+        let pct = ((pos.x - self.rect.x) / self.rect.w).clamp(0.0, 1.0);
+        self.range.min + pct * (self.range.max - self.range.min)
+    }
+}
+
+/// Pre-computed settings toggle widget: toggle rect + label.
+#[derive(Clone, Debug)]
+pub(crate) struct ToggleWidget {
+    pub rect: Rect,
+    pub label: String,
+}
+
+/// Manages loaded texture packs and their UI state.
+#[derive(Default)]
+pub struct TexturePackManager {
+    /// Currently loaded texture packs (in load order).
+    pub loaded_packs: Vec<TexturePackInfo>,
+    /// Whether the pack manager panel is open.
+    pub panel_open: bool,
+}
+
+/// Info about a loaded texture pack, displayed in the UI.
+#[derive(Clone, Debug)]
+pub struct TexturePackInfo {
+    /// Display name.
+    pub name: String,
+    /// Description from pack.toml.
+    pub description: String,
+    /// Version from pack.toml.
+    pub version: String,
+    /// Author from pack.toml.
+    pub author: String,
+    /// Number of overridden tiles.
+    pub tile_count: usize,
+    /// Number of animation definitions.
+    pub animation_count: usize,
+    /// Whether this pack is currently enabled.
+    pub enabled: bool,
+}
 
 pub(crate) struct EngineApp {
     config: EngineConfig,
@@ -726,13 +789,15 @@ pub(crate) struct EngineApp {
     sysinfo: sysinfo::System,
     /// Counter to throttle sysinfo refreshes (every N frames).
     sysinfo_refresh_counter: u32,
+    /// Texture pack manager: tracks loaded packs and their metadata.
+    texture_pack_manager: TexturePackManager,
 }
 
 impl EngineApp {
     fn new(config: EngineConfig) -> Result<Self> {
         let world = World::new_with_path(config.seed, config.assets_path.as_deref());
         // Find a land spawn (above sea level) using the height function directly
-        // ΓÇö no chunk loading needed. Falls back to a high spawn at origin.
+        // — no chunk loading needed. Falls back to a high spawn at origin.
         let (sx, sy, sz) = world.terrain().find_spawn();
         let spawn = config
             .spawn
@@ -845,6 +910,7 @@ impl EngineApp {
             audio: voxel_audio::AudioManager::null(),
             sysinfo: sysinfo::System::new(),
             sysinfo_refresh_counter: 0,
+            texture_pack_manager: TexturePackManager::default(),
         })
     }
 
@@ -1036,6 +1102,9 @@ impl ApplicationHandler for EngineApp {
                 return;
             }
         };
+        // Capture the initial DPI scale factor (HiDPI laptops report > 1.0)
+        // so the HUD/menus lay out in logical pixels from the first frame.
+        self.render.ui_scale = window.scale_factor().max(0.25) as f32;
         self.render.window = Some(window);
 
         // Build the renderer from the window's raw handles.
@@ -1057,9 +1126,32 @@ impl ApplicationHandler for EngineApp {
                     return;
                 }
             };
-            match Renderer::new(wh, dh, self.config.render.clone()) {
+            // Query the actual physical window size: on Wayland the
+            // compositor may assign a size different from the requested one,
+            // and the swapchain must match whatever the window really is.
+            let window_size = window.inner_size();
+            match Renderer::new(
+                wh,
+                dh,
+                self.config.render.clone(),
+                (window_size.width, window_size.height),
+            ) {
                 Ok(r) => {
                     self.render.window_size = (r.extent().width, r.extent().height);
+                    // Populate texture pack manager from initial renderer pack info.
+                    self.texture_pack_manager.loaded_packs = r
+                        .pack_infos()
+                        .iter()
+                        .map(|p| crate::TexturePackInfo {
+                            name: p.name.clone(),
+                            description: p.description.clone(),
+                            version: p.version.clone(),
+                            author: p.author.clone(),
+                            tile_count: p.tile_count,
+                            animation_count: p.animation_count,
+                            enabled: p.enabled,
+                        })
+                        .collect();
                     self.render.renderer = Some(r);
                 }
                 Err(e) => {
@@ -1087,7 +1179,7 @@ impl ApplicationHandler for EngineApp {
             }
         }
 
-        // Start on the title screen ΓÇö don't lock cursor or start sim yet.
+        // Start on the title screen — don't lock cursor or start sim yet.
         // The chunk streamer runs in the background so terrain is ready
         // when the player clicks "Play".
         self.input.running = true;
@@ -1100,8 +1192,14 @@ impl ApplicationHandler for EngineApp {
         // when it is None, so a textures-only workflow works as well.
         let shader_dir = self.config.render.shader_dir.clone();
         let textures_dir = self.config.render.textures_dir.clone();
+        let texture_packs_dir = self.config.render.texture_packs_dir.clone();
         let config_path = self.config.config_path.clone();
-        self.hot_reload = Some(FileWatcher::new(shader_dir, textures_dir, config_path));
+        self.hot_reload = Some(FileWatcher::new(
+            shader_dir,
+            textures_dir,
+            texture_packs_dir,
+            config_path,
+        ));
         log::info!(
             "file-watcher: active (config = {})",
             self.config.config_path.display()
@@ -1128,9 +1226,19 @@ impl ApplicationHandler for EngineApp {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // DPI changed (e.g. the window moved between monitors).
+                // Update the UI scale; the next redraw re-lays-out the HUD
+                // at the new scale. The physical window size is unchanged
+                // (the existing `Resized` path handles any swapchain work).
+                self.render.ui_scale = scale_factor.max(0.25) as f32;
+                if let Some(w) = &self.render.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 self.render.window_size = (size.width, size.height);
-                self.render.resize();
+                self.render.resize((size.width, size.height));
             }
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -1529,8 +1637,8 @@ impl ApplicationHandler for EngineApp {
                                         }
                                     }
                                 }
-                                Action::FullscreenMap => {
-                                    if self.gameplay.game_state == GameState::Playing {
+                                Action::FullscreenMap
+                                    if self.gameplay.game_state == GameState::Playing => {
                                         self.gameplay.map.fullscreen_open = !self.gameplay.map.fullscreen_open;
                                         if self.gameplay.map.fullscreen_open {
                                             self.unlock_cursor();
@@ -1538,12 +1646,11 @@ impl ApplicationHandler for EngineApp {
                                             self.lock_cursor();
                                         }
                                     }
-                                }
                                 _ => {}
                             }
                         }
                     }
-                    // Hotbar slot selection (Digit1-9) ΓÇö always hardcoded.
+                    // Hotbar slot selection (Digit1-9) — always hardcoded.
                     if pressed {
                         let slot = match code {
                             KeyCode::Digit1 => Some(0),
@@ -1678,10 +1785,7 @@ impl ApplicationHandler for EngineApp {
                         // clicks for UI interaction instead of re-locking the cursor.
                         if !self.input.cursor_locked && pressed {
                             if self.gameplay.edit.mode.is_active() {
-                                match button {
-                                    MouseButton::Left => self.gameplay.edit.ui_click = true,
-                                    _ => {}
-                                }
+                                if button == MouseButton::Left { self.gameplay.edit.ui_click = true }
                                 return;
                             }
                             // If the block picker (creative inventory) is open,
@@ -1734,14 +1838,13 @@ impl ApplicationHandler for EngineApp {
                             }
                         }
                         // Track left-mouse held state for slider dragging.
-                        if self.gameplay.game_state == GameState::SettingsMenu {
-                            if button == MouseButton::Left {
+                        if self.gameplay.game_state == GameState::SettingsMenu
+                            && button == MouseButton::Left {
                                 self.gameplay.settings_left_mouse_held = pressed;
                                 if !pressed {
                                     self.gameplay.settings_slider_dragging = None;
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -1766,8 +1869,10 @@ impl ApplicationHandler for EngineApp {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                // Track mouse position for pause-menu button hit-testing.
-                self.gameplay.mouse_pos = (position.x as f32, position.y as f32);
+                // Track mouse position for UI hit-testing, in logical pixels
+                // (divided by the DPI scale) to match UI layout coordinates.
+                let s = self.render.ui_scale.max(0.25);
+                self.gameplay.mouse_pos = Point::new(position.x as f32 / s, position.y as f32 / s);
             }
             WindowEvent::RedrawRequested => {
                 if self.input.running {
@@ -1775,7 +1880,7 @@ impl ApplicationHandler for EngineApp {
                 }
             }
             WindowEvent::Focused(false)
-                // Auto-pause when the window loses focus ΓÇö but not in capture
+                // Auto-pause when the window loses focus — but not in capture
                 // mode (headless verification), where the window may not have focus.
                 if self.gameplay.game_state == GameState::Playing
                     && self.config.capture_after_frames.is_none() =>
@@ -1829,13 +1934,13 @@ mod eol_invariant {
     //! Walk every `crates/**/*.rs` file (excluding `target/`) and assert:
     //!   * valid UTF-8 (catches Windows-cp1252 leaks like `0x97` em-dash
     //!     that rustc's UTF-8 reader rejects at parse time)
-    //!   * no bare `\r` byte (catches CRLF re-introduction ΓÇö Rust raw
+    //!   * no bare `\r` byte (catches CRLF re-introduction — Rust raw
     //!     strings `r"\r"` reject bare CRs at parse time)
     //!
     //! Policy is enforced at three layers:
     //!   1. `.gitattributes` (`eol=lf` on git checkout)
     //!   2. `.editorconfig` (`end_of_line = lf` at editor save time)
-    //!   3. **this test** ΓÇö runs as part of `cargo test --workspace`
+    //!   3. **this test** — runs as part of `cargo test --workspace`
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -1882,7 +1987,7 @@ mod eol_invariant {
     // do NOT switch back to legacy `\u2014` without re-validating
     // against rustc 1.96. The `mod eol_invariant` `//!` doc-comment
     // above intentionally uses raw UTF-8 em-dash bytes instead of
-    // `\u{2014}` ΓÇö doc comments don't trigger the panic-string parse
+    // `\u{2014}` — doc comments don't trigger the panic-string parse
     // state, so either form works there; lazy uniformity didn't seem
     // worth a forced refactor. `docs/notes/u2014_repro.md` records the
     // 8-case empirical matrix that drove this form choice.

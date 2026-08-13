@@ -30,7 +30,11 @@ impl SoundRegistry {
             return Self { sounds };
         }
         Self::load_recursive(audio_dir, audio_dir, &mut sounds);
-        log::info!("Loaded {} sounds from {}", sounds.len(), audio_dir.display());
+        log::info!(
+            "Loaded {} sounds from {}",
+            sounds.len(),
+            audio_dir.display()
+        );
         Self { sounds }
     }
 
@@ -78,6 +82,11 @@ impl SoundRegistry {
     /// Number of loaded sounds.
     pub fn len(&self) -> usize {
         self.sounds.len()
+    }
+
+    /// Whether no sounds are loaded.
+    pub fn is_empty(&self) -> bool {
+        self.sounds.is_empty()
     }
 
     /// Reload a specific sound from disk.

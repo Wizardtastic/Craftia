@@ -1,10 +1,10 @@
-//! `Simulation` ΓÇö headless ECS-driven gameplay step.
+//! `Simulation` — headless ECS-driven gameplay step.
 //!
 //! Owns the ECS world, the compiled system schedule, and a clone of the
 //! `Arc<World>` the simulation should query blocks from. EngineApp composes
 //! a `Simulation` alongside its rendering / input machinery; the
 //! `TestSim` test harness composes one without a window. The split lets
-//! gameplay logic run standalone ΓÇö no GPU, no winit, no event loop.
+//! gameplay logic run standalone — no GPU, no winit, no event loop.
 //!
 //! Tick flow:
 //!
@@ -17,7 +17,7 @@
 //!     Γû╝                              Γû╝
 //!   tick_fixed(frame_dt)          tick_fixed(FIXED_DT ├ù N)
 //!     Γöé                              Γöé
-//!     ΓööΓöÇΓû║  while acc >= FIXED_DT: ΓöÇΓöÿ
+//!     Γöö─Γû║  while acc >= FIXED_DT: ─Γöÿ
 //!           step(FIXED_DT):
 //!             sched.run(&mut ecs, FIXED_DT)
 //!             world.tick_water(FIXED_DT)
@@ -25,6 +25,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use glam::Vec3;
 use voxel_core::ChunkPos;
@@ -126,6 +127,9 @@ pub struct Simulation {
     /// `tick_fixed`. Owned by `Simulation` so the engine no longer
     /// threads a per-frame double through `EngineInputState`.
     sim_accumulator: f64,
+    /// Wall-clock ms spent in `tick_water` across fixed steps since the
+    /// last `take_water_tick_ms` read (fed to the telemetry dashboard).
+    water_tick_ms: f32,
 }
 
 impl Simulation {
@@ -145,8 +149,10 @@ impl Simulation {
     pub fn new(world: Arc<World>, spawn_pos: Vec3, with_timing: bool) -> Self {
         // ECS world + default camera + default input snapshot.
         let mut ecs_world = EcsWorld::new();
-        let mut initial_camera = voxel_core::Camera::default();
-        initial_camera.pos = spawn_pos + glam::Vec3::new(0.0, voxel_game::EYE_HEIGHT, 0.0);
+        let initial_camera = voxel_core::Camera {
+            pos: spawn_pos + glam::Vec3::new(0.0, voxel_game::EYE_HEIGHT, 0.0),
+            ..Default::default()
+        };
         ecs_world.insert_resource(CameraResource(initial_camera));
         ecs_world.insert_resource(InputResource(InputSnapshot::default()));
         // Install the physics world once. The world Arc is constant for
@@ -155,7 +161,7 @@ impl Simulation {
         ecs_world.insert_resource(PhysicsWorldRes(world.clone()));
         ecs_world.insert_resource(ChildMapResource::default());
 
-        // Debug formatters ΓÇö must run before any spawn so the
+        // Debug formatters — must run before any spawn so the
         // archetype-creation `ensure_registered` lookup has the
         // short-name fns ready.
         ecs_world.register_debug_formatter::<Transform>();
@@ -260,6 +266,7 @@ impl Simulation {
             schedule: Some(schedule),
             world,
             sim_accumulator: 0.0,
+            water_tick_ms: 0.0,
         }
     }
 
@@ -292,7 +299,7 @@ impl Simulation {
     /// an entire `tick_fixed` run.
     ///
     /// The `PhysicsWorldRes` is installed once in [`Simulation::new`]
-    /// and never re-inserted ΓÇö the world Arc is constant for a
+    /// and never re-inserted — the world Arc is constant for a
     /// `Simulation`'s lifetime.
     pub fn set_player_input(&mut self, snap: InputSnapshot) {
         // Accumulate any unconsumed mouse delta from a previous frame that had
@@ -311,7 +318,7 @@ impl Simulation {
         self.ecs_world.insert_resource(InputResource(snap));
     }
 
-    /// Run one fixed-timestep step. Inserts nothing ΓÇö the caller is
+    /// Run one fixed-timestep step. Inserts nothing — the caller is
     /// expected to have called `set_player_input` once for the
     /// surrounding frame. Schedules the gameplay systems and ticks
     /// the water simulation.
@@ -325,9 +332,21 @@ impl Simulation {
         }
         // Drive incremental water flow. Internal accumulator means
         // the rate is governed by elapsed wall-clock seconds, not by
-        // step frequency ΓÇö calling per fixed step vs per frame is
+        // step frequency — calling per fixed step vs per frame is
         // equivalent for the simulation itself.
-        self.world.tick_water(dt as f32)
+        let t0 = Instant::now();
+        let affected = self.world.tick_water(dt as f32);
+        self.water_tick_ms += t0.elapsed().as_secs_f32() * 1000.0;
+        affected
+    }
+
+    /// Wall-clock ms spent in `tick_water` across all fixed steps since the
+    /// last call. Returns and resets the accumulator so the engine can
+    /// report a per-frame water-sim duration.
+    pub fn take_water_tick_ms(&mut self) -> f32 {
+        let v = self.water_tick_ms;
+        self.water_tick_ms = 0.0;
+        v
     }
 
     /// Accumulate `frame_dt` and run as many fixed steps as needed
@@ -433,22 +452,9 @@ impl Simulation {
     /// Overwrite the player's camera (position + yaw/pitch) in the ECS.
     /// Used by the auto-capture camera override for deterministic
     /// verification screenshots.
-    #[allow(dead_code)]
     pub fn set_player_camera(&mut self, cam: voxel_core::Camera) {
         if let Some(r) = self.ecs_world.resource_mut::<CameraResource>() {
             r.0 = cam;
-        }
-    }
-
-    /// Set the player's look direction (yaw/pitch in radians, camera
-    /// convention) by writing the entity `Transform` rotation. The camera
-    /// system picks it up on the next tick via
-    /// `update_camera_from_transform`.
-    pub fn set_player_rotation(&mut self, yaw: f32, pitch: f32) {
-        if let Some(e) = self.player_entity() {
-            if let Some(t) = self.ecs_world.get_mut::<Transform>(e) {
-                t.rot = glam::Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, 0.0);
-            }
         }
     }
 
@@ -457,8 +463,8 @@ impl Simulation {
     /// borrows in a single expression).
     pub fn player_transform_state(&self) -> Option<(Transform, PlayerState)> {
         let e = self.player_entity()?;
-        let t = self.ecs_world.get::<Transform>(e)?.clone();
-        let s = self.ecs_world.get::<PlayerState>(e)?.clone();
+        let t = *self.ecs_world.get::<Transform>(e)?;
+        let s = *self.ecs_world.get::<PlayerState>(e)?;
         Some((t, s))
     }
 
@@ -474,7 +480,7 @@ impl Simulation {
         &self.ecs_world
     }
 
-    /// Mutable borrow of the ECS world. Use sparingly ΓÇö the schedule
+    /// Mutable borrow of the ECS world. Use sparingly — the schedule
     /// owns most mutations; this is for tests and the inspector.
     pub fn ecs_world_mut(&mut self) -> &mut EcsWorld {
         &mut self.ecs_world

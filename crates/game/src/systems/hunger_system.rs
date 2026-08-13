@@ -5,10 +5,10 @@
 //! 2. When exhaustion reaches 4, decays saturation then food
 //! 3. Deals starvation damage when food == 0
 
-use voxel_ecs::World;
 use voxel_combat::{DamageEvent, DamageQueue, DamageSource};
+use voxel_ecs::World;
 use voxel_gamemode::GameMode;
-use voxel_hunger::{Difficulty, Hunger, exhaustion};
+use voxel_hunger::{exhaustion, Difficulty, Hunger};
 
 use crate::components::{PlayerEntity, PlayerInput, PlayerState, Velocity};
 
@@ -27,22 +27,40 @@ pub fn hunger_system(world: &mut World, _dt: f32) {
         None => return,
     };
 
-    let game_mode = world.get::<GameMode>(player_entity).copied().unwrap_or(GameMode::Survival);
+    let game_mode = world
+        .get::<GameMode>(player_entity)
+        .copied()
+        .unwrap_or(GameMode::Survival);
 
     // Only apply hunger in modes that have it.
     if !game_mode.has_hunger() {
         return;
     }
 
-    let difficulty = world.resource::<DifficultyResource>().map(|d| d.0).unwrap_or(Difficulty::Normal);
+    let difficulty = world
+        .resource::<DifficultyResource>()
+        .map(|d| d.0)
+        .unwrap_or(Difficulty::Normal);
 
     // Get player state for movement tracking.
-    let input = world.get::<PlayerInput>(player_entity).copied().unwrap_or_default();
-    let state = world.get::<PlayerState>(player_entity).copied().unwrap_or_default();
-    let velocity = world.get::<Velocity>(player_entity).copied().unwrap_or_default();
+    let input = world
+        .get::<PlayerInput>(player_entity)
+        .copied()
+        .unwrap_or_default();
+    let state = world
+        .get::<PlayerState>(player_entity)
+        .copied()
+        .unwrap_or_default();
+    let velocity = world
+        .get::<Velocity>(player_entity)
+        .copied()
+        .unwrap_or_default();
 
     // Get or create hunger component.
-    let mut hunger = world.get::<Hunger>(player_entity).copied().unwrap_or_default();
+    let mut hunger = world
+        .get::<Hunger>(player_entity)
+        .copied()
+        .unwrap_or_default();
 
     // Accumulate exhaustion from movement.
     if input.sprinting && state.on_ground {
@@ -88,10 +106,13 @@ pub fn hunger_system(world: &mut World, _dt: f32) {
         // Starvation damage: 1 heart per 4 seconds (every 80 ticks at 20 tps)
         // We use a simple approach: damage every tick at a low rate
         if let Some(dq) = world.resource_mut::<DamageQueue>() {
-            dq.push(player_entity, DamageEvent {
-                source: DamageSource::Starvation,
-                amount: 0.025, // 0.5 hearts per second / 20 ticks
-            });
+            dq.push(
+                player_entity,
+                DamageEvent {
+                    source: DamageSource::Starvation,
+                    amount: 0.025, // 0.5 hearts per second / 20 ticks
+                },
+            );
         }
     }
 

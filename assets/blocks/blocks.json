@@ -209,7 +209,7 @@
   },
   {
     "name": "cactus",
-    "kind": "solid",
+    "kind": "cactus",
     "solid": true,
     "opaque": true,
     "breakable": true,

@@ -17,7 +17,7 @@ use voxel_core::{
     BlockId, BlockPos, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT_BLOCKS,
 };
 
-use crate::{chunk::Chunk, registry::BlockRegistry, tree};
+use crate::{chunk::Chunk, error::Result, registry::BlockRegistry, tree};
 
 /// Identifier for a surface biome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -66,7 +66,43 @@ impl BiomeId {
     }
 }
 
+/// Precomputed per-column terrain data for one chunk: the base terrain height
+/// (world-Y float, unrounded) and the surface biome for each of the chunk's
+/// 16×16 columns. Built once per chunk via [`TerrainGenerator::column_table`]
+/// and shared by [`TerrainGenerator::generate`] and
+/// [`TerrainGenerator::decorate`] so the expensive fractal-noise samplers
+/// (`base_height` + `biome_at`) run exactly once per column instead of once
+/// per pass.
+#[derive(Clone, Debug)]
+pub struct ColumnTable {
+    /// `(base_height, biome)` per column, indexed by `lx * CHUNK_SIZE + lz`.
+    entries: Vec<(f32, BiomeId)>,
+}
+
+impl ColumnTable {
+    /// Terrain data for the column at chunk-local `(lx, lz)`.
+    #[inline]
+    pub fn get(&self, lx: i32, lz: i32) -> (f32, BiomeId) {
+        debug_assert!(
+            (0..CHUNK_SIZE).contains(&lx) && (0..CHUNK_SIZE).contains(&lz),
+            "column ({lx}, {lz}) out of chunk range"
+        );
+        self.entries[(lx as usize) * CHUNK_SIZE as usize + lz as usize]
+    }
+}
+
 /// Configurable terrain generator. Owns precomputed noise samplers.
+/// World-space coordinate + surface height for one cave-carve evaluation.
+/// Bundled so [`TerrainGenerator::carve`] stays under the
+/// `too_many_arguments` threshold.
+struct CarvePoint {
+    x: i32,
+    y: i32,
+    z: i32,
+    height: i32,
+    biome: BiomeId,
+}
+
 pub struct TerrainGenerator {
     seed: i32,
     // Continental shape (low frequency).
@@ -267,6 +303,24 @@ impl TerrainGenerator {
         BiomeId::classify(t, h, height)
     }
 
+    /// Sample `base_height` + `biome_at` once for every column of the chunk
+    /// whose corner is at world-space `origin`. The result is handed to
+    /// `generate` / `decorate` (and via `generate` to `decorate_caves`) so
+    /// the per-column fractal-noise samplers run once per chunk instead of
+    /// once per pass.
+    pub fn column_table(&self, origin: glam::IVec3) -> ColumnTable {
+        let mut entries = Vec::with_capacity(CHUNK_SIZE as usize * CHUNK_SIZE as usize);
+        for lx in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                let wx = origin.x + lx;
+                let wz = origin.z + lz;
+                let h = self.base_height(wx, wz);
+                entries.push((h, self.biome_at(wx, wz, h)));
+            }
+        }
+        ColumnTable { entries }
+    }
+
     /// Multi-pass cave carver. Returns true if this block should be replaced
     /// with air, combining cheese caves (large chambers), noodle caves
     /// (thin winding tunnels that can breach the surface), and spaghetti
@@ -274,16 +328,22 @@ impl TerrainGenerator {
     ///
     /// `chunk` and `reg` are accepted to match the planned API even though the
     /// current implementation only needs the coordinate and surface data.
+    ///
+    /// Coordinate + surface data bundled so `carve` stays under the
+    /// `too_many_arguments` threshold.
     fn carve(
         &self,
         _chunk: &mut Chunk,
-        x: i32,
-        y: i32,
-        z: i32,
-        height: i32,
-        biome: BiomeId,
+        point: CarvePoint,
         _reg: &BlockRegistry,
     ) -> bool {
+        let CarvePoint {
+            x,
+            y,
+            z,
+            height,
+            biome,
+        } = point;
         // Keep a safe margin from the world bottom/top.
         if !(4..=WORLD_HEIGHT_BLOCKS - 8).contains(&y) {
             return false;
@@ -349,11 +409,21 @@ impl TerrainGenerator {
     /// in the title screen.
     pub fn carve_ravines(&self, chunk: &mut Chunk, reg: &BlockRegistry) {
         let origin = chunk_origin(chunk.pos);
-        let Some(stone) = reg.id_of("stone") else { return; };
-        let Some(dirt) = reg.id_of("dirt") else { return; };
-        let Some(grass) = reg.id_of("grass") else { return; };
-        let Some(gravel) = reg.id_of("gravel") else { return; };
-        let Some(water) = reg.id_of("water") else { return; };
+        let Some(stone) = reg.id_of("stone") else {
+            return;
+        };
+        let Some(dirt) = reg.id_of("dirt") else {
+            return;
+        };
+        let Some(grass) = reg.id_of("grass") else {
+            return;
+        };
+        let Some(gravel) = reg.id_of("gravel") else {
+            return;
+        };
+        let Some(water) = reg.id_of("water") else {
+            return;
+        };
 
         // Coverage requirement: a ravine anchor places a carved column whose
         // world-XZ extent is `[anchor - length - half_width - 1, anchor + length + half_width + 1]`.
@@ -414,7 +484,12 @@ impl TerrainGenerator {
                 // canyon on screen and keeps the step-loop budget bounded.
                 let length = 30.0 + hash2(self.seed.wrapping_mul(3), ax, az) * 40.0;
                 let depth = 15.0 + hash2(self.seed.wrapping_mul(5), ax, az) * 25.0;
-                let width = 3.0 + self.ravine_width.get_noise_2d(ax as f32, az as f32).clamp(-1.0, 1.0) * 5.0;
+                let width = 3.0
+                    + self
+                        .ravine_width
+                        .get_noise_2d(ax as f32, az as f32)
+                        .clamp(-1.0, 1.0)
+                        * 5.0;
                 let width = width.clamp(3.0, 8.0);
 
                 let dir_x = angle.cos();
@@ -479,31 +554,29 @@ impl TerrainGenerator {
                             // preserve grass/dirt on the ravine rim.
                             for ly in ly_min..=ly_max {
                                 let wy = origin.y + ly;
-                                let depth_frac = (surf - wy) as f32
-                                    / (surf - local_bottom).max(1) as f32;
+                                let depth_frac =
+                                    (surf - wy) as f32 / (surf - local_bottom).max(1) as f32;
                                 // Taper the rim: shrink width near the surface
                                 // so grass/dirt on the edge stays intact.
-                                let rim_taper = if depth_frac > 0.15 { 1.0 } else { depth_frac / 0.15 };
+                                let rim_taper = if depth_frac > 0.15 {
+                                    1.0
+                                } else {
+                                    depth_frac / 0.15
+                                };
                                 // Jagged walls: vary the half-width by a hash
                                 // based on world Y so the canyon sides look natural.
                                 let jagged = 1.0 + 0.15 * (hash2(self.seed, wx, wy) - 0.5);
-                                let half_width = local_width * depth_frac.max(0.05) * rim_taper * jagged;
+                                let half_width =
+                                    local_width * depth_frac.max(0.05) * rim_taper * jagged;
                                 if perp > half_width {
                                     continue;
                                 }
 
                                 let id = chunk.get(lx, ly, lz);
-                                if id == stone
-                                    || id == dirt
-                                    || id == grass
-                                    || id == gravel
-                                {
+                                if id == stone || id == dirt || id == grass || id == gravel {
                                     // Place water at the very bottom when the
                                     // ravine reaches below sea level.
-                                    if wy <= SEA_LEVEL
-                                        && wy == local_bottom
-                                        && perp <= 1.0
-                                    {
+                                    if wy <= SEA_LEVEL && wy == local_bottom && perp <= 1.0 {
                                         chunk.set(lx, ly, lz, water);
                                         chunk.set_water_level(lx, ly, lz, 8);
                                     } else {
@@ -520,13 +593,28 @@ impl TerrainGenerator {
 
     /// Decorate carved caves with water/lava pools, scattered floor blocks,
     /// extra ore near walls, and simple stalactites/stalagmites.
-    pub fn decorate_caves(&self, chunk: &mut Chunk, reg: &BlockRegistry) {
+    pub fn decorate_caves(
+        &self,
+        chunk: &mut Chunk,
+        reg: &BlockRegistry,
+        columns: &ColumnTable,
+    ) {
         let origin = chunk_origin(chunk.pos);
-        let Some(stone) = reg.id_of("stone") else { return; };
-        let Some(dirt) = reg.id_of("dirt") else { return; };
-        let Some(gravel) = reg.id_of("gravel") else { return; };
-        let Some(water) = reg.id_of("water") else { return; };
-        let Some(lava) = reg.id_of("lava") else { return; };
+        let Some(stone) = reg.id_of("stone") else {
+            return;
+        };
+        let Some(dirt) = reg.id_of("dirt") else {
+            return;
+        };
+        let Some(gravel) = reg.id_of("gravel") else {
+            return;
+        };
+        let Some(water) = reg.id_of("water") else {
+            return;
+        };
+        let Some(lava) = reg.id_of("lava") else {
+            return;
+        };
 
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
@@ -565,7 +653,8 @@ impl TerrainGenerator {
                     // single boolean serves both. Saved: ~1 noise call per
                     // floor-with-air-above cell (~512/chunk).
                     let wy_f12 = wy as f32 * 1.2;
-                    let is_cheese = self.cheese_cave.get_noise_3d(wx as f32, wy_f12, wz as f32) > 0.15;
+                    let is_cheese =
+                        self.cheese_cave.get_noise_3d(wx as f32, wy_f12, wz as f32) > 0.15;
 
                     // Cheese-cave water pools below sea level. Only place in
                     // small depressions (at least two neighbouring floor blocks)
@@ -573,7 +662,13 @@ impl TerrainGenerator {
                     if wy <= SEA_LEVEL && is_cheese {
                         let h = hash2(self.seed, wx + wy, wz + 1000);
                         if h < 0.08
-                            && self.is_floor_depression(chunk, lx, ly + 1, lz, &[stone, dirt, gravel])
+                            && self.is_floor_depression(
+                                chunk,
+                                lx,
+                                ly + 1,
+                                lz,
+                                &[stone, dirt, gravel],
+                            )
                         {
                             chunk.set(lx, ly + 1, lz, water);
                             // set_water_level stores the liquid level for any
@@ -586,7 +681,13 @@ impl TerrainGenerator {
                     if wy < 20 && is_cheese {
                         let h = hash2(self.seed, wx + wy, wz + 2000);
                         if h < 0.05
-                            && self.is_floor_depression(chunk, lx, ly + 1, lz, &[stone, dirt, gravel])
+                            && self.is_floor_depression(
+                                chunk,
+                                lx,
+                                ly + 1,
+                                lz,
+                                &[stone, dirt, gravel],
+                            )
                         {
                             chunk.set(lx, ly + 1, lz, lava);
                             chunk.set_water_level(lx, ly + 1, lz, 8);
@@ -607,14 +708,12 @@ impl TerrainGenerator {
         // the surface.
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
-                // Hoist `base_height` (called inside the ly loop previously)
-                // so it runs once per column instead of once per AIR cell.
-                // `base_height` itself invokes 3 fractal-noise samplers, so
-                // for an air-heavy chunk this eliminates ~13 × 3 ≈ 40 noise
-                // calls per column × 256 columns = ~10K noise calls total.
                 let wx = origin.x + lx;
                 let wz = origin.z + lz;
-                let surface = self.base_height(wx, wz).round() as i32;
+                // Surface height comes from the shared per-column table built
+                // once per chunk (see `column_table`) instead of re-sampling
+                // `base_height` (3 fractal-noise samplers per column).
+                let surface = columns.get(lx, lz).0.round() as i32;
                 for ly in 1..(CHUNK_SIZE - 1) {
                     let wy = origin.y + ly;
                     let id = chunk.get(lx, ly, lz);
@@ -683,7 +782,7 @@ impl TerrainGenerator {
         for (dx, dz) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let nx = lx + dx;
             let nz = lz + dz;
-            if nx < 0 || nx >= CHUNK_SIZE || nz < 0 || nz >= CHUNK_SIZE {
+            if !(0..CHUNK_SIZE).contains(&nx) || !(0..CHUNK_SIZE).contains(&nz) {
                 continue;
             }
             let below = chunk.get(nx, ly - 1, nz);
@@ -744,24 +843,52 @@ impl TerrainGenerator {
 
     /// Generate a full chunk in place. Does NOT touch neighbours; cross-chunk
     /// decorations (trees) are applied by `decorate` after neighbours exist.
-    pub fn generate(&self, chunk: &mut Chunk, reg: &BlockRegistry) {
+    ///
+    /// `columns` is the per-column height/biome table for this chunk (built
+    /// once via [`TerrainGenerator::column_table`]); it is also passed on to
+    /// `decorate_caves` so the column noise is never sampled twice.
+    ///
+    /// Returns an error if the registry is missing any builtin block that
+    /// generation depends on (stone, dirt, grass, sand, water, bedrock, snow,
+    /// gravel), instead of panicking inside the streaming thread pool.
+    pub fn generate(
+        &self,
+        chunk: &mut Chunk,
+        reg: &BlockRegistry,
+        columns: &ColumnTable,
+    ) -> Result<()> {
         let origin = chunk_origin(chunk.pos);
-        let stone = reg.id_of("stone").expect("stone block must be registered");
-        let dirt = reg.id_of("dirt").expect("dirt block must be registered");
-        let grass = reg.id_of("grass").expect("grass block must be registered");
-        let sand = reg.id_of("sand").expect("sand block must be registered");
-        let water = reg.id_of("water").expect("water block must be registered");
-        let bedrock = reg.id_of("bedrock").expect("bedrock block must be registered");
-        let snow = reg.id_of("snow").expect("snow block must be registered");
-        let gravel = reg.id_of("gravel").expect("gravel block must be registered");
+        let stone = reg.id_of("stone").ok_or_else(|| {
+            crate::error::WorldError::Registry("stone block must be registered".into())
+        })?;
+        let dirt = reg.id_of("dirt").ok_or_else(|| {
+            crate::error::WorldError::Registry("dirt block must be registered".into())
+        })?;
+        let grass = reg.id_of("grass").ok_or_else(|| {
+            crate::error::WorldError::Registry("grass block must be registered".into())
+        })?;
+        let sand = reg.id_of("sand").ok_or_else(|| {
+            crate::error::WorldError::Registry("sand block must be registered".into())
+        })?;
+        let water = reg.id_of("water").ok_or_else(|| {
+            crate::error::WorldError::Registry("water block must be registered".into())
+        })?;
+        let bedrock = reg.id_of("bedrock").ok_or_else(|| {
+            crate::error::WorldError::Registry("bedrock block must be registered".into())
+        })?;
+        let snow = reg.id_of("snow").ok_or_else(|| {
+            crate::error::WorldError::Registry("snow block must be registered".into())
+        })?;
+        let gravel = reg.id_of("gravel").ok_or_else(|| {
+            crate::error::WorldError::Registry("gravel block must be registered".into())
+        })?;
 
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
                 let wx = origin.x + lx;
                 let wz = origin.z + lz;
-                let height_f = self.base_height(wx, wz);
+                let (height_f, biome) = columns.get(lx, lz);
                 let height = height_f.round() as i32;
-                let biome = self.biome_at(wx, wz, height_f);
 
                 for ly in 0..CHUNK_SIZE {
                     let wy = origin.y + ly;
@@ -811,7 +938,19 @@ impl TerrainGenerator {
                     // avoids surface potholes. Bedrock, water and sand are
                     // never carved.
                     let carveable = block == stone || block == dirt || block == gravel;
-                    if carveable && self.carve(chunk, wx, wy, wz, height, biome, reg) {
+                    if carveable
+                        && self.carve(
+                            chunk,
+                            CarvePoint {
+                                x: wx,
+                                y: wy,
+                                z: wz,
+                                height,
+                                biome,
+                            },
+                            reg,
+                        )
+                    {
                         block = BlockId::AIR;
                     }
 
@@ -828,10 +967,11 @@ impl TerrainGenerator {
         self.carve_ravines(chunk, reg);
 
         // Add cave-specific decorations (pools, ores, stalactites).
-        self.decorate_caves(chunk, reg);
+        self.decorate_caves(chunk, reg, columns);
 
         chunk.generated = true;
         chunk.dirty = true;
+        Ok(())
     }
 
     /// Scatter trees and surface foliage. Trees use `tree::try_place_tree`
@@ -841,6 +981,7 @@ impl TerrainGenerator {
         &self,
         chunk: &mut Chunk,
         reg: &BlockRegistry,
+        columns: &ColumnTable,
         neighbour_sample: impl Fn(i32, i32, i32) -> BlockId,
         neighbour_set: impl Fn(i32, i32, i32, BlockId) -> bool,
     ) {
@@ -865,10 +1006,10 @@ impl TerrainGenerator {
                 // Tree density: cellular value high + per-position hash.
                 let n = self.tree.get_noise_2d(wx as f32, wz as f32);
                 let h = hash2(self.seed, wx, wz);
-                // Biome is derived from the base height field (same source as
-                // `generate`), so decorations match the surface biome exactly.
-                let height_f = self.base_height(wx, wz);
-                let biome = self.biome_at(wx, wz, height_f);
+                // Biome comes from the shared per-column table (same source
+                // as `generate`), so decorations match the surface biome
+                // exactly — without re-running the fractal-noise samplers.
+                let biome = columns.get(lx, lz).1;
 
                 // ---- Trees (delegated to `tree` module) --------------------
                 if let Some(tree_type) = tree::pick_tree_type(self.seed, wx, wz, biome, n, h) {
@@ -890,9 +1031,15 @@ impl TerrainGenerator {
                     }
                     if let Some(sy) = surface_y {
                         tree::try_place_tree(
-                            chunk, reg, self.seed,
-                            wx, wz, sy,
-                            tree_type,
+                            chunk,
+                            reg,
+                            tree::TreePlacement {
+                                seed: self.seed,
+                                wx,
+                                wz,
+                                surface_ly: sy,
+                                tree_type,
+                            },
                             &neighbour_set,
                         );
                     }
@@ -1174,4 +1321,29 @@ pub(crate) fn hash2(seed: i32, x: i32, z: i32) -> f32 {
 /// Convert a world block position to its owning chunk position.
 pub fn chunk_of(block: BlockPos) -> ChunkPos {
     voxel_core::math::block_to_chunk(block.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `ColumnTable` refactor relies on `generate` / `decorate` reading
+    /// exactly what the direct per-column samplers would have produced, so
+    /// lock that equivalence in: every table entry must equal
+    /// `base_height(wx, wz)` / `biome_at(wx, wz, height)` for the same column.
+    #[test]
+    fn column_table_matches_direct_sampling() {
+        let gen = TerrainGenerator::new(42);
+        for origin in [glam::IVec3::new(0, 0, 0), glam::IVec3::new(-48, 64, 32)] {
+            let table = gen.column_table(origin);
+            for lx in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    let wx = origin.x + lx;
+                    let wz = origin.z + lz;
+                    let h = gen.base_height(wx, wz);
+                    assert_eq!(table.get(lx, lz), (h, gen.biome_at(wx, wz, h)));
+                }
+            }
+        }
+    }
 }

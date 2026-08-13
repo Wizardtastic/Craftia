@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use kira::{
-    AudioManager as KiraManager, AudioManagerSettings, DefaultBackend, Decibels,
-    sound::static_sound::StaticSoundSettings,
+    sound::static_sound::StaticSoundSettings, AudioManager as KiraManager, AudioManagerSettings,
+    Decibels, DefaultBackend,
 };
 
 use crate::config::AudioConfig;
@@ -122,12 +122,20 @@ impl AudioManager {
 
     fn handle_event(&mut self, event: AudioEvent) {
         match event {
-            AudioEvent::PlaySfx { sound, position, volume, pitch, group: _ } => {
+            AudioEvent::PlaySfx {
+                sound,
+                position,
+                volume,
+                pitch,
+                group: _,
+            } => {
                 let Some(sound_data) = self.registry.get(&sound) else {
                     log::trace!("Sound not found: {sound}");
                     return;
                 };
-                let Some(ref mut manager) = self.manager else { return };
+                let Some(ref mut manager) = self.manager else {
+                    return;
+                };
 
                 let mut settings = StaticSoundSettings::default();
 
@@ -154,16 +162,21 @@ impl AudioManager {
 
                 let _ = manager.play(sound_data.data.clone().with_settings(settings));
             }
-            AudioEvent::PlayMusic { track, volume, loop_ } => {
+            AudioEvent::PlayMusic {
+                track,
+                volume,
+                loop_,
+            } => {
                 let Some(sound_data) = self.registry.get(&track) else {
                     log::trace!("Music track not found: {track}");
                     return;
                 };
-                let Some(ref mut manager) = self.manager else { return };
+                let Some(ref mut manager) = self.manager else {
+                    return;
+                };
 
                 let vol = volume * self.config.master_volume * self.config.music_volume;
-                let mut settings = StaticSoundSettings::default()
-                    .volume(amplitude_to_db(vol));
+                let mut settings = StaticSoundSettings::default().volume(amplitude_to_db(vol));
 
                 if loop_ {
                     settings = settings.loop_region(..);
@@ -177,19 +190,21 @@ impl AudioManager {
             AudioEvent::StopGroup(_group) => {
                 // Would need handle tracking. No-op for now.
             }
-            AudioEvent::SetListener { pos, forward: _, up: _ } => {
+            AudioEvent::SetListener {
+                pos,
+                forward: _,
+                up: _,
+            } => {
                 self.listener_pos = pos;
             }
             AudioEvent::SetMasterVolume(v) => {
                 self.config.master_volume = v;
             }
-            AudioEvent::SetGroupVolume(group, v) => {
-                match group {
-                    AudioGroup::Sfx => self.config.sfx_volume = v,
-                    AudioGroup::Music => self.config.music_volume = v,
-                    AudioGroup::Ambient => self.config.ambient_volume = v,
-                }
-            }
+            AudioEvent::SetGroupVolume(group, v) => match group {
+                AudioGroup::Sfx => self.config.sfx_volume = v,
+                AudioGroup::Music => self.config.music_volume = v,
+                AudioGroup::Ambient => self.config.ambient_volume = v,
+            },
             AudioEvent::SetMuted(muted) => {
                 self.config.muted = muted;
             }

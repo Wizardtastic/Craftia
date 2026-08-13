@@ -1,5 +1,5 @@
-use ash::vk;
 use anyhow::{anyhow, Result};
+use ash::vk;
 
 pub(super) fn create_swapchain(
     _device: &ash::Device,
@@ -8,6 +8,7 @@ pub(super) fn create_swapchain(
     pdev: vk::PhysicalDevice,
     actual_surface: vk::SurfaceKHR,
     vsync: bool,
+    fallback_extent: vk::Extent2D,
 ) -> Result<(vk::SwapchainKHR, Vec<vk::Image>, vk::Format, vk::Extent2D)> {
     let caps = unsafe { surface.get_physical_device_surface_capabilities(pdev, actual_surface) }
         .map_err(|e| anyhow!("surface capabilities: {e:?}"))?;
@@ -36,12 +37,29 @@ pub(super) fn create_swapchain(
             .unwrap_or(vk::PresentModeKHR::FIFO)
     };
 
+    // Most X11/Windows drivers report the real window size as
+    // `current_extent`. On Wayland (and some X11 drivers) it comes back as
+    // `u32::MAX`, meaning the client picks the swapchain size — in that case
+    // use the window's actual physical size (clamped to the surface's
+    // supported range) instead of a hardcoded 1280x720, which never matched
+    // the window and caused the rendered image to be stretched to fit.
     let extent = if caps.current_extent.width != u32::MAX {
         caps.current_extent
     } else {
+        // `.max(1)` guards against a transiently-0 window size producing a
+        // 0×0 swapchain before the compositor configures the surface. Real
+        // surfaces report min ≥ 1 (so the clamp result already satisfies
+        // `.max(1)`), and for a degenerate min==max==0 surface a 1×1 swapchain
+        // is strictly better than failing to create one.
         vk::Extent2D {
-            width: 1280,
-            height: 720,
+            width: fallback_extent
+                .width
+                .clamp(caps.min_image_extent.width, caps.max_image_extent.width)
+                .max(1),
+            height: fallback_extent
+                .height
+                .clamp(caps.min_image_extent.height, caps.max_image_extent.height)
+                .max(1),
         }
     };
     let mut image_count = caps.min_image_count + 1;

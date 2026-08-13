@@ -16,3 +16,9 @@ assets/**/.cache/
 .idea
 .scratch
 /logs
+/PROJECT_DETAILS.md
+.mex
+/dist
+/logs/latest.log
+/logs/previous.log
+/tools

@@ -101,7 +101,7 @@ fn noise_at(x: i32, y: i32, z: i32, scale: f32, seed: i32) -> f32 {
     let fx = x as f32 / scale + seed as f32;
     let fy = y as f32 / scale + seed as f32 * 0.7;
     let fz = z as f32 / scale + seed as f32 * 1.3;
-    (fx.sin() * 43758.5453 + fy.cos() * 12345.6789 + fz.sin() * 67890.1234).fract()
+    (fx.sin() * 43_758.547 + fy.cos() * 12_345.679 + fz.sin() * 67_890.125).fract()
 }
 
 /// Get the majority block among neighbors (excluding air).
@@ -150,16 +150,14 @@ fn apply_filter(
                         let n = noise_at(x, y, z, *scale, *seed);
                         let block = if n > *threshold { *block_b } else { *block_a };
                         let old = world.get_block(x, y, z);
-                        if old != block {
-                            if world.set_block(x, y, z, block) {
-                                let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                                    x,
-                                    y,
-                                    z,
-                                    old_block: old.0,
-                                    new_block: block.0,
-                                });
-                            }
+                        if old != block && world.set_block(x, y, z, block) {
+                            let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                                x,
+                                y,
+                                z,
+                                old_block: old.0,
+                                new_block: block.0,
+                            });
                         }
                     }
                 }

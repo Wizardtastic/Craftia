@@ -5,12 +5,12 @@
 //! 2. If within vacuum range and pickup delay is 0, try to merge into inventory
 //! 3. For now, adds to the hotbar (simplified inventory)
 
-use voxel_ecs::World;
 use glam::Vec3;
+use voxel_ecs::World;
 
 use crate::components::{PlayerEntity, Transform};
-use crate::item_entity::ItemEntity;
 use crate::inv::Hotbar;
+use crate::item_entity::ItemEntity;
 use voxel_core::BlockId;
 
 /// Vacuum range in blocks (items within this range are attracted to the player).

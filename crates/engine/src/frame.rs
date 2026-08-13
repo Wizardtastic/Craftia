@@ -7,6 +7,7 @@ use std::time::Instant;
 use crate::edit;
 use crate::edit::terrain::TerrainOp;
 use crate::{spawn_particles_break, spawn_particles_place, update_particles};
+use voxel_core::Point;
 use voxel_render::UiDrawData;
 use voxel_world::ChunkStreamEvent;
 
@@ -75,10 +76,25 @@ impl crate::EngineApp {
                             }
                         }
                     }
-                    voxel_render::HotReloadEvent::TextureAtlasChanged => {
+                    voxel_render::HotReloadEvent::TextureAtlasChanged
+                    | voxel_render::HotReloadEvent::TexturePackChanged => {
                         if let Some(r) = self.render.renderer.as_mut() {
                             match r.reload_atlas() {
                                 Ok(()) => {
+                                    // Sync pack info from renderer to engine UI manager.
+                                    self.texture_pack_manager.loaded_packs = r
+                                        .pack_infos()
+                                        .iter()
+                                        .map(|p| crate::TexturePackInfo {
+                                            name: p.name.clone(),
+                                            description: p.description.clone(),
+                                            version: p.version.clone(),
+                                            author: p.author.clone(),
+                                            tile_count: p.tile_count,
+                                            animation_count: p.animation_count,
+                                            enabled: p.enabled,
+                                        })
+                                        .collect();
                                     self.gameplay.chat.push_message("[atlas] reloaded".into());
                                 }
                                 Err(e) => {
@@ -115,7 +131,7 @@ impl crate::EngineApp {
                                     log::warn!("config reload: parse {path:?} failed: {e}");
                                     self.gameplay
                                         .chat
-                                        .push_message(format!("[config] parse error"));
+                                        .push_message("[config] parse error".to_string());
                                     continue;
                                 }
                             };
@@ -162,7 +178,7 @@ impl crate::EngineApp {
                         //    keep the older per-field mirrors in sync so
                         //    downstream code that reads them continues to
                         //    work. `self.config.seed` is intentionally NOT
-                        //    mirrored ΓÇö a worker holds the original startup
+                        //    mirrored — a worker holds the original startup
                         //    seed for terrain generation.
                         if new_settings.world != self.config.world {
                             let new_load = new_settings.world.load_radius.max(0) as u32;
@@ -250,7 +266,11 @@ impl crate::EngineApp {
         // outer Vec whose capacity survives across frames) requires
         // `upload_chunks` to accept `&mut Vec<ChunkUpload>` + drain; until
         // then we allocate locally and let the renderer consume it.
+        // Wall-clock ms spent polling streamer events + uploading chunk
+        // meshes this frame, reported in the telemetry dashboard.
+        let mut chunk_upload_ms = 0.0f32;
         if let Some(streamer) = &self.world_state.streamer {
+            let upload_t0 = Instant::now();
             let events = streamer.poll_events();
             let mut uploads = Vec::new();
             for ev in events {
@@ -275,6 +295,7 @@ impl crate::EngineApp {
                     r.upload_chunks(uploads);
                 }
             }
+            chunk_upload_ms = upload_t0.elapsed().as_secs_f32() * 1000.0;
         }
 
         // Fixed-timestep simulation.
@@ -442,7 +463,7 @@ impl crate::EngineApp {
         // the streamer for remeshing.
         let water_affected =
             if self.gameplay.game_state == crate::GameState::Playing && self.input.spawned {
-                // Check if player is dead ΓÇö if so, skip input and unlock cursor.
+                // Check if player is dead — if so, skip input and unlock cursor.
                 let is_dead = self
                     .simulation
                     .ecs_world()
@@ -461,10 +482,10 @@ impl crate::EngineApp {
                     let snap = voxel_game::InputSnapshot::default();
                     self.simulation.set_player_input(snap);
                     // Still tick so systems like regen can run (but movement is zeroed).
-                    let affected = self.simulation.tick_fixed(frame_dt);
-                    affected
+
+                    self.simulation.tick_fixed(frame_dt)
                 } else if self.gameplay.block_picker_open {
-                    // Block picker (creative inventory) is open ΓÇö no movement, no mouse look.
+                    // Block picker (creative inventory) is open — no movement, no mouse look.
                     if self.input.cursor_locked {
                         self.unlock_cursor();
                     }
@@ -505,6 +526,9 @@ impl crate::EngineApp {
             }
         }
 
+        // Wall-clock ms spent in `tick_water` across this frame's fixed steps.
+        let water_tick_ms = self.simulation.take_water_tick_ms();
+
         // Refresh the cached camera resource from the player's transform +
         // current eye offset. This is the camera the renderer will use.
         let player_camera_input = self.simulation.player_transform_state();
@@ -542,7 +566,7 @@ impl crate::EngineApp {
                     }
                 }
             } else {
-                // Pinned entity despawned ΓÇö clear the pin so the camera
+                // Pinned entity despawned — clear the pin so the camera
                 // doesn't get stuck locked to a freed entity handle.
                 self.gameplay.pinned_entity = None;
                 self.gameplay
@@ -567,10 +591,7 @@ impl crate::EngineApp {
             .simulation
             .player_pos()
             .unwrap_or(self.gameplay.spawn_pos);
-        let camera_now = self
-            .simulation
-            .player_camera()
-            .unwrap_or(voxel_core::Camera::default());
+        let camera_now = self.simulation.player_camera().unwrap_or_default();
         if let Some(streamer) = &self.world_state.streamer {
             // Only send focus if player moved to a different chunk.
             let player_chunk =
@@ -643,7 +664,7 @@ impl crate::EngineApp {
                                 self.gameplay.map.framebuffer.len()
                             );
                         } else {
-                            // No samples yet ΓÇö stay dirty so we retry next interval.
+                            // No samples yet — stay dirty so we retry next interval.
                             self.gameplay.map.dirty = true;
                             log::debug!("minimap: no samples at ({}, {}), retrying", px, pz);
                         }
@@ -848,6 +869,10 @@ impl crate::EngineApp {
                 .selected_block()
                 .unwrap_or(voxel_core::BlockId::AIR);
             hotbar_res.selected_block = selected;
+            // Keep the selected tool metadata synchronized with the slot. The
+            // current default palette carries tier 0, while tool-aware callers
+            // can attach a higher tier to a selected slot explicitly.
+            hotbar_res.selected_tool_tier = self.gameplay.hotbar.selected_tool_tier();
             // Look up the tile index for the held item rendering.
             if !selected.is_air() {
                 let reg = self.world_state.world.registry();
@@ -902,15 +927,17 @@ impl crate::EngineApp {
                     self.gameplay.edit.brush_center = Some(center);
                     self.gameplay.edit.preview_valid = true;
 
-                    // Check if click is outside UI panels.
-                    let (mx, my) = self.gameplay.mouse_pos;
-                    let sw = self.render.window_size.0 as f32;
-                    let sh = self.render.window_size.1 as f32;
+                    // Check if click is outside UI panels. The editor draws
+                    // in logical pixels now, so compare against the logical
+                    // window size to match the panel rects.
+                    let Point { x: mx, y: my } = self.gameplay.mouse_pos;
+                    let (sw, sh) = self.render.logical_size();
                     let in_menu_bar = my < edit::theme::MENU_BAR_H;
                     let in_status_bar = my > sh - edit::theme::STATUS_BAR_H;
                     let in_cat_bar = mx < edit::theme::CAT_BAR_W;
-                    let in_left_panel = mx >= edit::theme::CAT_BAR_W
-                        && mx < edit::theme::CAT_BAR_W + edit::theme::LEFT_PANEL_W
+                    let in_left_panel = (edit::theme::CAT_BAR_W
+                        ..edit::theme::CAT_BAR_W + edit::theme::LEFT_PANEL_W)
+                        .contains(&mx)
                         && my >= edit::theme::MENU_BAR_H
                         && my < sh - edit::theme::STATUS_BAR_H;
                     let in_right_panel = mx > sw - edit::theme::RIGHT_PANEL_W
@@ -965,7 +992,7 @@ impl crate::EngineApp {
                             let shift_held =
                                 self.input.input.held(voxel_game::input::Action::Sneak);
                             if shift_held
-                                && self.gameplay.edit.brush_ref().map_or(false, |b| b.replace)
+                                && self.gameplay.edit.brush_ref().is_some_and(|b| b.replace)
                             {
                                 edit::brush::pick_replace_target(
                                     &mut self.gameplay.edit,
@@ -984,85 +1011,89 @@ impl crate::EngineApp {
                     }
 
                     // --- Terrain tool interaction ---
-                    if self.gameplay.edit.terrain_ref().is_some() {
-                        if clicks.left && (self.input.cursor_locked || !click_in_ui) {
-                            let terrain = self.gameplay.edit.terrain_ref().unwrap().clone();
-                            let affected = match &terrain.op {
-                                TerrainOp::Raise { amount } => edit::terrain::apply_raise(
+                    if self.gameplay.edit.terrain_ref().is_some()
+                        && clicks.left
+                        && (self.input.cursor_locked || !click_in_ui)
+                    {
+                        let terrain = self.gameplay.edit.terrain_ref().unwrap().clone();
+                        let affected = match &terrain.op {
+                            TerrainOp::Raise { amount } => edit::terrain::apply_raise(
+                                &self.world_state.world,
+                                center,
+                                terrain.radius,
+                                *amount as i32,
+                                terrain.block,
+                                &mut self.gameplay.undo_redo,
+                            ),
+                            TerrainOp::Lower { amount } => edit::terrain::apply_lower(
+                                &self.world_state.world,
+                                center,
+                                terrain.radius,
+                                *amount as i32,
+                                &mut self.gameplay.undo_redo,
+                            ),
+                            TerrainOp::Flatten { target_height } => {
+                                let ty = target_height.unwrap_or(center.y);
+                                edit::terrain::apply_flatten(
                                     &self.world_state.world,
                                     center,
                                     terrain.radius,
-                                    *amount as i32,
+                                    ty,
                                     terrain.block,
                                     &mut self.gameplay.undo_redo,
-                                ),
-                                TerrainOp::Lower { amount } => edit::terrain::apply_lower(
-                                    &self.world_state.world,
-                                    center,
-                                    terrain.radius,
-                                    *amount as i32,
-                                    &mut self.gameplay.undo_redo,
-                                ),
-                                TerrainOp::Flatten { target_height } => {
-                                    let ty = target_height.unwrap_or(center.y);
-                                    edit::terrain::apply_flatten(
-                                        &self.world_state.world,
-                                        center,
-                                        terrain.radius,
-                                        ty,
-                                        terrain.block,
-                                        &mut self.gameplay.undo_redo,
-                                    )
-                                }
-                                TerrainOp::Smooth { iterations } => edit::terrain::apply_smooth(
-                                    &self.world_state.world,
-                                    center,
-                                    terrain.radius,
-                                    *iterations,
-                                    terrain.block,
-                                    &mut self.gameplay.undo_redo,
-                                ),
-                                TerrainOp::Noise {
-                                    scale,
-                                    amplitude,
-                                    seed,
-                                } => edit::terrain::apply_noise(
-                                    &self.world_state.world,
-                                    center,
-                                    terrain.radius,
-                                    *scale,
-                                    *amplitude,
-                                    *seed,
-                                    terrain.block,
-                                    &mut self.gameplay.undo_redo,
-                                ),
-                            };
-                            if let Some(streamer) = &self.world_state.streamer {
-                                for cp in affected {
-                                    streamer.request_remesh(cp);
-                                }
+                                )
                             }
-                            clicks.left = false;
+                            TerrainOp::Smooth { iterations } => edit::terrain::apply_smooth(
+                                &self.world_state.world,
+                                center,
+                                terrain.radius,
+                                *iterations,
+                                terrain.block,
+                                &mut self.gameplay.undo_redo,
+                            ),
+                            TerrainOp::Noise {
+                                scale,
+                                amplitude,
+                                seed,
+                            } => edit::terrain::apply_noise(
+                                &self.world_state.world,
+                                center,
+                                edit::terrain::NoiseParams {
+                                    radius: terrain.radius,
+                                    scale: *scale,
+                                    amplitude: *amplitude,
+                                    seed: *seed,
+                                },
+                                terrain.block,
+                                &mut self.gameplay.undo_redo,
+                            ),
+                        };
+                        if let Some(streamer) = &self.world_state.streamer {
+                            for cp in affected {
+                                streamer.request_remesh(cp);
+                            }
                         }
+                        clicks.left = false;
                     }
 
                     // --- Paint tool interaction ---
-                    if self.gameplay.edit.paint_ref().is_some() {
-                        if clicks.left && (self.input.cursor_locked || !click_in_ui) {
-                            let paint = self.gameplay.edit.paint_ref().unwrap().clone();
-                            let affected = edit::paint::apply_gradient(
-                                &paint,
-                                &self.world_state.world,
-                                center,
-                                &mut self.gameplay.undo_redo,
-                            );
-                            if let Some(streamer) = &self.world_state.streamer {
-                                for cp in affected {
-                                    streamer.request_remesh(cp);
-                                }
+                    if self.gameplay.edit.paint_ref().is_some()
+                        && clicks.left
+                        && (self.input.cursor_locked || !click_in_ui)
+                    {
+                        let paint = self.gameplay.edit.paint_ref().unwrap().clone();
+                        let affected = edit::paint::apply_gradient(
+                            &paint,
+                            &self.world_state.world,
+                            center,
+                            &mut self.gameplay.undo_redo,
+                        );
+                        if let Some(streamer) = &self.world_state.streamer {
+                            for cp in affected {
+                                streamer.request_remesh(cp);
                             }
-                            clicks.left = false;
                         }
+                        clicks.left = false;
                     }
 
                     // --- Filter tool interaction ---
@@ -1385,16 +1416,16 @@ impl crate::EngineApp {
                 crate::GameState::TitleScreen | crate::GameState::WorldSelect
             );
 
-            if let Err(e) = r.draw_frame(
+            if let Err(e) = r.draw_frame(voxel_render::FrameInput {
                 camera,
-                Some(&ui),
-                self.gameplay.game_time as f32,
+                ui: Some(&ui),
+                game_time: self.gameplay.game_time as f32,
                 underwater,
-                &entity_data,
-                &held_item_data,
+                world_entities: &entity_data,
+                held_items: &held_item_data,
                 show_panorama,
-                self.gameplay.panorama_rotation,
-            ) {
+                panorama_rotation: self.gameplay.panorama_rotation,
+            }) {
                 log::error!("draw_frame: {e}");
             }
             // Collect profiler data.
@@ -1453,7 +1484,11 @@ impl crate::EngineApp {
                     streamer_gen_queue: streamer_stats.gen_queue,
                     streamer_mesh_queue: streamer_stats.mesh_queue,
                     streamer_pending_remesh: streamer_stats.pending_remesh,
+                    streamer_gen_ms: streamer_stats.gen_ms,
+                    streamer_mesh_ms: streamer_stats.mesh_ms,
+                    water_tick_ms,
                     water_pending_flow: self.world_state.world.pending_flow_count() as u32,
+                    chunk_upload_ms,
                     entity_count: ecs.entity_count(),
                     archetype_count: ecs.archetype_count() as u32,
                 };
@@ -1479,10 +1514,7 @@ impl crate::EngineApp {
 
     /// Render a still frame to PNG via the auto-capture machinery.
     pub(crate) fn do_capture(&mut self) {
-        let mut camera = self
-            .simulation
-            .player_camera()
-            .unwrap_or(voxel_core::Camera::default());
+        let mut camera = self.simulation.player_camera().unwrap_or_default();
         let h = self.render.window_size.1 as f32;
         camera.aspect = if h > 0.0 {
             self.render.window_size.0 as f32 / h
@@ -1511,16 +1543,16 @@ impl crate::EngineApp {
             let ext = r.extent();
             r.set_proj_params(camera.near, camera.far, ext.width as f32, ext.height as f32);
         }
-        match r.capture_frame(
+        match r.capture_frame(voxel_render::FrameInput {
             camera,
-            Some(&ui),
-            self.gameplay.game_time as f32,
+            ui: Some(&ui),
+            game_time: self.gameplay.game_time as f32,
             underwater,
-            &[],
-            &[],
-            false,
-            0.0,
-        ) {
+            world_entities: &[],
+            held_items: &[],
+            show_panorama: false,
+            panorama_rotation: 0.0,
+        }) {
             Ok(rgba) => {
                 let (w, h) = self.render.window_size;
                 if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {

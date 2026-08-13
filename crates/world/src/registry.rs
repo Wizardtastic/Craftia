@@ -12,44 +12,6 @@ use voxel_core::BlockId;
 /// Default emission color: warm white.
 pub const DEFAULT_EMISSION_COLOR: [u8; 3] = [255, 248, 240];
 
-/// Global light color palette. Index 0 is warm white (sunlight/default).
-/// Each emitter block maps to the nearest palette entry.
-pub const LIGHT_COLORS: [[u8; 3]; 16] = [
-    [255, 248, 240],  // 0: default warm white (sunlight)
-    [255, 200, 100],  // 1: torch
-    [255, 235, 160],  // 2: glowstone
-    [255, 60, 60],    // 3: redstone
-    [140, 220, 255],  // 4: sea lantern
-    [255, 130, 30],   // 5: lava
-    [255, 150, 80],   // 6: shroomlight
-    [200, 255, 200],  // 7: magic/beacon
-    [180, 100, 255],  // 8: amethyst
-    [100, 255, 180],  // 9: emerald
-    [255, 100, 200],  // 10: pink
-    [100, 180, 255],  // 11: diamond
-    [255, 255, 100],  // 12: gold
-    [180, 255, 255],  // 13: ice
-    [255, 180, 100],  // 14: copper
-    [200, 200, 200],  // 15: neutral white
-];
-
-/// Find the nearest palette index for a given RGB color by Euclidean distance.
-pub fn emission_to_color_index(emission_color: [u8; 3]) -> u8 {
-    let mut best_idx = 0u8;
-    let mut best_dist = u32::MAX;
-    for (i, palette_color) in LIGHT_COLORS.iter().enumerate() {
-        let dr = emission_color[0] as i32 - palette_color[0] as i32;
-        let dg = emission_color[1] as i32 - palette_color[1] as i32;
-        let db = emission_color[2] as i32 - palette_color[2] as i32;
-        let dist = (dr * dr + dg * dg + db * db) as u32;
-        if dist < best_dist {
-            best_dist = dist;
-            best_idx = i as u8;
-        }
-    }
-    best_idx
-}
-
 /// The six cube faces, in the order the mesher and shaders expect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -95,6 +57,9 @@ pub enum BlockKind {
     Liquid,
     Foliage,
     Transparent,
+    /// Rendered per-block by the mesher (no greedy merging) so stacked
+    /// cactus segments keep the small gap between them.
+    Cactus,
 }
 
 /// Per-face texture tile index into the texture atlas.
@@ -196,6 +161,8 @@ pub enum DropCondition {
     SilkTouchForbidden,
     /// Drop count scales with Fortune level.
     FortuneScaled { base: u16, max_extra: u16 },
+    /// Drop this block's own assigned registry ID.
+    SelfDrop,
 }
 
 /// A single drop entry for a block.
@@ -268,6 +235,17 @@ impl BlockDrop {
             max_count: base + max_extra,
             probability: 1.0,
             condition: DropCondition::FortuneScaled { base, max_extra },
+        }
+    }
+
+    /// Create an explicit self-drop resolved when the registry assigns an ID.
+    pub fn self_drop() -> Self {
+        Self {
+            item: BlockId::AIR,
+            min_count: 1,
+            max_count: 1,
+            probability: 1.0,
+            condition: DropCondition::SelfDrop,
         }
     }
 }
@@ -502,7 +480,7 @@ impl BlockRegistry {
             required_tool: ToolType::None,
             required_tier: 0,
             drops: Vec::new(),
-                animation: None,
+            animation: None,
             material: BlockMaterial::default(),
         });
         // Atlas tile indices (see renderer atlas for the actual PNGs):
@@ -609,7 +587,7 @@ impl BlockRegistry {
                 blast_resistance: 10.0,
                 required_tool: ToolType::Axe,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None, // drops itself (wood)
                 material: BlockMaterial::default(),
             },
@@ -741,7 +719,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None, // drops itself
                 material: BlockMaterial::default(),
             },
@@ -789,7 +767,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -813,7 +791,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -823,7 +801,7 @@ impl BlockRegistry {
             BlockDef {
                 id: BlockId(0),
                 name: Arc::from("cactus"),
-                kind: BlockKind::Solid,
+                kind: BlockKind::Cactus,
                 solid: true,
                 opaque: true,
                 breakable: true,
@@ -837,7 +815,7 @@ impl BlockRegistry {
                 blast_resistance: 0.4,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -861,7 +839,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -885,7 +863,7 @@ impl BlockRegistry {
                 blast_resistance: 0.0,
                 required_tool: ToolType::None,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -909,7 +887,7 @@ impl BlockRegistry {
                 blast_resistance: 10.0,
                 required_tool: ToolType::Axe,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -957,7 +935,7 @@ impl BlockRegistry {
                 blast_resistance: 10.0,
                 required_tool: ToolType::Axe,
                 required_tier: 0,
-                drops: vec![BlockDrop::simple(BlockId(0))],
+                drops: vec![BlockDrop::self_drop()],
                 animation: None,
                 material: BlockMaterial::default(),
             },
@@ -1117,7 +1095,7 @@ impl BlockRegistry {
             required_tool: ToolType::None,
             required_tier: 0,
             drops: Vec::new(),
-                animation: None,
+            animation: None,
             material: BlockMaterial::default(),
         });
         for bd in blocks {
@@ -1127,6 +1105,7 @@ impl BlockRegistry {
                 "liquid" => BlockKind::Liquid,
                 "foliage" => BlockKind::Foliage,
                 "transparent" => BlockKind::Transparent,
+                "cactus" => BlockKind::Cactus,
                 _ => BlockKind::Solid,
             };
             let textures = match &bd.textures {
@@ -1175,8 +1154,9 @@ impl BlockRegistry {
             // registry.
             let name: Arc<str> = Arc::from(bd.name.as_str());
             let map_color = bd.map_color.unwrap_or_else(|| default_map_color(&bd.name));
-            let emission_color = bd.emission_color
-                .map(|c| [c[0].min(255), c[1].min(255), c[2].min(255)])
+            let emission_color = bd
+                .emission_color
+                .map(|c| [c[0], c[1], c[2]])
                 .unwrap_or(DEFAULT_EMISSION_COLOR);
             reg.add_named_owned(
                 Arc::clone(&name),
@@ -1195,7 +1175,11 @@ impl BlockRegistry {
                     map_color,
                     hardness: bd.hardness.unwrap_or(1.5),
                     blast_resistance: bd.blast_resistance.unwrap_or(6.0),
-                    required_tool: bd.required_tool.as_deref().map(parse_tool_type).unwrap_or(ToolType::None),
+                    required_tool: bd
+                        .required_tool
+                        .as_deref()
+                        .map(parse_tool_type)
+                        .unwrap_or(ToolType::None),
                     required_tier: bd.required_tier.unwrap_or(0),
                     drops: Vec::new(),
                     animation: None,
@@ -1225,8 +1209,22 @@ impl BlockRegistry {
         if def.map_color == [200, 160, 200, 255] {
             def.map_color = default_map_color(name);
         }
+        Self::resolve_self_drops(&mut def);
         self.by_name.insert(arc.to_string(), def.id);
         self.defs.push(def);
+    }
+
+    /// Rewrite explicit `SelfDrop` entries to the definition's assigned ID.
+    /// Builtin self-drops are authored before the final registry ID exists;
+    /// resolution happens only after the ID is known. An actually empty drop
+    /// table remains an explicit no-drop policy.
+    fn resolve_self_drops(def: &mut BlockDef) {
+        for drop in &mut def.drops {
+            if matches!(drop.condition, DropCondition::SelfDrop) {
+                drop.item = def.id;
+                drop.condition = DropCondition::Always;
+            }
+        }
     }
 
     /// Insert a block whose name string is already owned (used by
@@ -1238,6 +1236,7 @@ impl BlockRegistry {
         if def.map_color == [200, 160, 200, 255] {
             def.map_color = default_map_color(&name);
         }
+        Self::resolve_self_drops(&mut def);
         self.by_name.insert(name.to_string(), def.id);
         self.defs.push(def);
     }
@@ -1309,7 +1308,9 @@ fn solid_opaque(tile: u16) -> BlockDef {
         blast_resistance: 6.0,
         required_tool: ToolType::None,
         required_tier: 0,
-        drops: Vec::new(),
+        // Resolve the explicit self-drop after `add_named` assigns the
+        // definition's final registry ID.
+        drops: vec![BlockDrop::self_drop()],
         animation: None,
         material: BlockMaterial::default(),
     }
@@ -1367,7 +1368,8 @@ pub fn default_map_color(name: &str) -> [u8; 4] {
     if n.contains("mushroom") {
         return [180, 120, 80, 255];
     }
-    if n.contains("torch") || n.contains("flower") || n.contains("poppy") || n.contains("dandelion") {
+    if n.contains("torch") || n.contains("flower") || n.contains("poppy") || n.contains("dandelion")
+    {
         return [200, 180, 60, 255];
     }
     if n.contains("cactus") {
@@ -1425,6 +1427,41 @@ mod tests {
         assert!(reg.is_solid(stone));
         assert!(reg.is_opaque(stone));
         assert_eq!(reg.light_absorption(stone), 15);
+    }
+
+    #[test]
+    fn builtin_self_drops_resolve_after_id_assignment() {
+        let reg = BlockRegistry::with_builtins();
+        for name in [
+            "wood",
+            "torch",
+            "poppy",
+            "dandelion",
+            "cactus",
+            "birch_log",
+            "spruce_log",
+        ] {
+            let id = reg.id_of(name).unwrap();
+            let def = reg.get(id);
+            assert!(!def.drops.is_empty(), "{name} should have an explicit drop");
+            assert!(def.drops.iter().all(|drop| !drop.item.is_air()));
+            assert_eq!(def.drops[0].item, id, "{name} should drop itself");
+        }
+    }
+
+    #[test]
+    fn builtin_empty_drop_tables_stay_empty() {
+        let reg = BlockRegistry::with_builtins();
+        for name in [
+            "leaves",
+            "birch_leaves",
+            "spruce_leaves",
+            "glass",
+            "tall_grass",
+        ] {
+            let id = reg.id_of(name).unwrap();
+            assert!(reg.get(id).drops.is_empty(), "{name} should have no drops");
+        }
     }
 
     #[test]

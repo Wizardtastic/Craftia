@@ -23,7 +23,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
-repository = "https://example.com/voxel-engine"
+repository = "https://github.com/Wizardtastic/Craftia"
 
 # Shared dependency versions. Crates inherit via `foo.workspace = true`.
 # Keeping these in one place makes upgrades and auditing trivial.
@@ -50,6 +50,7 @@ parking_lot = "0.12"
 
 # --- Compression ---
 flate2 = "1"
+zip = "0.6"
 
 # --- Vulkan / windowing ---
 ash = "0.38"

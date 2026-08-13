@@ -2,8 +2,8 @@
 //! component on the player entity. Runs each tick so the renderer can
 //! read HeldBlock.tile for first-person held item rendering.
 
-use voxel_ecs::World;
 use voxel_core::BlockId;
+use voxel_ecs::World;
 
 use crate::components::{HeldBlock, PlayerEntity};
 
@@ -15,6 +15,10 @@ pub struct HotbarResource {
     pub tile: u32,
     /// BlockId of the currently selected hotbar slot.
     pub selected_block: BlockId,
+    /// Tier of the currently selected tool. Zero means hand/no tool.
+    /// The hotbar currently stores block IDs, so the engine supplies this
+    /// separately until item/tool definitions are fully data-driven.
+    pub selected_tool_tier: u8,
 }
 
 /// System: writes HeldBlock.tile on the player entity from HotbarResource.

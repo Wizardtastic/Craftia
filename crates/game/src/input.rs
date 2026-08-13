@@ -134,8 +134,10 @@ mod tests {
 
     #[test]
     fn take_mouse_delta_resets() {
-        let mut s = InputState::default();
-        s.mouse_delta = (1.0, 2.0);
+        let mut s = InputState {
+            mouse_delta: (1.0, 2.0),
+            ..Default::default()
+        };
         let d = s.take_mouse_delta();
         assert_eq!(d, (1.0, 2.0));
         assert_eq!(s.mouse_delta, (0.0, 0.0));

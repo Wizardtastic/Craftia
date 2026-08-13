@@ -73,6 +73,6 @@ impl MiningProgress {
 
     /// Check if the target has changed (requires reset).
     pub fn target_changed(&self, block_pos: [i32; 3]) -> bool {
-        self.target_block.map_or(true, |t| t != block_pos)
+        self.target_block != Some(block_pos)
     }
 }

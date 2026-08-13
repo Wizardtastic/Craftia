@@ -14,7 +14,7 @@ use voxel_core::{
 };
 
 use crate::schematic::{SchematicEntity, SchematicId};
-use crate::{chunk::Chunk, gen::TerrainGenerator, mesh::ChunkMeshBundle, registry::BlockRegistry};
+use crate::{chunk::Chunk, gen::TerrainGenerator, registry::BlockRegistry};
 
 /// Number of shards for the chunk storage. Must be a power of two.
 const NUM_SHARDS: usize = 16;
@@ -56,13 +56,19 @@ impl ShardedChunks {
 
     /// Read-only access to the shard containing `pos`.
     #[inline]
-    pub fn read_shard(&self, pos: ChunkPos) -> parking_lot::RwLockReadGuard<'_, HashMap<ChunkPos, Chunk>> {
+    pub fn read_shard(
+        &self,
+        pos: ChunkPos,
+    ) -> parking_lot::RwLockReadGuard<'_, HashMap<ChunkPos, Chunk>> {
         self.shards[Self::shard_index(pos)].read()
     }
 
     /// Write access to the shard containing `pos`.
     #[inline]
-    pub fn write_shard(&self, pos: ChunkPos) -> parking_lot::RwLockWriteGuard<'_, HashMap<ChunkPos, Chunk>> {
+    pub fn write_shard(
+        &self,
+        pos: ChunkPos,
+    ) -> parking_lot::RwLockWriteGuard<'_, HashMap<ChunkPos, Chunk>> {
         self.shards[Self::shard_index(pos)].write()
     }
 
@@ -88,7 +94,10 @@ pub struct World {
     reg: Arc<BlockRegistry>,
     gen: Arc<TerrainGenerator>,
     pub(crate) chunks: ShardedChunks,
-    meshes: RwLock<HashMap<ChunkPos, ChunkMeshBundle>>,
+    /// Positions of chunks with a finished mesh. The mesh data itself
+    /// travels to the renderer via `ChunkStreamEvent::MeshReady`; the world
+    /// only tracks which chunks are meshed (for counts / debug overlays).
+    meshes: RwLock<HashSet<ChunkPos>>,
     sun_dir: RwLock<glam::Vec3>,
     /// Positions of water sources/flowing water still spreading. Drained and
     /// refilled each water tick by `tick_water`.
@@ -160,7 +169,7 @@ impl World {
             reg,
             gen,
             chunks: ShardedChunks::new(),
-            meshes: RwLock::new(HashMap::new()),
+            meshes: RwLock::new(HashSet::new()),
             sun_dir: RwLock::new(glam::Vec3::new(0.3, 0.9, 0.1).normalize()),
             pending_flow: RwLock::new(HashSet::new()),
             source_water: RwLock::new(HashSet::new()),
@@ -202,8 +211,12 @@ impl World {
         meshes.remove(&pos);
     }
 
-    pub fn insert_mesh(&self, pos: ChunkPos, bundle: ChunkMeshBundle) {
-        self.meshes.write().insert(pos, bundle);
+    /// Record that the chunk at `pos` has a finished mesh. The world does not
+    /// store mesh data itself — the bundle travels to the renderer via
+    /// `ChunkStreamEvent::MeshReady`; this map only tracks which positions
+    /// are meshed (for counts and debug overlays).
+    pub fn insert_mesh(&self, pos: ChunkPos) {
+        self.meshes.write().insert(pos);
     }
 
     pub fn loaded_chunk_count(&self) -> usize {
@@ -323,26 +336,30 @@ impl World {
         let sample_torch = {
             let arc = Arc::clone(&arc);
             move |wx: i32, wy: i32, wz: i32| arc.get_torchlight_world(wx, wy, wz)
-        };            let mut cross_updates = Vec::new();
-            crate::light::compute_all(
-                &mut chunk_copy,
-                &reg,
-                sun_dir,
-                &sample_block,
-                &sample_torch,
-                &mut |pos, level, color| cross_updates.push((pos, level, color)),
-            );
+        };
+        let mut cross_updates = Vec::new();
+        crate::light::compute_all(
+            &mut chunk_copy,
+            &reg,
+            sun_dir,
+            &sample_block,
+            &sample_torch,
+            &mut |pos, level, color| cross_updates.push((pos, level, color)),
+        );
 
-            for (pos, level, color) in cross_updates {
-                self.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
-                self.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
-            }
+        for (pos, level, color) in cross_updates {
+            self.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
+            self.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
+        }
 
-            let mut chunks = self.chunks.write_shard(cp);
+        let mut chunks = self.chunks.write_shard(cp);
         if let Some(chunk) = chunks.get_mut(&cp) {
             std::mem::swap(&mut chunk.sunlight, &mut chunk_copy.sunlight);
             std::mem::swap(&mut chunk.torchlight, &mut chunk_copy.torchlight);
-            std::mem::swap(&mut chunk.torchlight_color, &mut chunk_copy.torchlight_color);
+            std::mem::swap(
+                &mut chunk.torchlight_color,
+                &mut chunk_copy.torchlight_color,
+            );
             chunk.dirty = true;
             chunk.light_dirty = true;
         }
@@ -363,7 +380,7 @@ impl World {
                 None => return (false, false, false, false),
             }
         };
-        let has_mesh = self.meshes.read().contains_key(&pos);
+        let has_mesh = self.meshes.read().contains(&pos);
         (loaded.0, loaded.1, loaded.2, has_mesh)
     }
 
@@ -385,7 +402,7 @@ impl World {
                         None => (false, false, false),
                     }
                 };
-                let has_mesh = meshes.contains_key(&pos);
+                let has_mesh = meshes.contains(&pos);
                 result.push((pos, loaded, dirty, palette_mode, has_mesh));
             }
         }
@@ -398,16 +415,6 @@ impl World {
             return false;
         }
         self.is_chunk_loaded(block_to_chunk(IVec3::new(x, y, z)))
-    }
-
-    /// All currently-meshed chunk positions + a cheap clone of each bundle, for
-    /// the renderer to sync GPU buffers. Clones are shallow-ish (Vec of PODs).
-    pub fn snapshot_meshes(&self) -> Vec<(ChunkPos, ChunkMeshBundle)> {
-        self.meshes
-            .read()
-            .iter()
-            .map(|(p, b)| (*p, b.clone()))
-            .collect()
     }
 
     // --- block queries -----------------------------------------------------
@@ -614,13 +621,15 @@ impl World {
         let lz = z - origin.z;
 
         if level > 0 {
-            let water_id = self.reg.id_of("water").expect("water block must be registered");
+            let water_id = self
+                .reg
+                .id_of("water")
+                .expect("water block must be registered");
             let current = chunk.get(lx, ly, lz);
-            if current.is_air() || self.reg.is_liquid(current) {
-                if current != water_id {
+            if (current.is_air() || self.reg.is_liquid(current))
+                && current != water_id {
                     chunk.set(lx, ly, lz, water_id);
                 }
-            }
         } else {
             let current = chunk.get(lx, ly, lz);
             if self.reg.is_liquid(current) {
@@ -721,9 +730,17 @@ impl World {
                 *acc = WATER_TICK_INTERVAL;
             }
         }
-        let mut pending = self.pending_flow.write();
+        // Copy-then-swap: take the pending set out from under the lock so the
+        // simulation step doesn't block `place_water`/`remove_water` (which
+        // briefly lock `pending_flow`), then merge the leftovers back in.
+        // Positions added mid-step land in the live set and run next tick;
+        // duplicates are harmless (the sim re-checks actual water levels).
+        let mut pending = std::mem::take(&mut *self.pending_flow.write());
         let mut buf = self.water_sim_buf.write();
-        crate::water::simulate_flow_step(self, &mut pending, &mut buf)
+        let affected = crate::water::simulate_flow_step(self, &mut pending, &mut buf);
+        drop(buf);
+        self.pending_flow.write().extend(pending);
+        affected
     }
 
     // --- meshing support ---------------------------------------------------
@@ -755,9 +772,9 @@ impl World {
             chunks.get(&pos).cloned()
         };
 
-        // Upgrade the self-reference once per call. The captured `Arc<World>`
-        // is what keeps the World alive across the closure lifetime; each
-        // sampler clones it independently so the closures don't share state.
+        // Upgrade the self-reference once per call; the samplers below all
+        // borrow the resulting `Arc<World>` (shared read access) for the
+        // duration of the synchronous call.
         let world_arc = self
             .self_ref
             .upgrade()
@@ -767,25 +784,19 @@ impl World {
             // No chunk: produce an empty result by giving the closure an empty
             // chunk. This path should be rare (mesh requested for unloaded chunk).
             let empty = Chunk::new(pos);
-            let sample: Box<dyn Fn(i32, i32, i32) -> BlockId> = Box::new(|_, _, _| BlockId::AIR);
-            let sample_water: Box<dyn Fn(i32, i32, i32) -> u8> = Box::new(|_, _, _| 0);
-            let sample_loaded: Box<dyn Fn(i32, i32, i32) -> bool> = Box::new(|_, _, _| false);
-            return f(&empty, &*sample, &*sample_water, &*sample_loaded);
+            let sample: &dyn Fn(i32, i32, i32) -> BlockId = &|_, _, _| BlockId::AIR;
+            let sample_water: &dyn Fn(i32, i32, i32) -> u8 = &|_, _, _| 0;
+            let sample_loaded: &dyn Fn(i32, i32, i32) -> bool = &|_, _, _| false;
+            return f(&empty, sample, sample_water, sample_loaded);
         };
 
-        let sample: Box<dyn Fn(i32, i32, i32) -> BlockId> = {
-            let arc = Arc::clone(&world_arc);
-            Box::new(move |x, y, z| arc.get_block(x, y, z))
-        };
-        let sample_water: Box<dyn Fn(i32, i32, i32) -> u8> = {
-            let arc = Arc::clone(&world_arc);
-            Box::new(move |x, y, z| arc.get_water_level_world(x, y, z))
-        };
-        let sample_loaded: Box<dyn Fn(i32, i32, i32) -> bool> = {
-            let arc = Arc::clone(&world_arc);
-            Box::new(move |x, y, z| arc.is_block_loaded(x, y, z))
-        };
-        f(&chunk, &*sample, &*sample_water, &*sample_loaded)
+        // Plain stack closures borrowing a single shared `Arc<World>` — no
+        // per-mesh heap allocations or `Arc` clones. The call is synchronous,
+        // so the closures don't need to outlive it.
+        let sample = |x: i32, y: i32, z: i32| world_arc.get_block(x, y, z);
+        let sample_water = |x: i32, y: i32, z: i32| world_arc.get_water_level_world(x, y, z);
+        let sample_loaded = |x: i32, y: i32, z: i32| world_arc.is_block_loaded(x, y, z);
+        f(&chunk, &sample, &sample_water, &sample_loaded)
     }
 }
 
@@ -885,12 +896,6 @@ mod tests {
         let world = World::new(42);
         let info = world.chunk_debug_info(ChunkPos::new(0, 0, 0));
         assert!(!info.0);
-    }
-
-    #[test]
-    fn snapshot_meshes_empty() {
-        let world = World::new(42);
-        assert!(world.snapshot_meshes().is_empty());
     }
 
     #[test]

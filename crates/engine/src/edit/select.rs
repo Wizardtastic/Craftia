@@ -6,7 +6,7 @@ use voxel_render::overlay::{OverlayData, OverlayLine};
 use voxel_world::World;
 
 /// Selection tool state.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct SelectTool {
     /// First corner (set on drag start).
     pub corner_a: Option<IVec3>,
@@ -16,17 +16,6 @@ pub struct SelectTool {
     pub dragging: bool,
     /// Confirmed selection (set after drag release, cleared on new drag or Escape).
     pub active_selection: Option<(IVec3, IVec3)>, // min, max
-}
-
-impl Default for SelectTool {
-    fn default() -> Self {
-        Self {
-            corner_a: None,
-            corner_b: None,
-            dragging: false,
-            active_selection: None,
-        }
-    }
 }
 
 impl SelectTool {
@@ -159,11 +148,7 @@ fn cube_wireframe(min: IVec3, max: IVec3, color: [u8; 4]) -> Vec<OverlayLine> {
 }
 
 /// Copy blocks from selection into a flat Vec<BlockId> with corners.
-pub fn copy_selection(
-    world: &World,
-    min: IVec3,
-    max: IVec3,
-) -> ((i32, i32, i32), (i32, i32, i32), Vec<BlockId>) {
+pub fn copy_selection(world: &World, min: IVec3, max: IVec3) -> crate::Clipboard {
     let mut blocks = Vec::new();
     for y in min.y..=max.y {
         for z in min.z..=max.z {
@@ -187,16 +172,14 @@ pub fn delete_selection(
         for z in min.z..=max.z {
             for x in min.x..=max.x {
                 let old = world.get_block(x, y, z);
-                if !old.is_air() {
-                    if world.set_block(x, y, z, BlockId::AIR) {
-                        let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
-                            x,
-                            y,
-                            z,
-                            old_block: old.0,
-                            new_block: 0,
-                        });
-                    }
+                if !old.is_air() && world.set_block(x, y, z, BlockId::AIR) {
+                    let _ = undo_redo.push_edit_batched(voxel_game::BlockEdit {
+                        x,
+                        y,
+                        z,
+                        old_block: old.0,
+                        new_block: 0,
+                    });
                 }
             }
         }

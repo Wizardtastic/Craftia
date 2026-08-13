@@ -105,10 +105,10 @@ pub(super) struct ReflectionUbo {
 /// attachment is appended:
 ///   3 — resolve depth (single-sample, STORE, copied to `scene_opaque_depth`
 ///       after the pass for the water/glass SSR ray-march)
-/// and both subpasses resolve their multisampled depth into it via a
-/// `VkSubpassDescriptionDepthStencilResolve` (Vulkan 1.2 core). Both subpasses
-/// get the resolve (matching the colour resolve) so `capture_frame`, which
-/// only runs subpass 0, also produces resolved depth.
+/// and subpass 0 resolves its multisampled depth into it via a
+/// `VkSubpassDescriptionDepthStencilResolve` (Vulkan 1.2 core). Subpass 1
+/// (particles) does not write depth, so only subpass 0 resolves it; this also
+/// keeps `capture_frame`, which only runs subpass 0, producing resolved depth.
 pub(super) fn create_render_pass(
     device: &ash::Device,
     color_format: vk::Format,
@@ -122,14 +122,16 @@ pub(super) fn create_render_pass(
     // API (ash 0.38 only chains `SubpassDescriptionDepthStencilResolve` onto
     // `SubpassDescription2`). Dispatch to the v2 builder; the caller only
     // passes `Some(mode)` when the device is Vulkan 1.2+.
-    if msaa && depth_resolve_mode.is_some() {
-        return create_render_pass_depth_resolve(
-            device,
-            color_format,
-            depth_format,
-            msaa_samples,
-            depth_resolve_mode.unwrap(),
-        );
+    if msaa {
+        if let Some(mode) = depth_resolve_mode {
+            return create_render_pass_depth_resolve(
+                device,
+                color_format,
+                depth_format,
+                msaa_samples,
+                mode,
+            );
+        }
     }
 
     // ── Attachment 0: (MSAA) color ──
@@ -137,7 +139,11 @@ pub(super) fn create_render_pass(
         .format(color_format)
         .samples(msaa_samples)
         .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(if msaa { vk::AttachmentStoreOp::DONT_CARE } else { vk::AttachmentStoreOp::STORE })
+        .store_op(if msaa {
+            vk::AttachmentStoreOp::DONT_CARE
+        } else {
+            vk::AttachmentStoreOp::STORE
+        })
         .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
         .initial_layout(vk::ImageLayout::UNDEFINED)
@@ -286,10 +292,16 @@ pub(super) fn create_render_pass(
 /// the device supports depth-stencil-resolve. Identical attachment/subpass
 /// layout to the MSAA flavour of the v1 builder, plus a 4th attachment:
 ///   3 — resolve depth (single-sample, STORE)
-/// Both subpasses resolve their multisampled depth into it via a chained
-/// `VkSubpassDescriptionDepthStencilResolve` with `depth_resolve_mode`
-/// (MIN when supported, else SAMPLE_ZERO). The resolved depth is copied to
-/// `scene_opaque_depth` after the pass for the water/glass SSR ray-march.
+/// Only subpass 0 resolves its multisampled depth into it via a chained
+/// `VkSubpassDescriptionDepthStencilResolve` (Vulkan 1.2 core). Subpass 1
+/// (particles) only reads depth as an input attachment, so it must not chain
+/// the resolve struct (and its resolved depth from subpass 0 is preserved
+/// untouched through subpass 1).
+///
+/// Subpass 0 chains a `VkSubpassDescriptionDepthStencilResolve` with
+/// `depth_resolve_mode` (MIN when supported, else SAMPLE_ZERO). The resolved
+/// depth is copied to `scene_opaque_depth` after the pass for the water/glass
+/// SSR ray-march.
 fn create_render_pass_depth_resolve(
     device: &ash::Device,
     color_format: vk::Format,
@@ -382,20 +394,16 @@ fn create_render_pass_depth_resolve(
         .attachment(2)
         .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .aspect_mask(vk::ImageAspectFlags::COLOR)];
-    let depth_resolve_ref_1 = vk::AttachmentReference2::default()
-        .attachment(3)
-        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-        .aspect_mask(vk::ImageAspectFlags::DEPTH);
-    let mut dsr_1 = vk::SubpassDescriptionDepthStencilResolve::default()
-        .depth_resolve_mode(depth_resolve_mode)
-        .stencil_resolve_mode(vk::ResolveModeFlags::NONE)
-        .depth_stencil_resolve_attachment(&depth_resolve_ref_1);
-    let mut subpass_1_desc = vk::SubpassDescription2::default()
+    // NOTE: subpass 1 (particles) reads depth as an input attachment and does
+    // NOT write it, so it has no depth-stencil attachment and must NOT chain a
+    // SubpassDescriptionDepthStencilResolve. Chaining one there makes the
+    // driver link the depth resolve onto a NULL depth-stencil attachment
+    // (NULL+0x20 write, SIGSEGV in vkCreateRenderPass2).
+    let subpass_1_desc = vk::SubpassDescription2::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_refs_1)
         .input_attachments(&input_refs_1)
         .resolve_attachments(&resolve_ref_1);
-    subpass_1_desc = subpass_1_desc.push_next(&mut dsr_1);
     let subpass_1 = subpass_1_desc;
 
     let dependencies = [
@@ -441,8 +449,9 @@ fn create_render_pass_depth_resolve(
         .map_err(|e| anyhow!("create_render_pass2 (depth resolve): {e:?}"))
 }
 
-
-pub(super) fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -514,7 +523,10 @@ pub(super) fn create_descriptor_set_layout(device: &ash::Device) -> Result<vk::D
         .map_err(|e| anyhow!("create_descriptor_set_layout: {e:?}"))
 }
 
-pub(super) fn create_descriptor_pool(device: &ash::Device, max_sets: usize) -> Result<vk::DescriptorPool> {
+pub(super) fn create_descriptor_pool(
+    device: &ash::Device,
+    max_sets: usize,
+) -> Result<vk::DescriptorPool> {
     let pool_sizes = [
         // 6 chunk UBOs (camera + fog + shadow + material table + reflection
         // + tile_remap) per frame set. The extra UBO is the set-1 tile_remap
@@ -552,24 +564,47 @@ pub(super) fn allocate_descriptor_sets(
         .map_err(|e| anyhow!("allocate_descriptor_sets: {e:?}"))
 }
 
+/// All buffer/image resources referenced by the chunk descriptor set.
+/// Bundled so [`update_descriptor_set`] stays below the arg-count lint.
+#[derive(Clone, Copy)]
+pub(super) struct DescriptorResources {
+    pub camera_buffer: vk::Buffer,
+    pub fog_buffer: vk::Buffer,
+    pub atlas_view: vk::ImageView,
+    pub atlas_sampler: vk::Sampler,
+    pub shadow_view: vk::ImageView,
+    pub shadow_sampler: vk::Sampler,
+    pub shadow_buffer: vk::Buffer,
+    pub material_table_buffer: vk::Buffer,
+    pub material_table_size: vk::DeviceSize,
+    pub scene_opaque_view: vk::ImageView,
+    pub scene_opaque_sampler: vk::Sampler,
+    pub scene_depth_view: vk::ImageView,
+    pub scene_depth_sampler: vk::Sampler,
+    pub reflection_buffer: vk::Buffer,
+}
+
 pub(super) fn update_descriptor_set(
     device: &ash::Device,
     set: vk::DescriptorSet,
-    camera_buffer: vk::Buffer,
-    fog_buffer: vk::Buffer,
-    atlas_view: vk::ImageView,
-    atlas_sampler: vk::Sampler,
-    shadow_view: vk::ImageView,
-    shadow_sampler: vk::Sampler,
-    shadow_buffer: vk::Buffer,
-    material_table_buffer: vk::Buffer,
-    material_table_size: vk::DeviceSize,
-    scene_opaque_view: vk::ImageView,
-    scene_opaque_sampler: vk::Sampler,
-    scene_depth_view: vk::ImageView,
-    scene_depth_sampler: vk::Sampler,
-    reflection_buffer: vk::Buffer,
+    res: DescriptorResources,
 ) {
+    let DescriptorResources {
+        camera_buffer,
+        fog_buffer,
+        atlas_view,
+        atlas_sampler,
+        shadow_view,
+        shadow_sampler,
+        shadow_buffer,
+        material_table_buffer,
+        material_table_size,
+        scene_opaque_view,
+        scene_opaque_sampler,
+        scene_depth_view,
+        scene_depth_sampler,
+        reflection_buffer,
+    } = res;
     let cam_info = vk::DescriptorBufferInfo::default()
         .buffer(camera_buffer)
         .offset(0)
@@ -747,17 +782,15 @@ pub(super) fn create_pipeline_layout(
     tile_remap_set_layout: vk::DescriptorSetLayout,
 ) -> Result<vk::PipelineLayout> {
     let push_range = vk::PushConstantRange::default()
-        .stage_flags(
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-        )
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
         .size(96); // vec4 + mat4 + vec4 (origin, view_proj, time)
-    // TWO set layouts: `chunk_set_layout` (camera, fog, atlas, shadow,
-    // material table, scene-opaque color/depth, reflection) and
-    // `tile_remap_set_layout` (TileRemap UBO consumed by the chunk frag at
-    // `layout(set = 1, binding = 0) uniform TileRemap`). The chunk pipeline
-    // layout MUST include both — without tile_remap at set 1 binding 0,
-    // `vkCreateGraphicsPipelines` fails VUID-07988 on chunk.frag.
+                   // TWO set layouts: `chunk_set_layout` (camera, fog, atlas, shadow,
+                   // material table, scene-opaque color/depth, reflection) and
+                   // `tile_remap_set_layout` (TileRemap UBO consumed by the chunk frag at
+                   // `layout(set = 1, binding = 0) uniform TileRemap`). The chunk pipeline
+                   // layout MUST include both — without tile_remap at set 1 binding 0,
+                   // `vkCreateGraphicsPipelines` fails VUID-07988 on chunk.frag.
     let set_layouts = [chunk_set_layout, tile_remap_set_layout];
     let push_ranges = [push_range];
     let create_info = vk::PipelineLayoutCreateInfo::default()
@@ -767,17 +800,32 @@ pub(super) fn create_pipeline_layout(
         .map_err(|e| anyhow!("create_pipeline_layout: {e:?}"))
 }
 
+/// Raster state + shaders for [`create_graphics_pipeline`].
+/// Bundled so the pipeline builder stays below the arg-count lint.
+#[derive(Clone, Copy)]
+pub(super) struct GraphicsPipelineConfig<'a> {
+    pub polygon_mode: vk::PolygonMode,
+    pub cull_mode: vk::CullModeFlags,
+    pub vs_spirv: &'a [u8],
+    pub fs_spirv: &'a [u8],
+    pub msaa_samples: vk::SampleCountFlags,
+    pub depth_write: bool,
+}
+
 pub(super) fn create_graphics_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-    polygon_mode: vk::PolygonMode,
-    cull_mode: vk::CullModeFlags,
-    vs_spirv: &[u8],
-    fs_spirv: &[u8],
-    msaa_samples: vk::SampleCountFlags,
-    depth_write: bool,
+    config: GraphicsPipelineConfig<'_>,
 ) -> Result<vk::Pipeline> {
+    let GraphicsPipelineConfig {
+        polygon_mode,
+        cull_mode,
+        vs_spirv,
+        fs_spirv,
+        msaa_samples,
+        depth_write,
+    } = config;
     let vert_spv: &[u8] = vs_spirv;
     let frag_spv: &[u8] = fs_spirv;
     let vert_code = spirv_to_u32(vert_spv);
@@ -937,7 +985,9 @@ pub(crate) fn spirv_to_u32(bytes: &[u8]) -> Vec<u32> {
     out
 }
 
-pub(super) fn create_ui_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_ui_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -974,16 +1024,25 @@ pub(super) fn allocate_ui_descriptor_set(
     Ok(sets[0])
 }
 
+/// The three texture (view, sampler) pairs bound by the UI descriptor set.
+/// Bundled so [`update_ui_descriptor_set`] stays below the arg-count lint.
+#[derive(Clone, Copy)]
+pub(super) struct UiTextures {
+    pub block: (vk::ImageView, vk::Sampler),
+    pub font: (vk::ImageView, vk::Sampler),
+    pub minimap: (vk::ImageView, vk::Sampler),
+}
+
 pub(super) fn update_ui_descriptor_set(
     device: &ash::Device,
     set: vk::DescriptorSet,
-    block_view: vk::ImageView,
-    block_sampler: vk::Sampler,
-    font_view: vk::ImageView,
-    font_sampler: vk::Sampler,
-    minimap_view: vk::ImageView,
-    minimap_sampler: vk::Sampler,
+    textures: UiTextures,
 ) {
+    let UiTextures {
+        block: (block_view, block_sampler),
+        font: (font_view, font_sampler),
+        minimap: (minimap_view, minimap_sampler),
+    } = textures;
     let block_info = vk::DescriptorImageInfo::default()
         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
         .image_view(block_view)
@@ -1118,8 +1177,8 @@ pub(super) fn create_ui_pipeline(
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
 
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(msaa_samples);
+    let multisampling =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
 
     // No depth test/write for UI — it draws on top of everything.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
@@ -1171,7 +1230,9 @@ pub(super) fn create_ui_pipeline(
 
 // ── Sky pipeline helpers ─────────────────────────────────────────────────
 
-pub(super) fn create_sky_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_sky_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let bindings = [vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
@@ -1254,8 +1315,8 @@ pub(super) fn create_sky_pipeline(
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
 
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(msaa_samples);
+    let multisampling =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
 
     // Sky pass: depth test LESS_OR_EQUAL (so it draws at depth=1, behind everything),
     // no depth write (so chunks can overwrite it).
@@ -1389,8 +1450,8 @@ pub(super) fn create_panorama_pipeline(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(msaa_samples);
+    let multisampling =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
     // Same depth settings as sky: draws behind everything.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
@@ -1887,7 +1948,9 @@ pub(super) fn create_post_pipeline(
     Ok(pipelines.into_iter().next().unwrap())
 }
 
-pub(super) fn create_post_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_post_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let bindings = [
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -2099,7 +2162,9 @@ pub(super) fn create_particle_pipeline(
 /// Layout for the particle-only descriptor set (set 1, binding 0). Holds the
 /// depth attachment as an input attachment — the fragment shader fetches it
 /// via `subpassLoad` to compute the soft-fade.
-pub(super) fn create_particle_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub(super) fn create_particle_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let binding = vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
@@ -2125,9 +2190,7 @@ pub(super) fn create_particle_pipeline_layout(
     particle_set_layout: vk::DescriptorSetLayout,
 ) -> Result<vk::PipelineLayout> {
     let push_range = vk::PushConstantRange::default()
-        .stage_flags(
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-        )
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
         .size(96);
     let set_layouts = [chunk_set_layout, particle_set_layout];
@@ -2142,7 +2205,10 @@ pub(super) fn create_particle_pipeline_layout(
 /// Pool + set allocation for the per-frame particle input attachment.
 /// Separate pool (no UBOs/samplers needed) — INPUT_ATTACHMENT type is enough.
 #[allow(dead_code)]
-pub(super) fn create_particle_descriptor_pool(device: &ash::Device, max_sets: usize) -> Result<vk::DescriptorPool> {
+pub(super) fn create_particle_descriptor_pool(
+    device: &ash::Device,
+    max_sets: usize,
+) -> Result<vk::DescriptorPool> {
     let pool_sizes = [vk::DescriptorPoolSize {
         ty: vk::DescriptorType::INPUT_ATTACHMENT,
         descriptor_count: max_sets as u32,
@@ -2252,8 +2318,8 @@ pub(super) fn create_occlusion_pipeline(
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
 
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(msaa_samples);
+    let multisampling =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
 
     // Depth test + write: standard LESS comparison.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()

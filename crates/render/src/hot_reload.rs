@@ -26,6 +26,8 @@ pub enum HotReloadEvent {
     /// A texture atlas asset (any `*.png` or `textures.toml` under the
     /// textures directory) changed.
     TextureAtlasChanged,
+    /// A texture pack `.zip` file was added, removed, or modified.
+    TexturePackChanged,
     /// The config file changed.
     ConfigChanged,
 }
@@ -51,6 +53,7 @@ impl FileWatcher {
     pub fn new(
         shader_dir: Option<PathBuf>,
         textures_dir: Option<PathBuf>,
+        texture_packs_dir: Option<PathBuf>,
         config_path: PathBuf,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel::<HotReloadEvent>();
@@ -58,7 +61,14 @@ impl FileWatcher {
         let thread = std::thread::Builder::new()
             .name("voxel-file-watcher".into())
             .spawn(move || {
-                run_watcher_thread(shader_dir, textures_dir, config_path, event_tx, shutdown_rx);
+                run_watcher_thread(
+                    shader_dir,
+                    textures_dir,
+                    texture_packs_dir,
+                    config_path,
+                    event_tx,
+                    shutdown_rx,
+                );
             })
             .expect("failed to spawn file-watcher thread");
         Self {
@@ -80,6 +90,7 @@ impl Drop for FileWatcher {
 fn run_watcher_thread(
     shader_dir: Option<PathBuf>,
     textures_dir: Option<PathBuf>,
+    texture_packs_dir: Option<PathBuf>,
     config_path: PathBuf,
     event_tx: mpsc::Sender<HotReloadEvent>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -90,6 +101,7 @@ fn run_watcher_thread(
     // can still pass them to `watcher.watch(...)` after construction.
     let shader_watch = shader_dir.clone();
     let textures_watch = textures_dir.clone();
+    let packs_watch = texture_packs_dir.clone();
     let config_watch = config_path.clone();
 
     let result: Result<RecommendedWatcher> = (|| {
@@ -102,9 +114,8 @@ fn run_watcher_thread(
             // Atlas + config use single slots (a path-level change is the only
             // signal — repeated saves of the same atlas entry or same config
             // file are coalesced within the window).
-            let last_emit: std::sync::Mutex<
-                std::collections::HashMap<String, Instant>,
-            > = std::sync::Mutex::new(std::collections::HashMap::new());
+            let last_emit: std::sync::Mutex<std::collections::HashMap<String, Instant>> =
+                std::sync::Mutex::new(std::collections::HashMap::new());
             move |res: notify::Result<notify::Event>| {
                 let event = match res {
                     Ok(e) => e,
@@ -142,10 +153,21 @@ fn run_watcher_thread(
                         .unwrap_or(false)
                         && (name.ends_with(".png") || name == "textures.toml")
                     {
-                        ("atlas".to_string(), Some(HotReloadEvent::TextureAtlasChanged))
-                    } else if path == &config_path
-                        || path.file_name() == config_path.file_name()
+                        (
+                            "atlas".to_string(),
+                            Some(HotReloadEvent::TextureAtlasChanged),
+                        )
+                    } else if texture_packs_dir
+                        .as_ref()
+                        .map(|d| path.starts_with(d))
+                        .unwrap_or(false)
+                        && name.ends_with(".zip")
                     {
+                        (
+                            "texture_pack".to_string(),
+                            Some(HotReloadEvent::TexturePackChanged),
+                        )
+                    } else if path == &config_path || path.file_name() == config_path.file_name() {
                         ("config".to_string(), Some(HotReloadEvent::ConfigChanged))
                     } else {
                         // Fallback: skip events for files we don't classify.
@@ -213,6 +235,21 @@ fn run_watcher_thread(
                 );
             }
         }
+        if let Some(pdir) = packs_watch.as_ref() {
+            if pdir.is_dir() {
+                if let Err(e) = watcher.watch(pdir, RecursiveMode::Recursive) {
+                    log::warn!(
+                        "file-watcher: failed to watch texture_packs_dir {}: {e}",
+                        pdir.display()
+                    );
+                }
+            } else {
+                log::warn!(
+                    "file-watcher: texture_packs_dir {} is not a directory; skipping watch",
+                    pdir.display()
+                );
+            }
+        }
         // Watch the parent dir so we get create + delete events too.
         let parent = config_watch.parent().unwrap_or_else(|| Path::new("."));
         if parent.is_dir() {
@@ -223,7 +260,10 @@ fn run_watcher_thread(
         // Also watch the file itself if available.
         if config_watch.is_file() {
             if let Err(e) = watcher.watch(&config_watch, RecursiveMode::NonRecursive) {
-                log::warn!("file-watcher: failed to watch {}: {e}", config_watch.display());
+                log::warn!(
+                    "file-watcher: failed to watch {}: {e}",
+                    config_watch.display()
+                );
             }
         }
         Ok(watcher)
@@ -259,13 +299,14 @@ pub fn compile_shader(src: &Path) -> Result<Vec<u8>> {
     // source in a session don't multiply temp files.
     let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("shader");
     let tmp_dir = std::env::temp_dir();
-    let tmp_out = tmp_dir.join(format!("voxel-shader-{}-{}.spv", stem, std::process::id()));        let output = Command::new(&glslang)
-            .arg("-V")
-            .arg("-o")
-            .arg(&tmp_out)
-            .arg(&src)
-            .output()
-            .with_context(|| format!("failed to spawn glslangValidator ({:?})", glslang))?;
+    let tmp_out = tmp_dir.join(format!("voxel-shader-{}-{}.spv", stem, std::process::id()));
+    let output = Command::new(&glslang)
+        .arg("-V")
+        .arg("-o")
+        .arg(&tmp_out)
+        .arg(&src)
+        .output()
+        .with_context(|| format!("failed to spawn glslangValidator ({:?})", glslang))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::warn!("glslangValidator failed for {}: {}", src.display(), stderr);
@@ -275,12 +316,8 @@ pub fn compile_shader(src: &Path) -> Result<Vec<u8>> {
             stderr.trim()
         ));
     }
-    let bytes = std::fs::read(&tmp_out).with_context(|| {
-        format!(
-            "failed to read compiled SPIR-V at {}",
-            tmp_out.display()
-        )
-    })?;
+    let bytes = std::fs::read(&tmp_out)
+        .with_context(|| format!("failed to read compiled SPIR-V at {}", tmp_out.display()))?;
     Ok(bytes)
 }
 

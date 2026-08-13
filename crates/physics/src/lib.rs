@@ -166,11 +166,32 @@ pub fn swept_aabb(
     // Y axis first so that AABB height changes (crouch↔stand) resolve
     // vertically before horizontal sweeps, preventing the taller AABB
     // from intersecting with blocks below the ground surface.
-    p = move_axis(world, p, box_half, glam::Vec3::new(0.0, delta.y, 0.0), &mut hit, 1);
+    p = move_axis(
+        world,
+        p,
+        box_half,
+        glam::Vec3::new(0.0, delta.y, 0.0),
+        &mut hit,
+        1,
+    );
     // X axis
-    p = move_axis(world, p, box_half, glam::Vec3::new(delta.x, 0.0, 0.0), &mut hit, 0);
+    p = move_axis(
+        world,
+        p,
+        box_half,
+        glam::Vec3::new(delta.x, 0.0, 0.0),
+        &mut hit,
+        0,
+    );
     // Z axis
-    p = move_axis(world, p, box_half, glam::Vec3::new(0.0, 0.0, delta.z), &mut hit, 2);
+    p = move_axis(
+        world,
+        p,
+        box_half,
+        glam::Vec3::new(0.0, 0.0, delta.z),
+        &mut hit,
+        2,
+    );
 
     let on_ground = hit[3] && delta.y < 0.0; // hit -Y while moving down
     MoveResult {
@@ -259,8 +280,8 @@ pub fn intersects_solid(world: &World, pos: glam::Vec3, half: glam::Vec3) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxel_core::Ray;
-    use voxel_world::world::World;
+    use voxel_core::{ChunkPos, Ray};
+    use voxel_world::{world::World, Chunk};
 
     #[test]
     fn raycast_voxels_air() {

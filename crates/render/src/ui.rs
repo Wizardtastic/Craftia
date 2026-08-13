@@ -6,7 +6,7 @@
 //! after the chunk pass.
 
 use bytemuck::{Pod, Zeroable};
-use voxel_core::ATLAS_TILE_SIZE;
+use voxel_core::{Rect, ATLAS_TILE_SIZE};
 
 use crate::atlas::{Atlas, ATLAS_TILES};
 
@@ -28,6 +28,16 @@ pub struct UiVertex {
 pub struct UiDrawData {
     pub vertices: Vec<UiVertex>,
     pub indices: Vec<u32>,
+}
+
+/// Visual style for [`UiDrawData::line_graph`] / [`UiDrawData::area_graph`].
+#[derive(Clone, Copy, Debug)]
+pub struct GraphStyle {
+    /// Optional Y-range clamp (None = auto-scale to data).
+    pub min_y: Option<f32>,
+    pub max_y: Option<f32>,
+    /// Line / fill colour.
+    pub color: [u8; 4],
 }
 
 impl UiDrawData {
@@ -102,13 +112,7 @@ impl UiDrawData {
 
     /// Push a filled triangle (3 vertices, 3 indices). Uses tex_id=0 (block
     /// atlas white tile).
-    pub fn triangle(
-        &mut self,
-        a: [f32; 2],
-        b: [f32; 2],
-        c: [f32; 2],
-        color: [u8; 4],
-    ) {
+    pub fn triangle(&mut self, a: [f32; 2], b: [f32; 2], c: [f32; 2], color: [u8; 4]) {
         let tile = 20u32; // white tile
         let tx = tile % ATLAS_TILES;
         let ty = tile / ATLAS_TILES;
@@ -120,11 +124,27 @@ impl UiDrawData {
         let _v_mid = (v0 + v1) * 0.5;
         let start = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&[
-            UiVertex { pos: a, uv: [u_mid, v0], color, tex_id: 0.0 },
-            UiVertex { pos: b, uv: [u0, v1], color, tex_id: 0.0 },
-            UiVertex { pos: c, uv: [u1, v1], color, tex_id: 0.0 },
+            UiVertex {
+                pos: a,
+                uv: [u_mid, v0],
+                color,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: b,
+                uv: [u0, v1],
+                color,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: c,
+                uv: [u1, v1],
+                color,
+                tex_id: 0.0,
+            },
         ]);
-        self.indices.extend_from_slice(&[start, start + 1, start + 2]);
+        self.indices
+            .extend_from_slice(&[start, start + 1, start + 2]);
     }
 
     /// Push a text string using the bitmap font (tex_id=1).
@@ -174,21 +194,12 @@ impl UiDrawData {
     /// across the rect width. `min_y`/`max_y` clamp the range
     /// (None = auto-scale to data). Each segment is drawn as a thin
     /// quad between adjacent points.
-    pub fn line_graph(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        values: &[f32],
-        min_y: Option<f32>,
-        max_y: Option<f32>,
-        color: [u8; 4],
-    ) {
+    pub fn line_graph(&mut self, rect: Rect, values: &[f32], style: GraphStyle) {
+        let Rect { x, y, w, h } = rect;
         if values.len() < 2 {
             return;
         }
-        let (lo, hi) = auto_range(values, min_y, max_y);
+        let (lo, hi) = auto_range(values, style.min_y, style.max_y);
         let range = (hi - lo).max(0.001);
         let bar_w = w / (values.len() - 1) as f32;
         let thickness = 1.5f32;
@@ -208,31 +219,49 @@ impl UiDrawData {
 
             let start = self.vertices.len() as u32;
             self.vertices.extend_from_slice(&[
-                UiVertex { pos: [x0 + nx, y0 + ny], uv: [0.0, 0.0], color, tex_id: 0.0 },
-                UiVertex { pos: [x0 - nx, y0 - ny], uv: [0.0, 0.0], color, tex_id: 0.0 },
-                UiVertex { pos: [x1 - nx, y1 - ny], uv: [0.0, 0.0], color, tex_id: 0.0 },
-                UiVertex { pos: [x1 + nx, y1 + ny], uv: [0.0, 0.0], color, tex_id: 0.0 },
+                UiVertex {
+                    pos: [x0 + nx, y0 + ny],
+                    uv: [0.0, 0.0],
+                    color: style.color,
+                    tex_id: 0.0,
+                },
+                UiVertex {
+                    pos: [x0 - nx, y0 - ny],
+                    uv: [0.0, 0.0],
+                    color: style.color,
+                    tex_id: 0.0,
+                },
+                UiVertex {
+                    pos: [x1 - nx, y1 - ny],
+                    uv: [0.0, 0.0],
+                    color: style.color,
+                    tex_id: 0.0,
+                },
+                UiVertex {
+                    pos: [x1 + nx, y1 + ny],
+                    uv: [0.0, 0.0],
+                    color: style.color,
+                    tex_id: 0.0,
+                },
             ]);
-            self.indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+            self.indices.extend_from_slice(&[
+                start,
+                start + 1,
+                start + 2,
+                start,
+                start + 2,
+                start + 3,
+            ]);
         }
     }
 
     /// Filled area graph. Same as line_graph but filled to the baseline.
-    pub fn area_graph(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        values: &[f32],
-        min_y: Option<f32>,
-        max_y: Option<f32>,
-        color: [u8; 4],
-    ) {
+    pub fn area_graph(&mut self, rect: Rect, values: &[f32], style: GraphStyle) {
+        let Rect { x, y, w, h } = rect;
         if values.is_empty() {
             return;
         }
-        let (lo, hi) = auto_range(values, min_y, max_y);
+        let (lo, hi) = auto_range(values, style.min_y, style.max_y);
         let range = (hi - lo).max(0.001);
         let bar_w = w / values.len() as f32;
         let baseline = y + h;
@@ -241,22 +270,15 @@ impl UiDrawData {
             let bx = x + i as f32 * bar_w;
             let bar_h = ((val - lo) / range * h).max(0.0);
             let by = baseline - bar_h;
-            self.quad(bx, by, bar_w.max(1.0), bar_h, color);
+            self.quad(bx, by, bar_w.max(1.0), bar_h, style.color);
         }
     }
 
     /// Stacked area graph from multiple series. Each series is drawn
     /// as an area graph where the baseline is the cumulative sum of
     /// all previous series.
-    pub fn stacked_area(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        series: &[&[f32]],
-        colors: &[[u8; 4]],
-    ) {
+    pub fn stacked_area(&mut self, rect: Rect, series: &[&[f32]], colors: &[[u8; 4]]) {
+        let Rect { x, y, w, h } = rect;
         if series.is_empty() {
             return;
         }
@@ -268,7 +290,10 @@ impl UiDrawData {
         // Compute cumulative totals to find the max for scaling.
         let mut max_total = 0.0f32;
         for i in 0..len {
-            let total: f32 = series.iter().map(|s| s.get(i).copied().unwrap_or(0.0)).sum();
+            let total: f32 = series
+                .iter()
+                .map(|s| s.get(i).copied().unwrap_or(0.0))
+                .sum();
             max_total = max_total.max(total);
         }
         let range = max_total.max(0.001);
@@ -278,29 +303,21 @@ impl UiDrawData {
         let mut cumulative = vec![0.0f32; len];
         for (si, s) in series.iter().enumerate() {
             let color = colors.get(si).copied().unwrap_or([200, 200, 200, 200]);
-            for i in 0..len {
+            for (i, c) in cumulative.iter_mut().enumerate() {
                 let val = s.get(i).copied().unwrap_or(0.0);
-                let base = cumulative[i];
+                let base = *c;
                 let bar_h = (val / range * h).max(0.0);
                 let base_h = (base / range * h).max(0.0);
                 let bx = x + i as f32 * bar_w;
                 let by = y + h - base_h - bar_h;
                 self.quad(bx, by, bar_w.max(1.0), bar_h, color);
-                cumulative[i] += val;
+                *c += val;
             }
         }
     }
 
     /// Horizontal grid lines with optional value labels.
-    pub fn grid_h(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        divisions: u32,
-        line_color: [u8; 4],
-    ) {
+    pub fn grid_h(&mut self, x: f32, y: f32, w: f32, h: f32, divisions: u32, line_color: [u8; 4]) {
         for i in 0..=divisions {
             let ly = y + (i as f32 / divisions as f32) * h;
             self.quad(x, ly, w, 1.0, line_color);

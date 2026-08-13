@@ -22,7 +22,6 @@ use voxel_world::StreamConfig;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
-
 pub struct GameSettings {
     pub graphics: GraphicsSettings,
 
@@ -37,7 +36,6 @@ pub struct GameSettings {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
-
 pub struct GraphicsSettings {
     pub width: u32,
 
@@ -54,11 +52,13 @@ pub struct GraphicsSettings {
     pub exposure: f32,
 
     pub vignette_strength: f32,
-
     /// Directory containing PNG texture overrides (filenames `<tile_index>.png`).
-
     /// If `None` or the directory doesn't exist, the procedural atlas is used.
     pub textures_dir: Option<String>,
+    /// Directory containing texture pack `.zip` files.
+    /// Texture packs override base textures on a per-tile basis.
+    /// Later packs in alphabetical order win over earlier ones.
+    pub texture_packs_dir: Option<String>,
 
     /// MSAA sample count (1, 2, 4, or 8). Set to 1 to disable MSAA.
     pub msaa_samples: u32,
@@ -102,7 +102,6 @@ pub struct GraphicsSettings {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
-
 pub struct WorldSettings {
     pub seed: i32,
 
@@ -117,7 +116,6 @@ pub struct WorldSettings {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
-
 pub struct PlayerSettings {
     pub walk_speed: f32,
 
@@ -137,12 +135,9 @@ pub struct PlayerSettings {
 }
 
 /// Keybind settings. Each value is a key name string (e.g. "F3", "T", "Escape").
-
 /// These are matched against `winit::keyboard::KeyCode` names at runtime.
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
-
 pub struct KeybindSettings {
     pub debug_overlay: String,
 
@@ -185,13 +180,11 @@ pub struct KeybindSettings {
     pub fullscreen_map: String,
 }
 
-/// Resolved mapping from `KeyCode` ├ó┬å┬Æ `Action`. Built once from `KeybindSettings`.
-
+/// Resolved mapping from `KeyCode` → `Action`. Built once from `KeybindSettings`.
 pub type KeybindMap = HashMap<winit::keyboard::KeyCode, Action>;
 
 impl KeybindSettings {
-    /// Parse the string key names into a `KeyCode ├ó┬å┬Æ Action` map.
-
+    /// Parse the string key names into a `KeyCode → Action` map.
     pub fn resolve(&self) -> KeybindMap {
         let mut map = KeybindMap::new();
 
@@ -420,13 +413,9 @@ impl KeybindSettings {
 }
 
 /// Resolve the workspace-root `shaders/` directory relative to this crate's
-
 /// manifest dir. Used by `GameSettings::to_renderer_config` to populate
-
 /// `RendererConfig::shader_dir` so the renderer can locate GLSL source files
-
 /// for runtime hot-reload.
-
 pub fn shader_source_dir() -> Option<std::path::PathBuf> {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
@@ -445,7 +434,6 @@ pub fn shader_source_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Parse a key name string (e.g. "F3", "T", "Escape", "Space") into a `KeyCode`.
-
 fn parse_key(name: &str) -> Option<winit::keyboard::KeyCode> {
     use winit::keyboard::KeyCode;
 
@@ -574,10 +562,10 @@ fn parse_key(name: &str) -> Option<winit::keyboard::KeyCode> {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
-
 pub struct DebugSettings {
     pub show_overlay: bool,
-}impl Default for GraphicsSettings {
+}
+impl Default for GraphicsSettings {
     fn default() -> Self {
         Self {
             width: 1280,
@@ -589,6 +577,7 @@ pub struct DebugSettings {
             exposure: 0.6,
             vignette_strength: 0.15,
             textures_dir: None,
+            texture_packs_dir: None,
             msaa_samples: 4,
             occlusion_culling: true,
             ssao_enabled: true,
@@ -750,7 +739,6 @@ macro_rules! graphics_fields {
 
 impl GameSettings {
     /// Load from a TOML file. Returns defaults if the file doesn't exist.
-
     pub fn load(path: &std::path::Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(content) => match toml::from_str::<GameSettings>(&content) {
@@ -777,8 +765,7 @@ impl GameSettings {
 
     /// Save settings to a TOML file on disk.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -788,7 +775,6 @@ impl GameSettings {
     }
 
     /// Convert to the engine's `RendererConfig`.
-
     pub fn to_renderer_config(&self) -> RendererConfig {
         RendererConfig {
             validation: false,
@@ -804,6 +790,11 @@ impl GameSettings {
             textures_dir: self
                 .graphics
                 .textures_dir
+                .as_ref()
+                .map(std::path::PathBuf::from),
+            texture_packs_dir: self
+                .graphics
+                .texture_packs_dir
                 .as_ref()
                 .map(std::path::PathBuf::from),
 
@@ -824,7 +815,6 @@ impl GameSettings {
     }
 
     /// Convert to the engine's `StreamConfig`.
-
     pub fn to_stream_config(&self) -> StreamConfig {
         StreamConfig {
             load_radius: self.world.load_radius,
@@ -844,7 +834,6 @@ impl GameSettings {
     }
 
     /// Convert to the game's `PlayerConfig`.
-
     pub fn to_player_config(&self) -> PlayerConfig {
         PlayerConfig {
             walk_speed: self.player.walk_speed,
@@ -866,23 +855,14 @@ impl GameSettings {
     }
 
     /// Build an `EngineConfig` from this `GameSettings`. CLI/engine-only
-
     /// fields (`title`, `capture_*`, `spawn`, `fullscreen`,
-
     /// `profile_cpu_systems`, `config_path`) take their hardcoded
-
     /// defaults; the caller should layer per-field CLI overrides on top
-
     /// of the returned value. This is the canonical mapping shared by
-
     /// `EngineConfig::default()` (via
-
     /// `GameSettings::default().to_engine_config()`) and
-
     /// `crates/app/src/main.rs` (after applying CLI flags), so the two
-
     /// paths can never drift apart.
-
     pub fn to_engine_config(&self) -> crate::EngineConfig {
         let render = self.to_renderer_config();
         let stream = self.to_stream_config();
@@ -920,7 +900,6 @@ impl GameSettings {
 }
 
 #[cfg(test)]
-
 mod tests {
 
     use super::*;

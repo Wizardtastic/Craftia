@@ -20,7 +20,10 @@ pub struct DebugEntityMarker;
 /// entity handle.
 pub fn spawn_debug_entity(ecs: &mut World, pos: Vec3) -> Entity {
     ecs.spawn((
-        Transform { pos, rot: Quat::IDENTITY },
+        Transform {
+            pos,
+            rot: Quat::IDENTITY,
+        },
         Velocity::default(),
         DebugEntityMarker,
     ))

@@ -1,4 +1,4 @@
-﻿//! Framebuffer builder: converts `ColumnSample` data into an RGBA pixel
+//! Framebuffer builder: converts `ColumnSample` data into an RGBA pixel
 //! buffer suitable for GPU upload as the minimap texture.
 
 use voxel_world::BlockRegistry;

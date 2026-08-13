@@ -1,0 +1,123 @@
+# GitHub Actions release workflow.
+#
+# Builds official Craftia release binaries for Linux and Windows, packages
+# them with the shared scripts/package.sh (same code path as local builds),
+# and publishes them as a GitHub Release when a tag like `v0.1.0` is pushed.
+#
+# Tags:   v<version>  (e.g. `git tag v0.1.0 && git push --tags`)
+# Manual: run the "Release" workflow from the Actions tab to build without a tag.
+#
+# No Vulkan SDK is needed on the runners: shaders are compiled to SPIR-V at
+# build time by glslangValidator (installed below) and embedded in the binary.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shader compiler (glslangValidator)
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --bin voxel
+
+      - name: Package
+        run: bash scripts/package.sh linux "${GITHUB_REF_NAME#v}" target/release/voxel
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: craftia-linux
+          # Only the archives + checksums — not the unpacked dist/ folder.
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shader compiler (glslangValidator)
+        shell: bash
+        run: |
+          # Note: only the rolling "main-tot" glslang release ships Windows
+          # binaries (versioned releases dropped them), so we pin to it.
+          curl -fL -o glslang.zip \
+            https://github.com/KhronosGroup/glslang/releases/download/main-tot/glslang-main-windows-x86_64-release.zip
+          # bsdtar is guaranteed on windows runners and handles zip archives.
+          mkdir glslang
+          tar -xf glslang.zip -C glslang
+          # The glslang archive ships bin/glslang.exe; newer versions renamed
+          # glslangValidator -> glslang. render/build.rs looks for
+          # glslangValidator on PATH, so alias it and export the bin dir.
+          GLSLANG_BIN="$(dirname "$(find glslang -name glslang.exe | head -1)")"
+          cp "$GLSLANG_BIN/glslang.exe" "$GLSLANG_BIN/glslangValidator.exe"
+          echo "glslang in: $GLSLANG_BIN"
+          echo "$GLSLANG_BIN" >> "$GITHUB_PATH"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --bin voxel
+
+      - name: Package
+        shell: bash
+        run: bash scripts/package.sh windows "${GITHUB_REF_NAME#v}" target/release/voxel.exe
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: craftia-windows
+          # Only the archives + checksums — not the unpacked dist/ folder.
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows]
+    # Only publish when triggered by a tag push. On manual (workflow_dispatch)
+    # runs there is no tag for softprops/action-gh-release to attach to.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Regenerate SHA256SUMS here instead of copying the per-platform files:
+      # both build jobs upload a file literally named SHA256SUMS, so a plain
+      # cp would silently drop the Linux checksums.
+      - name: Collect archives and regenerate checksums
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} release/ \;
+          (cd release && sha256sum *.zip *.tar.gz > SHA256SUMS)
+          ls -lh release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

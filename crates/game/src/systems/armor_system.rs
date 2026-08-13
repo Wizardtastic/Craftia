@@ -5,10 +5,10 @@
 //! 2. Applies damage reduction
 //! 3. Decrements armor durability on hit
 
-use voxel_ecs::World;
 use voxel_combat::DamageQueue;
-use voxel_gamemode::GameMode;
 use voxel_core::BlockId;
+use voxel_ecs::World;
+use voxel_gamemode::GameMode;
 
 use crate::components::PlayerEntity;
 use crate::inventory::SurvivalInventory;
@@ -26,7 +26,10 @@ pub struct ArmorProperties {
 }
 
 /// Compute total defense from armor slots.
-pub fn compute_armor_defense(inventory: &SurvivalInventory, registry: &voxel_world::BlockRegistry) -> (u8, u8) {
+pub fn compute_armor_defense(
+    inventory: &SurvivalInventory,
+    registry: &voxel_world::BlockRegistry,
+) -> (u8, u8) {
     let mut total_defense = 0u8;
     let mut total_toughness = 0u8;
 
@@ -82,11 +85,7 @@ fn get_armor_stats(id: BlockId, registry: &voxel_world::BlockRegistry) -> (u8, u
 }
 
 /// Apply armor reduction to damage.
-pub fn apply_armor_reduction(
-    damage: f32,
-    total_defense: u8,
-    _total_toughness: u8,
-) -> f32 {
+pub fn apply_armor_reduction(damage: f32, total_defense: u8, _total_toughness: u8) -> f32 {
     // Formula: damage_after = damage * (1 - min(total_defense / 25, 0.8))
     let defense_factor = 1.0 - (total_defense as f32 / 25.0).min(0.8);
     damage * defense_factor
@@ -99,7 +98,10 @@ pub fn armor_system(world: &mut World, _dt: f32) {
         None => return,
     };
 
-    let game_mode = world.get::<GameMode>(player_entity).copied().unwrap_or(GameMode::Survival);
+    let game_mode = world
+        .get::<GameMode>(player_entity)
+        .copied()
+        .unwrap_or(GameMode::Survival);
     if !game_mode.can_have_armor() {
         return;
     }

@@ -253,7 +253,12 @@ impl GpuBuffer {
     /// Both `offset` and `size` MUST be multiples of `nonCoherentAtomSize`
     /// of the underlying memory type (per Vulkan spec); the caller is
     /// responsible for picking aligned ranges.
-    pub fn flush_range(&self, device: &ash::Device, _offset: vk::DeviceSize, _size: vk::DeviceSize) -> Result<()> {
+    pub fn flush_range(
+        &self,
+        device: &ash::Device,
+        _offset: vk::DeviceSize,
+        _size: vk::DeviceSize,
+    ) -> Result<()> {
         let allocation = self
             .allocation
             .as_ref()
@@ -349,8 +354,7 @@ impl Drop for GpuBuffer {
                 if let Ok(mut seen) = BUFFER_LEAK_LOCATIONS.lock() {
                     if seen.len() >= FINGERPRINT_CAP {
                         seen.clear();
-                        let rotated = BUFFER_FINGERPRINT_ROTATED
-                            .fetch_add(1, Ordering::Relaxed);
+                        let rotated = BUFFER_FINGERPRINT_ROTATED.fetch_add(1, Ordering::Relaxed);
                         if rotated == 0 {
                             log::warn!(
                                 "post-budget GpuBuffer fingerprint store reached {} entries; rotating. \
@@ -541,7 +545,14 @@ impl GpuImage {
         format: vk::Format,
         name: &str,
     ) -> Result<Self> {
-        Self::color_attachment_msaa(device, alloc, extent, format, vk::SampleCountFlags::TYPE_1, name)
+        Self::color_attachment_msaa(
+            device,
+            alloc,
+            extent,
+            format,
+            vk::SampleCountFlags::TYPE_1,
+            name,
+        )
     }
 
     /// Create a color attachment image with an explicit sample count (for MSAA).
@@ -603,7 +614,8 @@ impl GpuImage {
             extent: extent3d,
             allocated_at: std::panic::Location::caller(),
         })
-    }    #[track_caller]
+    }
+    #[track_caller]
     pub fn depth_array(
         device: &ash::Device,
         alloc: &Alloc,
@@ -815,8 +827,7 @@ impl Drop for GpuImage {
                 if let Ok(mut seen) = IMAGE_LEAK_LOCATIONS.lock() {
                     if seen.len() >= FINGERPRINT_CAP {
                         seen.clear();
-                        let rotated = IMAGE_FINGERPRINT_ROTATED
-                            .fetch_add(1, Ordering::Relaxed);
+                        let rotated = IMAGE_FINGERPRINT_ROTATED.fetch_add(1, Ordering::Relaxed);
                         if rotated == 0 {
                             log::warn!(
                                 "post-budget GpuImage fingerprint store reached {} entries; rotating. \
@@ -973,8 +984,7 @@ mod tests {
             ));
         }
 
-        let counter_after_step1 =
-            GPUBUFFER_LEAK_WARN_COUNT.load(Ordering::Relaxed);
+        let counter_after_step1 = GPUBUFFER_LEAK_WARN_COUNT.load(Ordering::Relaxed);
         assert!(
             counter_after_step1 > LEAK_WARN_BUDGET,
             "post-budget branch not exercised: counter={counter_after_step1}",
@@ -1013,8 +1023,7 @@ mod tests {
 
         // Total drops = 9 + 2 + 1 = 12. Counter should match.
         let total_drops = (LEAK_WARN_BUDGET + 1) + 2 + 1;
-        let counter_final =
-            GPUBUFFER_LEAK_WARN_COUNT.load(Ordering::Relaxed);
+        let counter_final = GPUBUFFER_LEAK_WARN_COUNT.load(Ordering::Relaxed);
         assert_eq!(
             counter_final, total_drops,
             "warning counter should equal the total number of leaked buffers seen",

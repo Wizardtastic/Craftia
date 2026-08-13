@@ -1,7 +1,7 @@
 //! Property animation system: evaluates keyframes and applies to entity properties.
 
-use voxel_ecs::World;
 use voxel_animation::data::TargetedProperty;
+use voxel_ecs::World;
 
 use crate::components::property_animator::{PropertyAnimator, PropertyTarget};
 use crate::components::Transform;
@@ -9,10 +9,8 @@ use crate::components::Transform;
 /// Property animation system entry point. Called each fixed timestep.
 pub fn property_animation_system(world: &mut World, dt: f32) {
     // Collect entities with PropertyAnimator to avoid borrow issues.
-    let entities: Vec<voxel_ecs::Entity> = world
-        .query::<&PropertyAnimator>()
-        .map(|(e, _)| e)
-        .collect();
+    let entities: Vec<voxel_ecs::Entity> =
+        world.query::<&PropertyAnimator>().map(|(e, _)| e).collect();
 
     for entity in entities {
         // Tick the animator.
@@ -32,12 +30,12 @@ pub fn property_animation_system(world: &mut World, dt: f32) {
 
         // Find the channel targeting Translation (for Position target).
         for channel in &clip.channels {
-            let should_apply = match (&animator.target, &channel.property) {
-                (PropertyTarget::Position, TargetedProperty::Translation) => true,
-                (PropertyTarget::RotationEuler, TargetedProperty::Rotation) => true,
-                (PropertyTarget::Scale, TargetedProperty::Scale) => true,
-                _ => false,
-            };
+            let should_apply = matches!(
+                (&animator.target, &channel.property),
+                (PropertyTarget::Position, TargetedProperty::Translation)
+                    | (PropertyTarget::RotationEuler, TargetedProperty::Rotation)
+                    | (PropertyTarget::Scale, TargetedProperty::Scale)
+            );
 
             if !should_apply {
                 continue;

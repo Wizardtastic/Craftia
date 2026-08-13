@@ -167,22 +167,19 @@ impl EatingState {
 
 /// Difficulty level affecting hunger and damage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Difficulty {
     Peaceful,
     Easy,
+    #[default]
     Normal,
     Hard,
 }
 
-impl Default for Difficulty {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 impl Difficulty {
     /// Parse difficulty from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "peaceful" => Some(Self::Peaceful),
             "easy" => Some(Self::Easy),
@@ -253,8 +250,10 @@ mod tests {
 
     #[test]
     fn exhaustion_triggers_decay() {
-        let mut h = Hunger::default();
-        h.exhaustion = 3.5;
+        let mut h = Hunger {
+            exhaustion: 3.5,
+            ..Default::default()
+        };
         h.add_exhaustion(0.6);
         let starved = h.tick();
         assert!(!starved);

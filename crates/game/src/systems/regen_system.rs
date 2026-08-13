@@ -5,8 +5,8 @@
 //! 2. Applies saturation-based regeneration (burst heal after eating)
 //! 3. Applies natural regeneration based on food level and difficulty
 
-use voxel_ecs::World;
 use voxel_combat::{Health, RegenState};
+use voxel_ecs::World;
 use voxel_gamemode::{GameMode, HealthRegenMode};
 use voxel_hunger::{Difficulty, Hunger};
 
@@ -20,7 +20,10 @@ pub fn regeneration_system(world: &mut World, _dt: f32) {
         None => return,
     };
 
-    let game_mode = world.get::<GameMode>(player_entity).copied().unwrap_or(GameMode::Survival);
+    let game_mode = world
+        .get::<GameMode>(player_entity)
+        .copied()
+        .unwrap_or(GameMode::Survival);
     let regen_mode = game_mode.health_regeneration();
 
     // Creative/Spectator always regenerate (slowly).
@@ -31,7 +34,10 @@ pub fn regeneration_system(world: &mut World, _dt: f32) {
         };
         if health.current < health.max {
             // Heal 1 HP every 20 ticks (0.5 sec) in creative.
-            let mut regen = world.get::<RegenState>(player_entity).copied().unwrap_or_default();
+            let mut regen = world
+                .get::<RegenState>(player_entity)
+                .copied()
+                .unwrap_or_default();
             regen.ticks_since_damage += 1;
             if regen.ticks_since_damage % 20 == 0 {
                 health.heal(1.0);
@@ -47,15 +53,24 @@ pub fn regeneration_system(world: &mut World, _dt: f32) {
         return;
     }
 
-    let difficulty = world.resource::<DifficultyResource>().map(|d| d.0).unwrap_or(Difficulty::Normal);
+    let difficulty = world
+        .resource::<DifficultyResource>()
+        .map(|d| d.0)
+        .unwrap_or(Difficulty::Normal);
 
     // Get components.
     let mut health = match world.get::<Health>(player_entity) {
         Some(h) => *h,
         None => return,
     };
-    let mut hunger = world.get::<Hunger>(player_entity).copied().unwrap_or_default();
-    let mut regen = world.get::<RegenState>(player_entity).copied().unwrap_or_default();
+    let mut hunger = world
+        .get::<Hunger>(player_entity)
+        .copied()
+        .unwrap_or_default();
+    let mut regen = world
+        .get::<RegenState>(player_entity)
+        .copied()
+        .unwrap_or_default();
 
     // Update ticks since damage.
     if health.invulnerability_ticks > 0 {

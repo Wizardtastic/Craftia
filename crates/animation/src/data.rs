@@ -13,10 +13,12 @@ pub struct Keyframe {
 
 /// Interpolation mode between keyframes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Interpolation {
     /// Hold previous value until next keyframe.
     Step,
     /// Linear interpolation.
+    #[default]
     Linear,
     /// Smooth cubic spline (with tangents).
     CubicSpline,
@@ -24,11 +26,6 @@ pub enum Interpolation {
     Bezier,
 }
 
-impl Default for Interpolation {
-    fn default() -> Self {
-        Self::Linear
-    }
-}
 
 /// What property a channel targets.
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -14,3 +14,4 @@ log.workspace = true
 anyhow.workspace = true
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
+zip = "0.6"

@@ -5,12 +5,11 @@
 //! left tool panel, viewport, right options panel, and status bar.
 
 pub mod brush;
+pub mod ctx;
 pub mod filter;
 pub mod left_panel;
 pub mod menu_bar;
 pub mod paint;
-#[allow(dead_code)] // Phase 9 infrastructure ΓÇö preset load/save/delete, not yet wired to UI
-pub mod presets;
 pub mod right_panel;
 pub mod select;
 pub mod status_bar;
@@ -21,7 +20,7 @@ pub mod toolbar;
 use glam::IVec3;
 use voxel_core::BlockId;
 
-// ΓöÇΓöÇ Tool categories ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Tool categories ──────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ToolCategory {
@@ -55,7 +54,7 @@ impl ToolCategory {
     ];
 }
 
-// ΓöÇΓöÇ Individual tools ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Individual tools ─────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolDef {
@@ -245,12 +244,15 @@ pub fn tools_for_category(cat: ToolCategory) -> &'static [ToolDef] {
     }
 }
 
-// ΓöÇΓöÇ Top-level editor state ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Top-level editor state ───────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum EditModeState {
+    #[default]
     Inactive,
-    Active { tool: EditTool },
+    Active {
+        tool: EditTool,
+    },
 }
 
 impl EditModeState {
@@ -259,22 +261,17 @@ impl EditModeState {
     }
 }
 
-impl Default for EditModeState {
-    fn default() -> Self {
-        EditModeState::Inactive
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditTool {
     Brush(BrushTool),
-    #[allow(dead_code)] // Phase 1 infrastructure ΓÇö wired in frame.rs/ui.rs
+    #[allow(dead_code)]
+    // Scaffolded tool UIs (right_panel) exist, but the toolbar never constructs these yet
     Select(select::SelectTool),
-    #[allow(dead_code)] // Phase 4 infrastructure ΓÇö wired in frame.rs/ui.rs
+    #[allow(dead_code)]
     Terrain(terrain::TerrainTool),
-    #[allow(dead_code)] // Phase 5 infrastructure ΓÇö wired in frame.rs/ui.rs
+    #[allow(dead_code)]
     Paint(paint::PaintTool),
-    #[allow(dead_code)] // Phase 6 infrastructure ΓÇö wired in frame.rs/ui.rs
+    #[allow(dead_code)]
     Filter(filter::FilterStack),
 }
 
@@ -332,7 +329,7 @@ impl PaintMode {
     }
 }
 
-// ΓöÇΓöÇ Multi-block brush palette (Phase 3) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Multi-block brush palette (Phase 3) ──────────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WeightedBlock {
@@ -340,19 +337,10 @@ pub struct WeightedBlock {
     pub weight: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct BrushPalette {
     pub entries: Vec<WeightedBlock>,
     pub enabled: bool,
-}
-
-impl Default for BrushPalette {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            enabled: false,
-        }
-    }
 }
 
 impl BrushPalette {
@@ -397,7 +385,7 @@ impl BrushPalette {
     }
 }
 
-// ΓöÇΓöÇ Brush state ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Brush state ──────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrushTool {
@@ -430,7 +418,7 @@ impl Default for BrushTool {
     }
 }
 
-// ΓöÇΓöÇ Block categories (for palette) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Block categories (for palette) ───────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BlockCategory {
@@ -475,7 +463,7 @@ pub fn categorize(name: &str) -> BlockCategory {
     }
 }
 
-// ΓöÇΓöÇ History ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── History ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
@@ -483,7 +471,7 @@ pub struct HistoryEntry {
     pub is_current: bool,
 }
 
-// ΓöÇΓöÇ Editor state ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Editor state ─────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct EditState {
@@ -503,7 +491,7 @@ pub struct EditState {
     pub preview_valid: bool,
     pub brush_center: Option<IVec3>,
 
-    // History (UI display only ΓÇö real undo is in UndoRedoState)
+    // History (UI display only — real undo is in UndoRedoState)
     pub history: Vec<HistoryEntry>,
 
     // UI interaction state

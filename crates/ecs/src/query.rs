@@ -6,6 +6,7 @@
 //! `&mut A` (mutable single component), and tuples of references such
 //! as `(&A, &B)` for reading two components in lock-step.
 
+use std::any::TypeId;
 use std::marker::PhantomData;
 
 use crate::archetype::Archetype;
@@ -23,6 +24,13 @@ pub trait Query {
     /// component types the query requires are present in the archetype.
     fn matches(archetype: &Archetype) -> bool;
 
+    /// Validate that this query cannot request aliased mutable references.
+    ///
+    /// Tuple queries are fetched from shared archetype storage backed by
+    /// `UnsafeCell`, so duplicate component types must be rejected before an
+    /// iterator can yield references to a row.
+    fn assert_no_aliasing();
+
     /// Fetch the item for the entity at `index` in `archetype`.
     fn fetch<'a>(archetype: &'a Archetype, index: usize) -> Self::Item<'a>;
 }
@@ -33,6 +41,8 @@ pub trait Query {
 
 impl<A: Component> Query for &A {
     type Item<'a> = &'a A;
+    fn assert_no_aliasing() {}
+
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>()
     }
@@ -45,6 +55,8 @@ impl<A: Component> Query for &A {
 
 impl<A: Component> Query for &mut A {
     type Item<'a> = &'a mut A;
+    fn assert_no_aliasing() {}
+
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>()
     }
@@ -61,6 +73,8 @@ impl<A: Component> Query for &mut A {
 
 impl<A: Component> Query for (&A,) {
     type Item<'a> = (&'a A,);
+    fn assert_no_aliasing() {}
+
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>()
     }
@@ -73,6 +87,8 @@ impl<A: Component> Query for (&A,) {
 
 impl<A: Component> Query for (&mut A,) {
     type Item<'a> = (&'a mut A,);
+    fn assert_no_aliasing() {}
+
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>()
     }
@@ -89,6 +105,8 @@ impl<A: Component> Query for (&mut A,) {
 
 impl<A: Component, B: Component> Query for (&A, &B) {
     type Item<'a> = (&'a A, &'a B);
+    fn assert_no_aliasing() {}
+
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>() && archetype.has::<B>()
     }
@@ -109,6 +127,12 @@ impl<A: Component, B: Component> Query for (&A, &mut B) {
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>() && archetype.has::<B>()
     }
+    fn assert_no_aliasing() {
+        assert!(
+            TypeId::of::<A>() != TypeId::of::<B>(),
+            "query contains aliased shared and mutable component types"
+        );
+    }
     fn fetch<'a>(archetype: &'a Archetype, index: usize) -> Self::Item<'a> {
         (
             archetype
@@ -126,6 +150,12 @@ impl<A: Component, B: Component> Query for (&mut A, &B) {
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>() && archetype.has::<B>()
     }
+    fn assert_no_aliasing() {
+        assert!(
+            TypeId::of::<A>() != TypeId::of::<B>(),
+            "query contains aliased mutable and shared component types"
+        );
+    }
     fn fetch<'a>(archetype: &'a Archetype, index: usize) -> Self::Item<'a> {
         (
             archetype
@@ -142,6 +172,12 @@ impl<A: Component, B: Component> Query for (&mut A, &mut B) {
     type Item<'a> = (&'a mut A, &'a mut B);
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>() && archetype.has::<B>()
+    }
+    fn assert_no_aliasing() {
+        assert!(
+            TypeId::of::<A>() != TypeId::of::<B>(),
+            "query contains duplicate mutable component types"
+        );
     }
     fn fetch<'a>(archetype: &'a Archetype, index: usize) -> Self::Item<'a> {
         (
@@ -162,6 +198,8 @@ impl<A: Component, B: Component> Query for (&mut A, &mut B) {
 
 impl<A: Component, B: Component, C: Component> Query for (&A, &B, &C) {
     type Item<'a> = (&'a A, &'a B, &'a C);
+    fn assert_no_aliasing() {}
+
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>() && archetype.has::<B>() && archetype.has::<C>()
     }
@@ -185,6 +223,14 @@ impl<A: Component, B: Component, C: Component> Query for (&mut A, &mut B, &mut C
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>() && archetype.has::<B>() && archetype.has::<C>()
     }
+    fn assert_no_aliasing() {
+        assert!(
+            TypeId::of::<A>() != TypeId::of::<B>()
+                && TypeId::of::<A>() != TypeId::of::<C>()
+                && TypeId::of::<B>() != TypeId::of::<C>(),
+            "query contains duplicate mutable component types"
+        );
+    }
     fn fetch<'a>(archetype: &'a Archetype, index: usize) -> Self::Item<'a> {
         (
             archetype
@@ -206,6 +252,8 @@ impl<A: Component, B: Component, C: Component> Query for (&mut A, &mut B, &mut C
 
 impl<A: Component, B: Component, C: Component, D: Component> Query for (&A, &B, &C, &D) {
     type Item<'a> = (&'a A, &'a B, &'a C, &'a D);
+    fn assert_no_aliasing() {}
+
     fn matches(archetype: &Archetype) -> bool {
         archetype.has::<A>() && archetype.has::<B>() && archetype.has::<C>() && archetype.has::<D>()
     }
@@ -241,6 +289,7 @@ pub struct QueryIter<'w, Q: Query> {
 
 impl<'w, Q: Query> QueryIter<'w, Q> {
     pub(crate) fn new(world: &'w crate::World) -> Self {
+        Q::assert_no_aliasing();
         Self {
             archetypes: world.archetypes().iter().enumerate(),
             current: None,

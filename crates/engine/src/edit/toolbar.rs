@@ -4,6 +4,7 @@
 //! highlighted with the accent color.
 
 use crate::edit::{EditState, ToolCategory};
+use voxel_core::Point;
 use voxel_render::{FontAtlas, UiDrawData};
 
 use super::theme;
@@ -20,7 +21,7 @@ pub fn draw_category_bar(
     ui: &mut UiDrawData,
     edit: &EditState,
     screen_h: f32,
-    mouse: (f32, f32),
+    mouse: Point,
     font: &FontAtlas,
 ) -> CategoryAction {
     let mut action = CategoryAction::None;
@@ -47,7 +48,7 @@ pub fn draw_category_bar(
 
     for &cat in ToolCategory::ALL {
         let is_active = edit.active_category == cat && edit.mode.is_active();
-        let (mx, my) = mouse;
+        let Point { x: mx, y: my } = mouse;
         let hovered = mx >= pad_x && mx <= pad_x + btn_size && my >= y && my <= y + btn_size;
 
         let bg = if is_active {

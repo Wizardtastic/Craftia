@@ -167,8 +167,8 @@ pub(super) fn create_logical_device(
     // the calls return VK_ERROR_FEATURE_NOT_PRESENT and the queries stay
     // in the "uninitialized" state, tripping
     // VUID-vkGetQueryPoolResults-None-09401.
-    let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
-        .host_query_reset(true);
+    let mut vulkan12_features =
+        vk::PhysicalDeviceVulkan12Features::default().host_query_reset(true);
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_infos)
         .enabled_extension_names(&extension_names)

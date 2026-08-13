@@ -4,7 +4,7 @@
 //! Clicking a block sets it as the brush block.
 
 use crate::edit::{BlockCategory, EditState};
-use voxel_core::BlockId;
+use voxel_core::{BlockId, Point};
 use voxel_render::{FontAtlas, UiDrawData};
 use voxel_world::registry::BlockRegistry;
 
@@ -26,7 +26,7 @@ pub fn draw_block_palette(
     edit: &mut EditState,
     screen_w: f32,
     screen_h: f32,
-    mouse: (f32, f32),
+    mouse: Point,
     font: &FontAtlas,
     scroll_delta: f32,
     registry: &BlockRegistry,
@@ -41,7 +41,7 @@ pub fn draw_block_palette(
     let close_x = panel_x + PANEL_W - 24.0;
     ui.quad(close_x, 4.0, 20.0, 20.0, [80, 30, 30, 200]);
     ui.text("X", close_x + 4.0, 6.0, 0.8, [255, 200, 200, 255], font);
-    let (mx, my) = mouse;
+    let Point { x: mx, y: my } = mouse;
     if mx >= close_x && mx <= close_x + 20.0 && my >= 4.0 && my <= 24.0 && edit.ui_click {
         edit.palette_open = false;
         return None;

@@ -12,4 +12,6 @@ pub use data::{
     AnimationChannel, AnimationClip, AnimationLibrary, Interpolation, Keyframe, TargetedProperty,
 };
 pub use registry::AnimationClipRegistry;
-pub use sampling::{sample_channel, sample_rotation, sample_scale, sample_translation, trs_to_matrix};
+pub use sampling::{
+    sample_channel, sample_rotation, sample_scale, sample_translation, trs_to_matrix,
+};

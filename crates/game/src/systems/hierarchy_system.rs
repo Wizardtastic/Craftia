@@ -172,10 +172,9 @@ pub fn hierarchy_system(world: &mut World, _dt: f32) {
             visited.insert(child);
 
             // Compute child's world transform = parent.world * child.local.
-            if let (Some(parent_transform), Some(parent_comp)) = (
-                world.get::<Transform>(entity),
-                world.get::<Parent>(child),
-            ) {
+            if let (Some(parent_transform), Some(parent_comp)) =
+                (world.get::<Transform>(entity), world.get::<Parent>(child))
+            {
                 let local = parent_comp.local;
                 let world_pos = parent_transform.pos + parent_transform.rot * local.pos;
                 let world_rot = parent_transform.rot * local.rot;
@@ -224,12 +223,10 @@ mod tests {
     fn parent_child_transform_propagation() {
         let mut world = World::new();
         world.insert_resource(ChildMapResource::default());
-        let parent = world.spawn((
-            Transform {
-                pos: Vec3::new(10.0, 0.0, 0.0),
-                rot: Quat::IDENTITY,
-            },
-        ));
+        let parent = world.spawn((Transform {
+            pos: Vec3::new(10.0, 0.0, 0.0),
+            rot: Quat::IDENTITY,
+        },));
         let child = world.spawn((
             Transform {
                 pos: Vec3::ZERO,
@@ -254,12 +251,10 @@ mod tests {
     fn orphan_cleanup() {
         let mut world = World::new();
         world.insert_resource(ChildMapResource::default());
-        let parent = world.spawn((
-            Transform {
-                pos: Vec3::ZERO,
-                rot: Quat::IDENTITY,
-            },
-        ));
+        let parent = world.spawn((Transform {
+            pos: Vec3::ZERO,
+            rot: Quat::IDENTITY,
+        },));
         let child = world.spawn((
             Transform {
                 pos: Vec3::ZERO,
@@ -281,12 +276,10 @@ mod tests {
     fn child_map_updated() {
         let mut world = World::new();
         world.insert_resource(ChildMapResource::default());
-        let parent = world.spawn((
-            Transform {
-                pos: Vec3::ZERO,
-                rot: Quat::IDENTITY,
-            },
-        ));
+        let parent = world.spawn((Transform {
+            pos: Vec3::ZERO,
+            rot: Quat::IDENTITY,
+        },));
         let _child = world.spawn((
             Transform {
                 pos: Vec3::ZERO,
@@ -307,9 +300,18 @@ mod tests {
     #[test]
     fn child_map_reparent() {
         let mut cm = ChildMap::default();
-        let a = Entity { index: 0, generation: 0 };
-        let b = Entity { index: 1, generation: 0 };
-        let c = Entity { index: 2, generation: 0 };
+        let a = Entity {
+            index: 0,
+            generation: 0,
+        };
+        let b = Entity {
+            index: 1,
+            generation: 0,
+        };
+        let c = Entity {
+            index: 2,
+            generation: 0,
+        };
 
         cm.add_child(a, b);
         assert_eq!(cm.children_of(a).len(), 1);

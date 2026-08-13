@@ -27,8 +27,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../.git/refs");
     println!("cargo:rerun-if-changed=../../.git/index");
 
-    let sha = git_output(&["rev-parse", "--short", "HEAD"])
-        .unwrap_or_else(|| "unknown".to_string());
+    let sha =
+        git_output(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     let dirty = git_output(&["status", "--porcelain"])
         .map(|s| !s.is_empty())
         .unwrap_or(false);

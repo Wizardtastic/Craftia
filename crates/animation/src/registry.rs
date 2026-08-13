@@ -47,7 +47,11 @@ impl AnimationClipRegistry {
                 }
             }
         }
-        log::info!("Loaded {} animations from {}", registry.clips.len(), dir.display());
+        log::info!(
+            "Loaded {} animations from {}",
+            registry.clips.len(),
+            dir.display()
+        );
         registry
     }
 

@@ -136,7 +136,7 @@ pub fn list_world_info(saves_dir: &Path) -> Vec<WorldInfo> {
     worlds
 }
 
-/// Single source of truth for the JSON shape of a saved entity ΓÇö used by
+/// Single source of truth for the JSON shape of a saved entity — used by
 /// both `save_entities` and `load_entities` since the field set is identical.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EntitySave {

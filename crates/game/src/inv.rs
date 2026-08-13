@@ -11,6 +11,7 @@ pub const HOTBAR_SLOTS: usize = 9;
 #[derive(Clone, Debug)]
 pub struct Hotbar {
     slots: [BlockId; HOTBAR_SLOTS],
+    tool_tiers: [u8; HOTBAR_SLOTS],
     pub selected: usize,
 }
 
@@ -19,7 +20,11 @@ impl Default for Hotbar {
         // A sensible creative-style starting set.
         let slots = [BlockId::AIR; HOTBAR_SLOTS];
         // Filled by `populate_defaults` once a registry is available.
-        Self { slots, selected: 0 }
+        Self {
+            slots,
+            tool_tiers: [0; HOTBAR_SLOTS],
+            selected: 0,
+        }
     }
 }
 
@@ -39,7 +44,7 @@ impl Hotbar {
             "wood",
             "torch",
             "sand",
-            "bucket",
+            "glass",
         ];
         for (i, name) in names.iter().enumerate() {
             if let Some(id) = reg.id_of(name) {
@@ -59,6 +64,16 @@ impl Hotbar {
     pub fn set_slot(&mut self, i: usize, id: BlockId) {
         if i < HOTBAR_SLOTS {
             self.slots[i] = id;
+            self.tool_tiers[i] = 0;
+        }
+    }
+
+    /// Set the minimum tool tier carried by a hotbar slot. The current
+    /// inventory is block-oriented, so this metadata is explicit until tool
+    /// items receive their own registry.
+    pub fn set_slot_tool_tier(&mut self, i: usize, tier: u8) {
+        if i < HOTBAR_SLOTS {
+            self.tool_tiers[i] = tier;
         }
     }
 
@@ -67,6 +82,11 @@ impl Hotbar {
     /// `select()` already clamps).
     pub fn selected_block(&self) -> Option<BlockId> {
         self.slots.get(self.selected).copied()
+    }
+
+    /// Tool tier carried by the selected hotbar slot; zero means hand/no tool.
+    pub fn selected_tool_tier(&self) -> u8 {
+        self.tool_tiers.get(self.selected).copied().unwrap_or(0)
     }
 
     /// Select a slot by index (0..=8). Out-of-range values are ignored.
@@ -153,6 +173,26 @@ mod tests {
         let original = hb.slot(0);
         hb.set_slot(99, BlockId(5));
         assert_eq!(hb.slot(0), original);
+    }
+
+    #[test]
+    fn selected_tool_tier_tracks_selected_slot() {
+        let mut hb = Hotbar::new();
+        hb.set_slot_tool_tier(2, 3);
+        hb.select(2);
+        assert_eq!(hb.selected_tool_tier(), 3);
+        hb.select(0);
+        assert_eq!(hb.selected_tool_tier(), 0);
+    }
+
+    #[test]
+    fn replacing_slot_resets_tool_tier() {
+        let mut hb = Hotbar::new();
+        hb.set_slot_tool_tier(2, 3);
+        hb.set_slot(2, BlockId(5));
+        assert_eq!(hb.selected_tool_tier(), 0);
+        hb.select(2);
+        assert_eq!(hb.selected_tool_tier(), 0);
     }
 
     // --- Bug #23: Option return on out-of-range ---

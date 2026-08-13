@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::mipmap::generate_mip_chain;
-use voxel_core::{ATLAS_PIXELS, ATLAS_TILE_SIZE, ATLAS_TILES};
+use crate::texture_pack;
+use voxel_core::{ATLAS_PIXELS, ATLAS_TILES, ATLAS_TILE_SIZE};
 
 /// Magic bytes identifying the cache format.
 const MAGIC: &[u8; 20] = b"VOXEL_ASSET_CACHE_v1";
@@ -77,8 +78,8 @@ struct ManifestEntry {
 
 /// Compute BLAKE3 hash of a file's contents.
 fn hash_file(path: &Path) -> Result<[u8; 32]> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("hash_file: read {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("hash_file: read {}", path.display()))?;
     Ok(blake3::hash(&bytes).into())
 }
 
@@ -133,7 +134,10 @@ fn cache_path(textures_dir: &Path) -> PathBuf {
 }
 
 /// Read and validate an existing cache file. Returns None if missing or invalid.
-fn read_cache(textures_dir: &Path, expected_composite: &[u8; 32]) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
+fn read_cache(
+    textures_dir: &Path,
+    expected_composite: &[u8; 32],
+) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
     let path = cache_path(textures_dir);
     let bytes = std::fs::read(&path).ok()?;
 
@@ -261,12 +265,44 @@ fn write_cache(
 
 /// Process assets: check cache, rebuild if stale.
 pub fn process_assets(textures_dir: &Path) -> Result<CacheStatus> {
-    let (mapping, manifest) = build_manifest(textures_dir)?;
+    process_assets_with_packs(textures_dir, None, None)
+}
+
+/// Process assets with optional texture packs merged in.
+///
+/// When `pack_mapping` is provided, it is merged on top of the base
+/// `textures_dir` mapping so texture pack tiles override the originals.
+/// Pack zip file hashes are included in the cache manifest so pack
+/// changes trigger a rebuild.
+pub fn process_assets_with_packs(
+    textures_dir: &Path,
+    pack_mapping: Option<&HashMap<u32, String>>,
+    packs_dir: Option<&Path>,
+) -> Result<CacheStatus> {
+    let (mut mapping, mut manifest) = build_manifest(textures_dir)?;
+    // Layer texture pack tiles on top of the base mapping.
+    if let Some(packs) = pack_mapping {
+        for (tile_index, filename) in packs {
+            mapping.insert(*tile_index, filename.clone());
+        }
+    }
+    // Include texture pack zip file hashes in the manifest so the cache
+    // is invalidated when any pack changes.
+    if let Some(pdir) = packs_dir {
+        if let Ok(entries) = texture_pack::hash_pack_files(pdir) {
+            for (path_hash, content_hash) in entries {
+                manifest.push(ManifestEntry {
+                    path_hash,
+                    content_hash,
+                });
+            }
+        }
+    }
     let composite = composite_hash(&manifest);
 
     // Try cache.
     if let Some((atlas_rgba, mip_chain)) = read_cache(textures_dir, &composite) {
-        let width = (ATLAS_TILES * ATLAS_TILE_SIZE) as u32;
+        let width = ATLAS_TILES * ATLAS_TILE_SIZE ;
         let height = width;
         log::info!("asset cache hit ({} tiles)", mapping.len());
         return Ok(CacheStatus::Hit {
@@ -278,7 +314,10 @@ pub fn process_assets(textures_dir: &Path) -> Result<CacheStatus> {
     }
 
     // Cache miss: build atlas from scratch.
-    log::info!("asset cache miss — rebuilding atlas from {} tiles", mapping.len());
+    log::info!(
+        "asset cache miss — rebuilding atlas from {} tiles",
+        mapping.len()
+    );
     let atlas = crate::atlas::build_atlas(textures_dir, &mapping);
     let mip_chain = generate_mip_chain(&atlas, ATLAS_PIXELS, ATLAS_PIXELS);
 
@@ -312,29 +351,7 @@ pub fn check_cache(textures_dir: &Path) -> Result<bool> {
 
 /// Read textures.toml and return tile_index -> filename mapping.
 fn load_texture_config(textures_dir: &Path) -> HashMap<u32, String> {
-    let config_path = textures_dir.join("textures.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(s) => s,
-        Err(_) => return HashMap::new(),
-    };
-    let value: toml::Value = match content.parse() {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("failed to parse {}: {}", config_path.display(), e);
-            return HashMap::new();
-        }
-    };
-    let tiles = match value.get("tiles").and_then(|v| v.as_table()) {
-        Some(t) => t,
-        None => return HashMap::new(),
-    };
-    let mut map = HashMap::new();
-    for (key, val) in tiles {
-        if let (Ok(index), Some(filename)) = (key.parse::<u32>(), val.as_str()) {
-            map.insert(index, filename.to_string());
-        }
-    }
-    map
+    texture_pack::load_texture_config(textures_dir)
 }
 
 // --- Binary helpers ---
@@ -406,10 +423,7 @@ mod tests {
 
     #[test]
     fn roundtrip_cache_format() {
-        let mip_chain = vec![
-            vec![1u8, 2, 3, 4],
-            vec![5u8, 6, 7, 8],
-        ];
+        let mip_chain = vec![vec![1u8, 2, 3, 4], vec![5u8, 6, 7, 8]];
         let entries = vec![ManifestEntry {
             path_hash: [1u8; 32],
             content_hash: [2u8; 32],
@@ -418,7 +432,7 @@ mod tests {
 
         // Write to temp dir.
         let dir = std::env::temp_dir().join("voxel_asset_cache_test");
-        let _ = std::fs::create_dir_all(&dir.join(".cache"));
+        let _ = std::fs::create_dir_all(dir.join(".cache"));
         let _ = write_cache(&dir, &composite, &mip_chain, 4, 4, &entries);
 
         // Read back.

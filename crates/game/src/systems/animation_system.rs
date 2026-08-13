@@ -92,7 +92,9 @@ pub fn animation_system(world: &mut World, dt: f32) {
     };
 
     // Get skin data if available.
-    let skin_data = world.resource::<SkinDataResource>().map(|r| Arc::clone(&r.data));
+    let skin_data = world
+        .resource::<SkinDataResource>()
+        .map(|r| Arc::clone(&r.data));
 
     // Collect entities with AnimationPlayer + ModelRef + BoneTransforms.
     // Iterate archetypes directly to avoid per-entity HashMap lookups.
@@ -116,7 +118,12 @@ pub fn animation_system(world: &mut World, dt: f32) {
                 Some(r) => r,
                 None => continue,
             };
-            (model_ref.model_id, player.current_animation, player.time, player.speed)
+            (
+                model_ref.model_id,
+                player.current_animation,
+                player.time,
+                player.speed,
+            )
         };
 
         let model_anim = match anim_data.get(model_id as usize) {
@@ -227,15 +234,16 @@ pub fn compute_skin_matrices(
     let mut world_transforms = vec![glam::Mat4::IDENTITY; node_count];
 
     for i in 0..node_count {
-        world_transforms[i] = if let Some(parent) = model_skin_data.node_parents.get(i).and_then(|p| *p) {
-            if parent < node_count {
-                world_transforms[parent] * node_transforms[i]
+        world_transforms[i] =
+            if let Some(parent) = model_skin_data.node_parents.get(i).and_then(|p| *p) {
+                if parent < node_count {
+                    world_transforms[parent] * node_transforms[i]
+                } else {
+                    node_transforms[i]
+                }
             } else {
                 node_transforms[i]
-            }
-        } else {
-            node_transforms[i]
-        };
+            };
     }
 
     // For each skin, compute joint matrices.
@@ -246,7 +254,10 @@ pub fn compute_skin_matrices(
             } else {
                 glam::Mat4::IDENTITY
             };
-            let inverse_bind = skin.inverse_bind_matrices.get(joint_idx).copied()
+            let inverse_bind = skin
+                .inverse_bind_matrices
+                .get(joint_idx)
+                .copied()
                 .unwrap_or(glam::Mat4::IDENTITY);
             skin_matrices.push(node_world * inverse_bind);
         }
@@ -265,7 +276,9 @@ fn sample_channel(channel: &AnimChannel, time: f32) -> [f32; 4] {
     }
 
     // Find surrounding keyframes (binary search).
-    let idx = match times.binary_search_by(|t| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal)) {
+    let idx = match times
+        .binary_search_by(|t| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal))
+    {
         Ok(i) => i,
         Err(i) => i.saturating_sub(1).min(times.len() - 1),
     };
@@ -305,7 +318,6 @@ fn sample_channel(channel: &AnimChannel, time: f32) -> [f32; 4] {
             // For simplicity, fall back to linear interpolation.
             let v0 = values[idx];
             let v1 = values[next];
-            let frac = frac;
             match channel.path {
                 AnimPath::Rotation => {
                     let q0 = Quat::from_xyzw(v0[0], v0[1], v0[2], v0[3]);
@@ -375,7 +387,7 @@ mod tests {
             keyframe_times: vec![0.0, 1.0],
             keyframe_values: vec![
                 [0.0, 0.0, 0.0, 1.0],
-                [0.0, 0.7071, 0.0, 0.7071],
+                [0.0, std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2],
             ],
             interpolation: AnimInterpolation::Linear,
         };

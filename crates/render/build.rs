@@ -71,12 +71,8 @@ fn main() {
             if !dst_path.exists() {
                 return true;
             }
-            let src_mtime = fs::metadata(&src_path)
-                .and_then(|m| m.modified())
-                .ok();
-            let dst_mtime = fs::metadata(&dst_path)
-                .and_then(|m| m.modified())
-                .ok();
+            let src_mtime = fs::metadata(&src_path).and_then(|m| m.modified()).ok();
+            let dst_mtime = fs::metadata(&dst_path).and_then(|m| m.modified()).ok();
             match (src_mtime, dst_mtime) {
                 (Some(s), Some(d)) => s > d,
                 _ => true,
@@ -99,10 +95,7 @@ fn main() {
                 let glslang = glslang.clone();
                 s.spawn(move || {
                     if !src_path.exists() {
-                        return Err(format!(
-                            "shader source not found: {}",
-                            src_path.display()
-                        ));
+                        return Err(format!("shader source not found: {}", src_path.display()));
                     }
                     let status = Command::new(&glslang)
                         .arg("-V") // compile to SPIR-V (Vulkan target)
@@ -144,8 +137,12 @@ fn find_glslang_validator() -> PathBuf {
             return candidate2;
         }
     }
-    // PATH fallback.
-    if let Ok(out) = Command::new("where").arg("glslangValidator").output() {
+    // PATH fallback. `where` is Windows-only, so use `which` on Unix; the
+    // previous Windows-only lookup made Linux builds panic even when
+    // glslangValidator was on PATH (e.g. installed via `apt install
+    // glslang-tools` to /usr/bin).
+    let finder = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(out) = Command::new(finder).arg("glslangValidator").output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(line) = s.lines().next() {

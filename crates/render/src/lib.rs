@@ -26,12 +26,11 @@ pub mod ui;
 
 pub use atlas::{build_atlas_with_textures, Atlas};
 pub use hot_reload::{compile_shader, FileWatcher, HotReloadEvent};
-pub use renderer::{ChunkUpload, GpuTimings, MeshPass, Renderer, RendererConfig};
+pub use renderer::{ChunkUpload, FrameInput, GpuTimings, MeshPass, Renderer, RendererConfig};
 pub use texture::AtlasTexture;
-pub use ui::{FontAtlas, UiDrawData, UiVertex};
+pub use ui::{FontAtlas, GraphStyle, UiDrawData, UiVertex};
 
 use bytemuck::{Pod, Zeroable};
-
 
 /// GPU vertex layout (32 bytes), matching `voxel_world::mesh::ChunkVertex`.
 /// Kept here as the rendering-side contract; the mesher produces the same layout.
@@ -128,14 +127,11 @@ impl BlockMaterialGpu {
         wet_tint: [u8; 4],
         absorption: [u8; 3],
     ) -> Self {
-        let fre = (flags as u32)
-            | ((roughness as u32) << 8)
-            | ((emissive as u32) << 16);
+        let fre = (flags as u32) | ((roughness as u32) << 8) | ((emissive as u32) << 16);
         let sss = u32::from_le_bytes(sss_tint);
         let wet = u32::from_le_bytes(wet_tint);
-        let abs = (absorption[0] as u32)
-            | ((absorption[1] as u32) << 8)
-            | ((absorption[2] as u32) << 16);
+        let abs =
+            (absorption[0] as u32) | ((absorption[1] as u32) << 8) | ((absorption[2] as u32) << 16);
         Self {
             flags_roughness_emissive_pad: fre,
             sss_tint: sss,
@@ -170,9 +166,15 @@ impl BlockPropertiesGpu {
     /// Build from per-face tile indices and block properties.
     pub fn pack(tiles: [u16; 6], opaque: bool, liquid: bool, not_air: bool) -> Self {
         let mut flags = 0u32;
-        if opaque { flags |= Self::FLAG_OPAQUE; }
-        if liquid { flags |= Self::FLAG_LIQUID; }
-        if not_air { flags |= Self::FLAG_RENDER; }
+        if opaque {
+            flags |= Self::FLAG_OPAQUE;
+        }
+        if liquid {
+            flags |= Self::FLAG_LIQUID;
+        }
+        if not_air {
+            flags |= Self::FLAG_RENDER;
+        }
         Self {
             tiles01: tiles[0] as u32 | ((tiles[1] as u32) << 16),
             tiles23: tiles[2] as u32 | ((tiles[3] as u32) << 16),
@@ -257,11 +259,9 @@ pub struct TileRemap {
 impl Default for TileRemap {
     fn default() -> Self {
         // Identity mapping: each tile maps to itself.
-        let mut map = [0u32; 256];
-        for i in 0..256 {
-            map[i] = i as u32;
+        Self {
+            map: std::array::from_fn(|i| i as u32),
         }
-        Self { map }
     }
 }
 

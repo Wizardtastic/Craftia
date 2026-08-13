@@ -434,7 +434,10 @@ impl DeveloperConsole {
         }
         let end = total.saturating_sub(self.scroll_offset);
         let start = end.saturating_sub(max);
-        self.scrollback.range(start..end).map(|s| s.as_str()).collect()
+        self.scrollback
+            .range(start..end)
+            .map(|s| s.as_str())
+            .collect()
     }
 
     /// Scroll up by `n` lines.

@@ -31,7 +31,7 @@ pub struct EntityPushConstants {
     pub half_size: f32,       // 4 bytes
     pub billboard: u32,       // 4 bytes
     pub _pad: [u32; 2],       // 8 bytes
-    // total: 84 bytes, but we round to 80 with vec4 alignment
+                              // total: 84 bytes, but we round to 80 with vec4 alignment
 }
 
 /// Create the entity pipeline layout. Uses the same descriptor set
@@ -55,10 +55,18 @@ pub fn create_entity_pipeline_layout(
         .map_err(|e| anyhow!("create_entity_pipeline_layout: {e:?}"))
 }
 
+/// Depth-state for an entity pipeline: compare op, write enable, MSAA count.
+#[derive(Clone, Copy, Debug)]
+pub struct DepthConfig {
+    pub compare_op: vk::CompareOp,
+    pub write_enable: bool,
+    pub msaa_samples: vk::SampleCountFlags,
+}
+
 /// Create an entity graphics pipeline with configurable depth settings.
 ///
-/// `depth_compare_op` and `depth_write_enable` control how the entity
-/// interacts with the depth buffer:
+/// `compare_op` and `write_enable` control how the entity interacts with
+/// the depth buffer:
 /// - World entities: `LESS_OR_EQUAL`, write off (on top of chunks)
 /// - Held items: `ALWAYS`, write off (always visible, never clips through walls)
 pub fn create_entity_pipeline_with_depth(
@@ -67,10 +75,13 @@ pub fn create_entity_pipeline_with_depth(
     layout: vk::PipelineLayout,
     vs_spirv: &[u8],
     fs_spirv: &[u8],
-    depth_compare_op: vk::CompareOp,
-    depth_write_enable: bool,
-    msaa_samples: vk::SampleCountFlags,
+    depth: DepthConfig,
 ) -> Result<vk::Pipeline> {
+    let DepthConfig {
+        compare_op,
+        write_enable,
+        msaa_samples,
+    } = depth;
     let vert_code = spirv_to_u32(vs_spirv);
     let frag_code = spirv_to_u32(fs_spirv);
     let vert_module = unsafe {
@@ -159,8 +170,8 @@ pub fn create_entity_pipeline_with_depth(
 
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
-        .depth_write_enable(depth_write_enable)
-        .depth_compare_op(depth_compare_op)
+        .depth_write_enable(write_enable)
+        .depth_compare_op(compare_op)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);
 
@@ -223,9 +234,11 @@ pub fn create_entity_pipeline(
         layout,
         vs_spirv,
         fs_spirv,
-        vk::CompareOp::LESS_OR_EQUAL,
-        false,
-        msaa_samples,
+        DepthConfig {
+            compare_op: vk::CompareOp::LESS_OR_EQUAL,
+            write_enable: false,
+            msaa_samples,
+        },
     )
 }
 
@@ -246,9 +259,11 @@ pub fn create_held_item_pipeline(
         layout,
         vs_spirv,
         fs_spirv,
-        vk::CompareOp::ALWAYS,
-        false,
-        msaa_samples,
+        DepthConfig {
+            compare_op: vk::CompareOp::ALWAYS,
+            write_enable: false,
+            msaa_samples,
+        },
     )
 }
 
@@ -259,12 +274,48 @@ pub fn unit_quad_vertices() -> Vec<crate::Vertex> {
     let light = 1.0f32;
     let white = 0xFFFFFFFFu32; // white light color (no tint)
     vec![
-        crate::Vertex { pos: [-0.5, -0.5, 0.0], uv: [0.0, 1.0], light, tile, light_color: white },
-        crate::Vertex { pos: [ 0.5, -0.5, 0.0], uv: [1.0, 1.0], light, tile, light_color: white },
-        crate::Vertex { pos: [ 0.5,  0.5, 0.0], uv: [1.0, 0.0], light, tile, light_color: white },
-        crate::Vertex { pos: [-0.5, -0.5, 0.0], uv: [0.0, 1.0], light, tile, light_color: white },
-        crate::Vertex { pos: [ 0.5,  0.5, 0.0], uv: [1.0, 0.0], light, tile, light_color: white },
-        crate::Vertex { pos: [-0.5,  0.5, 0.0], uv: [0.0, 0.0], light, tile, light_color: white },
+        crate::Vertex {
+            pos: [-0.5, -0.5, 0.0],
+            uv: [0.0, 1.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [0.5, -0.5, 0.0],
+            uv: [1.0, 1.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [0.5, 0.5, 0.0],
+            uv: [1.0, 0.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [-0.5, -0.5, 0.0],
+            uv: [0.0, 1.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [0.5, 0.5, 0.0],
+            uv: [1.0, 0.0],
+            light,
+            tile,
+            light_color: white,
+        },
+        crate::Vertex {
+            pos: [-0.5, 0.5, 0.0],
+            uv: [0.0, 0.0],
+            light,
+            tile,
+            light_color: white,
+        },
     ]
 }
 
@@ -480,7 +531,9 @@ pub fn create_joint_descriptor_set_layout(device: &ash::Device) -> Result<vk::De
 
 /// Create the descriptor set layout for the tile remap UBO.
 /// Set 1, binding 0: TileRemap (256 × u32 = 1024 bytes).
-pub fn create_tile_remap_descriptor_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
+pub fn create_tile_remap_descriptor_set_layout(
+    device: &ash::Device,
+) -> Result<vk::DescriptorSetLayout> {
     let binding = vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)

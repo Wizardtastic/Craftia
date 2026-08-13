@@ -91,20 +91,37 @@ impl<'a> TreePlacer<'a> {
 /// Try to place a tree at world column `(wx, wz)` where the surface block
 /// sits at local y `surface_ly` inside the chunk. `seed` is the world seed.
 /// `neighbour_set` writes blocks outside the current chunk.
+/// Placement parameters for [`try_place_tree`].
+#[derive(Clone, Copy, Debug)]
+pub struct TreePlacement {
+    pub seed: i32,
+    pub wx: i32,
+    pub wz: i32,
+    pub surface_ly: i32,
+    pub tree_type: TreeType,
+}
+
 ///
 /// Returns the number of blocks placed (0 if no tree was placed).
 pub fn try_place_tree(
     chunk: &mut crate::chunk::Chunk,
     reg: &BlockRegistry,
-    seed: i32,
-    wx: i32,
-    wz: i32,
-    surface_ly: i32,
-    tree_type: TreeType,
+    placement: TreePlacement,
     neighbour_set: &dyn Fn(i32, i32, i32, BlockId) -> bool,
 ) -> u32 {
+    let TreePlacement {
+        seed,
+        wx,
+        wz,
+        surface_ly,
+        tree_type,
+    } = placement;
     let origin = voxel_core::math::chunk_origin(chunk.pos);
-    let mut placer = TreePlacer { chunk, origin, neighbour_set };
+    let mut placer = TreePlacer {
+        chunk,
+        origin,
+        neighbour_set,
+    };
 
     let (wood, leaves) = tree_blocks(reg, tree_type);
     let (Some(wood), Some(leaves)) = (wood, leaves) else {
@@ -194,15 +211,9 @@ pub fn pick_tree_type(
 
 fn tree_blocks(reg: &BlockRegistry, tt: TreeType) -> (Option<BlockId>, Option<BlockId>) {
     match tt {
-        TreeType::Oak | TreeType::BigOak => {
-            (reg.id_of("wood"), reg.id_of("leaves"))
-        }
-        TreeType::Birch => {
-            (reg.id_of("birch_log"), reg.id_of("birch_leaves"))
-        }
-        TreeType::Spruce => {
-            (reg.id_of("spruce_log"), reg.id_of("spruce_leaves"))
-        }
+        TreeType::Oak | TreeType::BigOak => (reg.id_of("wood"), reg.id_of("leaves")),
+        TreeType::Birch => (reg.id_of("birch_log"), reg.id_of("birch_leaves")),
+        TreeType::Spruce => (reg.id_of("spruce_log"), reg.id_of("spruce_leaves")),
     }
 }
 
@@ -399,7 +410,7 @@ fn place_spruce(
     for cy in canopy_bottom..=canopy_top {
         let dist_from_bottom = cy - canopy_bottom;
         let radius: i32 = match dist_from_bottom {
-            0 | 1 | 2 => 1, // 3×3
+            0..=2 => 1, // 3×3
             3 | 4 => 0,     // 1×1
             _ => continue,
         };
@@ -429,7 +440,7 @@ mod tests {
 
     fn test_chunk() -> crate::chunk::Chunk {
         let mut c = Chunk::new(ChunkPos::new(0, 4, 0)); // y=64..80
-        // Fill bottom with grass to simulate a surface.
+                                                        // Fill bottom with grass to simulate a surface.
         let reg = BlockRegistry::with_builtins();
         let grass = reg.id_of("grass").unwrap();
         let dirt = reg.id_of("dirt").unwrap();
@@ -449,16 +460,22 @@ mod tests {
         let reg = BlockRegistry::with_builtins();
         let noop_neighbour = |_: i32, _: i32, _: i32, _: BlockId| false;
         let count = try_place_tree(
-            &mut c, &reg, 42,
-            4, 4, // world x,z within chunk origin (0,64,0)
-            0,    // surface_ly = 0 (grass at local y=0)
-            TreeType::Oak,
+            &mut c,
+            &reg,
+            TreePlacement {
+                seed: 42,
+                wx: 4,
+                wz: 4, // world x,z within chunk origin (0,64,0)
+                surface_ly: 0, // surface_ly = 0 (grass at local y=0)
+                tree_type: TreeType::Oak,
+            },
             &noop_neighbour,
         );
         assert!(count > 0, "oak should place blocks");
-        // Should have placed wood above surface.
+        // Should have placed wood above the soil layer (test_chunk fills
+        // local y=1..=2 with dirt, and trunks only overwrite air).
         let wood = reg.id_of("wood").unwrap();
-        assert_eq!(c.get(4, 1, 4), wood, "trunk at y=1 should be wood");
+        assert_eq!(c.get(4, 3, 4), wood, "trunk should grow above the soil");
     }
 
     #[test]
@@ -467,8 +484,16 @@ mod tests {
         let reg = BlockRegistry::with_builtins();
         let noop_neighbour = |_: i32, _: i32, _: i32, _: BlockId| false;
         let count = try_place_tree(
-            &mut c, &reg, 42,
-            4, 4, 0, TreeType::Birch, &noop_neighbour,
+            &mut c,
+            &reg,
+            TreePlacement {
+                seed: 42,
+                wx: 4,
+                wz: 4,
+                surface_ly: 0,
+                tree_type: TreeType::Birch,
+            },
+            &noop_neighbour,
         );
         assert!(count > 0, "birch should place blocks");
     }
@@ -479,8 +504,16 @@ mod tests {
         let reg = BlockRegistry::with_builtins();
         let noop_neighbour = |_: i32, _: i32, _: i32, _: BlockId| false;
         let count = try_place_tree(
-            &mut c, &reg, 42,
-            4, 4, 0, TreeType::Spruce, &noop_neighbour,
+            &mut c,
+            &reg,
+            TreePlacement {
+                seed: 42,
+                wx: 4,
+                wz: 4,
+                surface_ly: 0,
+                tree_type: TreeType::Spruce,
+            },
+            &noop_neighbour,
         );
         assert!(count > 0, "spruce should place blocks");
     }
@@ -491,8 +524,16 @@ mod tests {
         let reg = BlockRegistry::with_builtins();
         let noop_neighbour = |_: i32, _: i32, _: i32, _: BlockId| false;
         let count = try_place_tree(
-            &mut c, &reg, 42,
-            4, 4, 0, TreeType::BigOak, &noop_neighbour,
+            &mut c,
+            &reg,
+            TreePlacement {
+                seed: 42,
+                wx: 4,
+                wz: 4,
+                surface_ly: 0,
+                tree_type: TreeType::BigOak,
+            },
+            &noop_neighbour,
         );
         assert!(count > 0, "big oak should place blocks");
     }
@@ -530,21 +571,31 @@ mod tests {
     fn cross_chunk_uses_neighbour_set() {
         let mut c = test_chunk();
         let reg = BlockRegistry::with_builtins();
-        let mut cross_writes = Vec::new();
+        // `RefCell` keeps the closure `Fn`: `try_place_tree` expects a
+        // `&dyn Fn`, so the closure must not capture `cross_writes` by `&mut`.
+        let cross_writes = std::cell::RefCell::new(Vec::new());
         let neighbour_set = |x: i32, y: i32, z: i32, id: BlockId| {
-            cross_writes.push((x, y, z, id));
+            cross_writes.borrow_mut().push((x, y, z, id));
             true
         };
         // Place a tree near the chunk edge so some canopy spills to
         // neighbouring chunks.
         let _count = try_place_tree(
-            &mut c, &reg, 42,
-            0, 0, 0, TreeType::Oak, &neighbour_set,
+            &mut c,
+            &reg,
+            TreePlacement {
+                seed: 42,
+                wx: 0,
+                wz: 0,
+                surface_ly: 0,
+                tree_type: TreeType::Oak,
+            },
+            &neighbour_set,
         );
         // Oak canopy at radius 2 from (wx=0,wz=0) should spill into
         // negative X/Z which is outside chunk origin (0, 64, 0).
         assert!(
-            !cross_writes.is_empty(),
+            !cross_writes.borrow().is_empty(),
             "canopy near chunk edge should spill cross-chunk"
         );
     }
