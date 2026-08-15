@@ -22,3 +22,4 @@ assets/**/.cache/
 /logs/latest.log
 /logs/previous.log
 /tools
+.zcode/plans/plan-sess_a1cbdb02-1bb4-4d93-b04c-47e8bcdbb96c.md

@@ -98,23 +98,13 @@ impl Frustum {
     /// Extract the six clip-space planes from a row-major view-projection.
     /// Convention: a point is inside when all six plane equations are >= 0.
     pub fn from_view_projection(vp: Mat4) -> Self {
-        // Mat4 is column-major in glam; index via `col(i)` returns Vec4 columns.
-        // m[i][j] = column i, row j. The combined matrix element M(row r, col c)
-        // is `vp.col(c)[r]`.
+        // Gribb-Hartmann extraction: each plane is w-row ± another row of the
+        // VP matrix. glam is column-major, so matrix row r is
+        // (col0[r], col1[r], col2[r], col3[r]).
         let col0 = vp.col(0);
         let col1 = vp.col(1);
         let col2 = vp.col(2);
         let col3 = vp.col(3);
-
-        // Planes as (row3 +/- rowN), normalised later.
-        // Left   = row4 + row1
-        // Right  = row4 - row1
-        // Bottom = row4 + row2
-        // Top    = row4 - row2
-        // Near   = row4 + row3
-        // Far    = row4 - row3
-        // where rowN = (col0[N], col1[N], col2[N], col3[N]) and row4 = (col3[3]...)
-        // i.e. the w-row. We construct each plane vector and normalise.
         let rows = |r: usize| Vec4::new(col0[r], col1[r], col2[r], col3[r]);
         let r4 = rows(3);
         let r1 = rows(0);

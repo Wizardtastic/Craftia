@@ -1428,11 +1428,11 @@ impl Renderer {
             pipeline::create_ui_pipeline_layout(&device, ui_descriptor_set_layout)?;
         let ui_pipeline = pipeline::create_ui_pipeline(
             &device,
-            render_pass,
+            transparent_render_pass,
             ui_pipeline_layout,
             &ui_vert_spirv,
             &ui_frag_spirv,
-            msaa_samples,
+            vk::SampleCountFlags::TYPE_1,
         )?;
 
         // Persistent host-visible buffers for UI vertices/indices (re-uploaded
@@ -2336,11 +2336,11 @@ impl Renderer {
         self.ui_pipeline = vk::Pipeline::null();
         self.ui_pipeline = pipeline::create_ui_pipeline(
             &self.device,
-            self.render_pass,
+            self.transparent_render_pass,
             self.ui_pipeline_layout,
             &self.ui_vert_spirv,
             &self.ui_frag_spirv,
-            self.msaa_samples,
+            vk::SampleCountFlags::TYPE_1,
         )?;
         Ok(())
     }
@@ -3306,6 +3306,11 @@ impl Renderer {
         }
 
         // Chunk passes: Phase-1 GPU-driven indirect path or legacy per-chunk loop.
+        // The transparent_end timestamp (query 4) is written by whichever path
+        // draws the transparent geometry: the indirect path writes it after
+        // its own transparent slot draws, the legacy path gets it from
+        // `record_transparent_pass` (where water/foliage actually render).
+        let mut transparent_end_ts = Some(query_offset + 4);
         if let Some(gpu) = self.gpu_driven.as_mut() {
             gpu.record(
                 &self.device,
@@ -3319,9 +3324,10 @@ impl Renderer {
                 indirect::QueryTimestamps {
                     pool: self.query_pool,
                     opaque_end_ts: Some(query_offset + 3),
-                    transparent_end_ts: Some(query_offset + 4),
+                    transparent_end_ts,
                 },
             );
+            transparent_end_ts = None; // already written by the indirect path
         } else {
             self.record_chunk_passes(
                 device,
@@ -3333,7 +3339,6 @@ impl Renderer {
                     cam_pos: camera.pos,
                 },
                 Some(query_offset + 3),
-                Some(query_offset + 4),
             );
         }
 
@@ -3370,19 +3375,10 @@ impl Renderer {
             self.record_overlay_pass(device, cmd, view_proj);
         }
 
-        // UI overlay pass
-        if ui_index_count > 0 {
-            self.record_ui(device, cmd, ui_index_count);
-        }
-
         unsafe {
-            // Timestamp 5: UI end.
-            device.cmd_write_timestamp(
-                cmd,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                self.query_pool,
-                query_offset + 5,
-            );
+            // Timestamp 5 (UI end) is written inside
+            // `record_transparent_pass`, right after the UI draw — that is
+            // where the UI actually renders now.
             // Transition to subpass 1 (particles) so the chunks' depth
             // attachment is read as input (READ_ONLY_OPTIMAL) and the
             // particles composite onto the colour attachment above the
@@ -3420,8 +3416,11 @@ impl Renderer {
                 game_time,
                 cam_pos: camera.pos,
             },
+            ui_index_count,
             descriptor_set,
             tile_remap_descriptor_set,
+            transparent_end_ts,
+            Some(query_offset + 5),
         );
 
         // Timestamp 6: main pass end.
@@ -3595,15 +3594,10 @@ impl Renderer {
                     cam_pos: camera.pos,
                 },
                 None,
-                None,
             );
         }
 
         // â”€â”€ UI overlay pass â”€â”€
-        if ui_index_count > 0 {
-            self.record_ui(device, cmd, ui_index_count);
-        }
-
         unsafe {
             device.cmd_end_render_pass(cmd);
         }
@@ -3624,8 +3618,11 @@ impl Renderer {
                 game_time,
                 cam_pos: camera.pos,
             },
+            ui_index_count,
             self.frames[0].descriptor_set,
             self.frames[0].tile_remap_descriptor_set,
+            None,
+            None,
         );
 
         // SSAO depth barrier for capture.
@@ -3876,7 +3873,7 @@ impl Renderer {
         frame.used_queries.clear();
     }
 
-    /// Record both chunk draw passes (opaque then transparent) into `cmd`.
+    /// Record the opaque chunk draw pass into `cmd`.
     ///
     /// Both `draw_frame` and `capture_frame` need identical chunk rendering;
     /// this is the shared implementation. Uses the **collect-then-drop** lock
@@ -3885,9 +3882,8 @@ impl Renderer {
     /// uploads (`upload_chunks` taking `self.chunks.write()`) from blocking
     /// for the duration of push-constant filling + draw command recording.
     ///
-    /// `opaque_end_timestamp_query` and `transparent_end_timestamp_query`
-    /// are `Some(query_offset + 3)` and `Some(query_offset + 4)` from
-    /// `draw_frame` (GPU profiling); `capture_frame` passes `None` for both
+    /// `opaque_end_timestamp_query` is `Some(query_offset + 3)` from
+    /// `draw_frame` (GPU profiling); `capture_frame` passes `None`
     /// since it doesn't run the timestamp pool.
     ///
     /// `vp_cols` is the 16-float view-projection matrix in column-major order.
@@ -3897,7 +3893,6 @@ impl Renderer {
         cmd: vk::CommandBuffer,
         frame: &ChunkPassFrame<'_>,
         opaque_end_timestamp_query: Option<u32>,
-        transparent_end_timestamp_query: Option<u32>,
     ) {
         let ChunkPassFrame {
             frustum,
@@ -3905,13 +3900,17 @@ impl Renderer {
             game_time,
             cam_pos,
         } = *frame;
-        // Collect visible chunk buffer handles under the read lock, then
-        // drop the lock so upload_chunks can proceed while we record.
-        type DrawList = Vec<(ChunkPos, vk::Buffer, vk::Buffer, u32)>;
-        let (mut opaque_draws, transparent_draws): (DrawList, DrawList) = {
+        // Collect visible opaque chunk buffer handles under the read lock,
+        // then drop the lock so upload_chunks can proceed while we record.
+        // Transparent chunks are NOT collected here — they render
+        // exclusively in the slice-2 transparent pass, which does its own
+        // frustum-culled collection (`record_transparent_pass`).
+        // The tuple carries the precomputed camera dist² so the sort below
+        // never re-derives chunk origins inside the comparator.
+        type DrawList = Vec<(ChunkPos, vk::Buffer, vk::Buffer, u32, f32)>;
+        let mut opaque_draws: DrawList = {
             let chunks = self.chunks.read();
             let mut opaque = Vec::new();
-            let mut transparent = Vec::new();
             for (&pos, bufs) in chunks.iter() {
                 let origin = chunk_origin(pos);
                 let min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
@@ -3920,36 +3919,17 @@ impl Renderer {
                     continue;
                 }
                 if let Some(b) = &bufs.opaque {
-                    opaque.push((pos, b.vbo.buffer, b.ibo.buffer, b.index_count));
-                }
-                if let Some(b) = &bufs.transparent {
-                    transparent.push((pos, b.vbo.buffer, b.ibo.buffer, b.index_count));
+                    let center = min + Vec3::splat(voxel_core::CHUNK_SIZE as f32 * 0.5);
+                    let dist_sq = (center - cam_pos).length_squared();
+                    opaque.push((pos, b.vbo.buffer, b.ibo.buffer, b.index_count, dist_sq));
                 }
             }
-            (opaque, transparent)
+            opaque
         };
 
         // Sort opaque chunks front-to-back for better early-Z rejection and
         // occlusion query efficiency.
-        opaque_draws.sort_by(|a, b| {
-            let origin_a = chunk_origin(a.0);
-            let origin_b = chunk_origin(b.0);
-            let center_a = Vec3::new(
-                origin_a.x as f32 + 8.0,
-                origin_a.y as f32 + 8.0,
-                origin_a.z as f32 + 8.0,
-            );
-            let center_b = Vec3::new(
-                origin_b.x as f32 + 8.0,
-                origin_b.y as f32 + 8.0,
-                origin_b.z as f32 + 8.0,
-            );
-            let dist_a = (center_a - cam_pos).length_squared();
-            let dist_b = (center_b - cam_pos).length_squared();
-            dist_a
-                .partial_cmp(&dist_b)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        opaque_draws.sort_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal));
 
         let occlusion_enabled = self.occlusion_culling_enabled;
 
@@ -3958,23 +3938,30 @@ impl Renderer {
         // across frames, which is required for correct readback mapping.
         if occlusion_enabled {
             let mut occ = self.occlusion_state.write();
-            let used: std::collections::HashSet<u32> =
-                occ.values().map(|s| s.query_index).collect();
-            let mut next_idx = 0u32;
-            for (pos, _, _, _) in &opaque_draws {
+            // Bitmap of already-assigned query indices — avoids the
+            // per-frame HashSet allocation + hashing the old code paid.
+            let mut used = [false; MAX_OCCLUSION_QUERIES as usize];
+            for s in occ.values() {
+                if (s.query_index as usize) < used.len() {
+                    used[s.query_index as usize] = true;
+                }
+            }
+            let mut next_idx = 0usize;
+            for (pos, ..) in &opaque_draws {
                 if !occ.contains_key(pos) {
-                    while next_idx < MAX_OCCLUSION_QUERIES && used.contains(&next_idx) {
+                    while next_idx < used.len() && used[next_idx] {
                         next_idx += 1;
                     }
-                    if next_idx < MAX_OCCLUSION_QUERIES {
+                    if next_idx < used.len() {
                         occ.insert(
                             *pos,
                             OcclusionState {
-                                query_index: next_idx,
+                                query_index: next_idx as u32,
                                 was_visible: true,
                                 consecutive_invisible: 0,
                             },
                         );
+                        used[next_idx] = true;
                         next_idx += 1;
                     }
                 }
@@ -4021,7 +4008,7 @@ impl Renderer {
             let frame = &mut frames[frame_idx];
             let query_pool = frame.query_pool;
 
-            for &(pos, vbo_buf, ibo_buf, index_count) in &opaque_draws {
+            for &(pos, vbo_buf, ibo_buf, index_count, _) in &opaque_draws {
                 let state = occ_state.get(&pos);
                 let should_draw_mesh = match state {
                     None => true, // New chunk, no query yet -> draw full mesh
@@ -4120,7 +4107,7 @@ impl Renderer {
             drop(occ_state);
             drop(frames);
         } else {
-            for &(pos, vbo_buf, ibo_buf, index_count) in &opaque_draws {
+            for &(pos, vbo_buf, ibo_buf, index_count, _) in &opaque_draws {
                 issue_draw(cmd, pos, vbo_buf, ibo_buf, index_count);
             }
         }
@@ -4141,19 +4128,9 @@ impl Renderer {
             // reflect the CURRENT frame's opaque scene. The old code drew
             // them here too, which double-blended them AND depth-occluded the
             // slice-2 draw (same depth, LESS compare → slice-2 fully hidden).
-            // The transparent_end timestamp is still written here so the
-            // t[3]..t[5] ordering the GpuTimings subtraction expects stays
-            // monotonic (main-pass transparent time is now ~0 by design).
-            if let Some(q) = transparent_end_timestamp_query {
-                device.cmd_write_timestamp(
-                    cmd,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    self.query_pool,
-                    q,
-                );
-            }
+            // The transparent_end/ui_end timestamps are likewise written
+            // there, bracketing the water/foliage draws and the UI draw.
         }
-        let _ = transparent_draws; // collected but unused; see note above.
     }
 
     /// Record the entity pass: draw all entity meshes (billboards/cubes).
@@ -5493,8 +5470,11 @@ impl Renderer {
         cmd: vk::CommandBuffer,
         image_index: u32,
         frame: &ChunkPassFrame<'_>,
+        ui_index_count: u32,
         descriptor_set: vk::DescriptorSet,
         tile_remap_descriptor_set: vk::DescriptorSet,
+        transparent_end_timestamp_query: Option<u32>,
+        ui_end_timestamp_query: Option<u32>,
     ) {
         let ChunkPassFrame {
             frustum,
@@ -5502,13 +5482,55 @@ impl Renderer {
             game_time,
             cam_pos,
         } = *frame;
-        let any_transparent = self
-            .chunks
-            .read()
-            .iter()
-            .any(|(_, b)| b.transparent.is_some());
-        if !any_transparent {
-            // No transparent draws this frame. The scene_opaque copy restored
+        // (origin, vbo_buf, ibo_buf, index_count, dist_sq) — copy everything
+        // out in a single locked pass so we drop the chunks lock before the
+        // unsafe draw loop. Frustum-cull transparent chunks so off-screen
+        // water is not drawn. An empty result doubles as the "no transparent
+        // geometry this frame" check, so the whole map is only walked once.
+        let mut draws: Vec<(glam::Vec3, vk::Buffer, vk::Buffer, u32, f32)> = Vec::new();
+        {
+            let chunk_size = voxel_core::CHUNK_SIZE as f32;
+            let chunks = self.chunks.read();
+            for (pos, bufs) in chunks.iter() {
+                if let Some(ref t) = bufs.transparent {
+                    let origin = chunk_origin(*pos);
+                    let origin = glam::Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
+                    let min = origin;
+                    let max = origin + glam::Vec3::splat(chunk_size);
+                    if !frustum.intersects_aabb(min, max) {
+                        continue;
+                    }
+                    let center = origin + glam::Vec3::splat(chunk_size * 0.5);
+                    draws.push((
+                        origin,
+                        t.vbo.buffer,
+                        t.ibo.buffer,
+                        t.index_count,
+                        (center - cam_pos).length_squared(),
+                    ));
+                }
+            }
+        }
+        if draws.is_empty() && ui_index_count == 0 {
+            // No transparent draws this frame. Both bracketing timestamps
+            // (4: transparent_end, 5: ui_end) must still be written — the
+            // per-frame pool slots were reset at the top of draw_frame, and
+            // an unwritten slot reads back as 0, which would make the
+            // t[5]-t[4] GpuTimings subtraction go negative.
+            unsafe {
+                for q in [transparent_end_timestamp_query, ui_end_timestamp_query]
+                    .into_iter()
+                    .flatten()
+                {
+                    device.cmd_write_timestamp(
+                        cmd,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        self.query_pool,
+                        q,
+                    );
+                }
+            }
+            // The scene_opaque copy restored
             // the offscreen image to COLOR_ATTACHMENT_OPTIMAL in anticipation
             // of this pass; since the pass won't run (its resolve attachment
             // final layout would have produced SHADER_READ_ONLY_OPTIMAL),
@@ -5525,34 +5547,6 @@ impl Renderer {
                 1,
             );
             return;
-        }
-
-        const CHUNK_SIZE: f32 = 16.0;
-        // (origin, vbo_buf, ibo_buf, index_count, dist_sq) — copy everything
-        // out so we drop the chunks lock before the unsafe draw loop.
-        // Frustum-cull transparent chunks so off-screen water is not drawn.
-        let mut draws: Vec<(glam::Vec3, vk::Buffer, vk::Buffer, u32, f32)> = Vec::new();
-        for (pos, bufs) in self.chunks.read().iter() {
-            if let Some(ref t) = bufs.transparent {
-                let origin = glam::Vec3::new(
-                    pos.0.x as f32 * CHUNK_SIZE,
-                    pos.0.y as f32 * CHUNK_SIZE,
-                    pos.0.z as f32 * CHUNK_SIZE,
-                );
-                let min = origin;
-                let max = origin + glam::Vec3::splat(CHUNK_SIZE);
-                if !frustum.intersects_aabb(min, max) {
-                    continue;
-                }
-                let center = origin + glam::Vec3::splat(CHUNK_SIZE * 0.5);
-                draws.push((
-                    origin,
-                    t.vbo.buffer,
-                    t.ibo.buffer,
-                    t.index_count,
-                    (center - cam_pos).length_squared(),
-                ));
-            }
         }
         draws.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -5631,6 +5625,33 @@ impl Renderer {
                 device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
                 device.cmd_bind_index_buffer(cmd, *ibo_buffer, 0, vk::IndexType::UINT32);
                 device.cmd_draw_indexed(cmd, *index_count, 1, 0, 0, 0);
+            }
+            // Timestamp 4: transparent pass end. Written here — after the
+            // water/foliage draws, before the UI — because that is where
+            // transparent geometry actually renders since it moved out of
+            // the main pass.
+            if let Some(q) = transparent_end_timestamp_query {
+                device.cmd_write_timestamp(
+                    cmd,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    self.query_pool,
+                    q,
+                );
+            }
+            // UI is recorded last in the transparent pass so it is guaranteed
+            // to composite over water, foliage, and every other world pass.
+            if ui_index_count > 0 {
+                self.record_ui(device, cmd, ui_index_count);
+            }
+            // Timestamp 5: UI end (≈ the transparent-end timestamp on frames
+            // with no UI vertices).
+            if let Some(q) = ui_end_timestamp_query {
+                device.cmd_write_timestamp(
+                    cmd,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    self.query_pool,
+                    q,
+                );
             }
             device.cmd_end_render_pass(cmd);
         }

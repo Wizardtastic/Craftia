@@ -75,13 +75,13 @@ impl ChunkMeshBundle {
 }
 
 #[rustfmt::skip]
-const FACE_GEO: [(GVec3, [Vec2; 4], f32); 6] = [
-    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0)], 0.6),
-    (GVec3::new(1.0, 0.0, 0.0), [Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0), Vec2::new(0.0,0.0)], 0.6),
-    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0), Vec2::new(0.0,1.0)], 0.4),
-    (GVec3::new(0.0, 1.0, 0.0), [Vec2::new(0.0,0.0), Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0)], 1.0),
-    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(1.0,1.0), Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0)], 0.8),
-    (GVec3::new(0.0, 0.0, 1.0), [Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0), Vec2::new(0.0,0.0)], 0.8),
+const FACE_GEO: [(GVec3, [Vec2; 4]); 6] = [
+    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0)]),
+    (GVec3::new(1.0, 0.0, 0.0), [Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0), Vec2::new(0.0,0.0)]),
+    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0), Vec2::new(0.0,1.0)]),
+    (GVec3::new(0.0, 1.0, 0.0), [Vec2::new(0.0,0.0), Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0)]),
+    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(1.0,1.0), Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0)]),
+    (GVec3::new(0.0, 0.0, 1.0), [Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0), Vec2::new(0.0,0.0)]),
 ];
 
 #[rustfmt::skip]
@@ -270,16 +270,14 @@ fn build_mask_cell(
     let wx = origin.x + lx;
     let wy = origin.y + ly;
     let wz = origin.z + lz;
-    if !should_emit_face(face, lx, ly, lz, chunk, reg, sample, sample_loaded) {
+    if !should_emit_face(face, lx, ly, lz, chunk, origin, sample, sample_loaded) {
         return EMPTY_CELL;
     }
     let n = face.normal();
     // For NegX / NegZ / NegY faces at chunk borders, should_emit_face
     // already verified the neighbour is air or not loaded — the
     // neighbour-sample + opaque check below would be a no-op. Skip it.
-    let is_neg_border = (face == Face::NegX && lx == 0)
-        || (face == Face::NegZ && lz == 0)
-        || (face == Face::NegY && ly == 0 && chunk.pos.y() > 0);
+    let is_neg_border = is_neg_border(face, lx, ly, lz, chunk);
     if !is_neg_border {
         let nlx = lx + n.x;
         let nly = ly + n.y;
@@ -378,34 +376,35 @@ fn fi_from_face(face: Face) -> usize {
     }
 }
 
+/// True for negative-side faces (NegX/NegZ/NegY) sitting exactly on a chunk
+/// border that has a negative-side neighbour chunk. `should_emit_face` has
+/// already resolved border ownership for exactly these faces, so callers can
+/// skip the redundant neighbour re-sample.
+fn is_neg_border(face: Face, lx: i32, ly: i32, lz: i32, chunk: &Chunk) -> bool {
+    (face == Face::NegX && lx == 0)
+        || (face == Face::NegZ && lz == 0)
+        || (face == Face::NegY && ly == 0 && chunk.pos.y() > 0)
+}
+
 fn should_emit_face(
     face: Face,
     lx: i32,
     ly: i32,
     lz: i32,
     chunk: &Chunk,
-    _reg: &BlockRegistry,
+    origin: glam::IVec3,
     sample: &impl Fn(i32, i32, i32) -> BlockId,
     sample_loaded: &impl Fn(i32, i32, i32) -> bool,
 ) -> bool {
-    let origin = chunk_origin(chunk.pos);
     let wx = origin.x + lx;
     let wy = origin.y + ly;
     let wz = origin.z + lz;
     let n = face.normal();
-    // Chunk-border face ownership convention: for each pair of adjacent
-    // chunks, the chunk on the NEGATIVE side (lower coordinate) owns the
-    // border face. This chunk is on the POSITIVE side, so its NegX / NegZ /
-    // NegY faces must be suppressed whenever the owning neighbour is
-    // loaded AND has a non-air block there — the neighbour's PosX face
-    // handles rendering.
-    //
-    // When the neighbour block IS air the positive-side PosX face isn't
-    // emitted (air blocks are skipped), so WE must emit the NegX face.
-    //
-    // The old code only suppressed when the neighbour was opaque, which
-    // left both chunks emitting the same face for air/transparent
-    // neighbours — causing GPU Z-fighting (constant flickering/flashing).
+    // Chunk-border face ownership: the negative-side chunk owns each shared
+    // border face. So on our negative faces we suppress only when the neighbour
+    // is loaded AND non-air (it will draw the face); if the neighbour is air we
+    // must draw it ourselves. Suppressing on opacity instead would let both
+    // chunks emit the same face and z-fight.
     match face {
         Face::NegX if lx == 0 => {
             if sample_loaded(wx - 1, wy, wz) {
@@ -652,10 +651,6 @@ fn greedy_emit(
             let light = directional * (block_light as f32 / 15.0).max(0.15);
             let positions = merged_positions(face, u as i32, v as i32, w as i32, h as i32, slice);
             let uvs = merged_uvs(face, w as u32, h as u32);
-            // `cell.light_color` is already a packed RGBA8 u32 ready for the
-            // vertex shader. The palette-quantization step that used to live
-            // here (`pack_light_color`) is gone — torchlight colour is stored
-            // verbatim in the chunk from the BFS through to the vertex.
             let packed_color = cell.light_color;
 
             let target = match reg.get(cell.block_id).kind {
@@ -722,14 +717,9 @@ fn emit_foliage_cross(
     let w = 0.45f32;
     let cx = bx + 0.5;
     let cz = bz + 0.5;
-    // Two perpendicular UPRIGHT (vertical) planar billboards, joined at the
-    // block's central vertical axis. Previously this built two diagonal
-    // planes tilted 45° around Y (an X-shape from above), which made flowers
-    // and tall grass look slanted; the new shape is a `+` from above with
-    // each plane edge-on only in its own normal direction.
-    //
-    //   Plane 1: lies in the XY plane at z = cz (outward normal = +Z).
-    //   Plane 2: lies in the YZ plane at x = cx (outward normal = -X).
+    // Two perpendicular upright planes forming a `+` from above (not an X):
+    //   Plane 1: XY plane at z = cz (outward normal +Z).
+    //   Plane 2: YZ plane at x = cx (outward normal -X).
     let positions: [[f32; 3]; 8] = [
         // Plane 1 (z = cz): bottom-left, bottom-right, top-right, top-left.
         [cx - w, by, cz],
@@ -804,7 +794,7 @@ fn emit_water_block(
     let tile = def.textures.tile(Face::PosY);
 
     for (fi, face) in Face::ALL.iter().enumerate() {
-        if !should_emit_face(*face, lx, ly, lz, chunk, reg, sample, sample_loaded) {
+        if !should_emit_face(*face, lx, ly, lz, chunk, origin, sample, sample_loaded) {
             continue;
         }
         let n = face.normal();
@@ -812,9 +802,7 @@ fn emit_water_block(
         // already verified the neighbour is air or not loaded. Skip the
         // redundant cross-chunk sample — use AIR as a dummy since all
         // checks below (opaque, same-liquid, solid) are no-ops for air.
-        let is_neg_border = (*face == Face::NegX && lx == 0)
-            || (*face == Face::NegZ && lz == 0)
-            || (*face == Face::NegY && ly == 0 && chunk.pos.y() > 0);
+        let is_neg_border = is_neg_border(*face, lx, ly, lz, chunk);
         let neighbour = if is_neg_border {
             BlockId::AIR
         } else {
@@ -837,7 +825,7 @@ fn emit_water_block(
             continue;
         }
 
-        let (base, uvs, _) = FACE_GEO[fi];
+        let (base, uvs) = FACE_GEO[fi];
         let mut p_base = GVec3::new(lx as f32, ly as f32, lz as f32) + base;
         let y_scale = if *face != Face::PosY && *face != Face::NegY {
             let nw = if neighbour_def.kind == BlockKind::Liquid {
@@ -902,7 +890,7 @@ fn emit_cactus_block(
     let block_light = chunk.get_combined_light(lx, ly, lz) as f32 / 15.0;
 
     for (fi, face) in Face::ALL.iter().enumerate() {
-        if !should_emit_face(*face, lx, ly, lz, chunk, reg, sample, &|_, _, _| false) {
+        if !should_emit_face(*face, lx, ly, lz, chunk, origin, sample, &|_, _, _| false) {
             continue;
         }
         let n = face.normal();
@@ -911,7 +899,7 @@ fn emit_cactus_block(
             continue;
         }
 
-        let (base, _, _) = FACE_GEO[fi];
+        let (base, _) = FACE_GEO[fi];
         let fn_f = GVec3::new(n.x as f32, n.y as f32, n.z as f32);
         let diffuse = fn_f.dot(-sun_dir).max(0.0);
         let directional = (diffuse * 0.65 + 0.35).clamp(0.0, 1.0);

@@ -42,30 +42,22 @@ pub struct Chunk {
     /// Index array: for each block position, the index into `palette`.
     /// Only allocated when in palette mode.
     indices: Box<[u8]>,
-    /// Flat block storage. Used when palette exceeds 255 unique blocks,
-    /// or as a cache when fast slice access is needed.
+    /// Flat block storage, used when the palette overflows 255 entries.
+    /// Invariant: populated iff `!palette_mode`; freed (empty) in palette mode.
     flat: Box<[BlockId]>,
     /// True when using palette mode (indices is valid).
     palette_mode: bool,
-    /// Running count of non-air blocks. Maintained incrementally by `set` and
-    /// recomputed after bulk operations, so `non_air_count` is O(1) instead of
-    /// scanning all 4096 voxels on every remesh.
+    /// Cached count of non-air blocks, kept O(1) for the mesher's per-remesh
+    /// capacity reservation instead of scanning all 4096 voxels each time.
     non_air: usize,
     /// Sunlight level 0–15 per block.
     pub(crate) sunlight: Box<[u8]>,
     /// Torchlight level 0–15 per block.
     pub(crate) torchlight: Box<[u8]>,
-    /// Per-block packed RGBA8 torchlight tint. A=0 means "no color stored"
-    /// and the vertex pipeline falls through to warm white (sunlight). Only
-    /// meaningful when torchlight > 0; for sunlight-dominated voxels the
-    /// chunk mesh materialises the warm-white default at render time.
-    ///
-    /// Stored as `(A << 24) | (B << 16) | (G << 8) | R` so a verbatim
-    /// bytemuck cast becomes an `R8G8B8A8_UNORM` attribute and the vertex
-    /// shader reads R/G/B directly in `[0, 1]`. This removed the old
-    /// 16-palette-index quantization that washed out distinct emissive
-    /// colours (a `light_blue` block's `[60, 120, 255]` no longer snapped
-    /// to the nearest palette entry like sea-lantern).
+    /// Per-block packed RGBA8 torchlight tint, `(A << 24) | (B << 16) | (G << 8) | R`
+    /// so a bytemuck cast is a valid `R8G8B8A8_UNORM` vertex attribute. A=0
+    /// means "no colour stored" and the mesher substitutes warm white.
+    /// Only meaningful when torchlight > 0.
     pub(crate) torchlight_color: Box<[u32]>,
     /// Water level 0–8 per block. 0 = no water, 1 = shallowest flow, 8 = source.
     pub(crate) water_level: Box<[u8]>,
