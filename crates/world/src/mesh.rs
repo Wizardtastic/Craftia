@@ -921,21 +921,25 @@ fn emit_cactus_block(
         let face_normal = IVec3::new(n.x, n.y, n.z);
         let corners = FACE_CORNERS[fi];
         let p_base = GVec3::new(lx as f32, ly as f32, lz as f32) + base;
-        let inset = if *face != Face::PosY && *face != Face::NegY {
-            1.0 / 16.0
-        } else {
-            0.0
-        };
+        // Cactus is inset 2px (of 16) on every side, like Minecraft. Side
+        // faces are pushed inward along their normal; top/bottom faces are
+        // pulled in on all four horizontal edges. This keeps the block visibly
+        // smaller than a full cube (so you see the ground around its base).
+        const INSET: f32 = 2.0 / 16.0;
 
         let start = bundle.opaque.vertices.len() as u32;
         let packed_color = chunk.get_combined_light_color(lx, ly, lz);
         for c in 0..4 {
             let mut cp = p_base + corners[c];
-            if inset > 0.0 {
-                if n.x != 0 {
-                    cp.z = (lz as f32 + 0.5) + (corners[c].z - 0.5) * (1.0 - 2.0 * inset);
-                } else if n.z != 0 {
-                    cp.x = (lx as f32 + 0.5) + (corners[c].x - 0.5) * (1.0 - 2.0 * inset);
+            match face {
+                Face::PosX => cp.x = lx as f32 + 1.0 - INSET,
+                Face::NegX => cp.x = lx as f32 + INSET,
+                Face::PosZ => cp.z = lz as f32 + 1.0 - INSET,
+                Face::NegZ => cp.z = lz as f32 + INSET,
+                Face::PosY | Face::NegY => {
+                    // Inset the horizontal footprint; leave the Y (set by base).
+                    cp.x = (lx as f32 + 0.5) + (corners[c].x - 0.5) * (1.0 - 2.0 * INSET);
+                    cp.z = (lz as f32 + 0.5) + (corners[c].z - 0.5) * (1.0 - 2.0 * INSET);
                 }
             }
             let ao = crate::light::compute_vertex_ao(

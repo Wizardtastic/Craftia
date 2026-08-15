@@ -803,7 +803,10 @@ impl BlockRegistry {
                 name: Arc::from("cactus"),
                 kind: BlockKind::Cactus,
                 solid: true,
-                opaque: true,
+                // Non-opaque so neighbours (esp. the sand top beneath) keep
+                // their faces — the cactus is an inset model, so a full-cube
+                // opaque cull would leave a see-through hole in the ground.
+                opaque: false,
                 breakable: true,
                 replaceable: false,
                 textures: BlockTextures::top_bottom_side(38, 39, 27),

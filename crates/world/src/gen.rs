@@ -1107,10 +1107,40 @@ impl TerrainGenerator {
                                     if let Some(c) = cactus {
                                         let cactus_h =
                                             1 + (hash2(self.seed, wx + 7, wz + 7) * 3.0) as i32;
-                                        for i in 0..cactus_h {
+                                        // Cactus only grows with clear space on
+                                        // every side: each segment cell must be
+                                        // air, and its 4 horizontal neighbours
+                                        // must be air too, so cacti never spawn
+                                        // touching structures, terrain, or other
+                                        // cacti. (Neighbours outside this chunk
+                                        // can't be sampled here and are treated
+                                        // as clear — a rare border case.)
+                                        let mut clear = true;
+                                        'height: for i in 0..cactus_h {
                                             let cy = sy + 1 + i;
-                                            if cy < CHUNK_SIZE && chunk.get(lx, cy, lz).is_air() {
-                                                chunk.set(lx, cy, lz, c);
+                                            if cy >= CHUNK_SIZE
+                                                || !chunk.get(lx, cy, lz).is_air()
+                                            {
+                                                clear = false;
+                                                break;
+                                            }
+                                            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                                                let nx = lx + dx;
+                                                let nz = lz + dz;
+                                                if nx >= 0
+                                                    && nx < CHUNK_SIZE
+                                                    && nz >= 0
+                                                    && nz < CHUNK_SIZE
+                                                    && !chunk.get(nx, cy, nz).is_air()
+                                                {
+                                                    clear = false;
+                                                    break 'height;
+                                                }
+                                            }
+                                        }
+                                        if clear {
+                                            for i in 0..cactus_h {
+                                                chunk.set(lx, sy + 1 + i, lz, c);
                                             }
                                         }
                                     }
