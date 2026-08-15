@@ -47,6 +47,10 @@ pub struct Chunk {
     flat: Box<[BlockId]>,
     /// True when using palette mode (indices is valid).
     palette_mode: bool,
+    /// Running count of non-air blocks. Maintained incrementally by `set` and
+    /// recomputed after bulk operations, so `non_air_count` is O(1) instead of
+    /// scanning all 4096 voxels on every remesh.
+    non_air: usize,
     /// Sunlight level 0–15 per block.
     pub(crate) sunlight: Box<[u8]>,
     /// Torchlight level 0–15 per block.
@@ -81,6 +85,8 @@ impl Chunk {
             indices: Box::new([0u8; CHUNK_CUBED]),
             flat: vec![BlockId::AIR; CHUNK_CUBED].into_boxed_slice(),
             palette_mode: false,
+            // A fresh chunk is entirely air.
+            non_air: 0,
             sunlight: vec![0u8; CHUNK_CUBED].into_boxed_slice(),
             torchlight: vec![0u8; CHUNK_CUBED].into_boxed_slice(),
             // Start every voxel's color as 0 (transparent / "no color"). The
@@ -94,9 +100,30 @@ impl Chunk {
         }
     }
 
+    /// Borrow the flat block array. Only valid in flat mode — in palette mode
+    /// the flat array is freed (see `consider_palette_mode`). Callers that may
+    /// run in either mode should use [`Chunk::snapshot_blocks`] instead.
     #[inline]
     pub fn blocks(&self) -> &[BlockId] {
+        debug_assert!(
+            !self.palette_mode,
+            "blocks() is only valid in flat mode; use snapshot_blocks()"
+        );
         &self.flat
+    }
+
+    /// Materialize the chunk's blocks into an owned `Vec`, working in either
+    /// storage mode. Use this when a flat view is needed regardless of whether
+    /// the chunk is palette-compressed.
+    pub fn snapshot_blocks(&self) -> Vec<BlockId> {
+        if self.palette_mode {
+            self.indices
+                .iter()
+                .map(|&i| self.palette[i as usize])
+                .collect()
+        } else {
+            self.flat.to_vec()
+        }
     }
 
     /// Get a block by local coordinate. Returns air for out-of-range locals.
@@ -122,12 +149,17 @@ impl Chunk {
             return;
         }
         let idx = voxel_core::math::local_index(x, y, z);
+        // Read the current block once so we can (a) early-out on no-op writes
+        // and (b) update the running non-air count by the air-ness delta.
+        let old = if self.palette_mode {
+            self.palette[self.indices[idx] as usize]
+        } else {
+            self.flat[idx]
+        };
+        if old == id {
+            return;
+        }
         if self.palette_mode {
-            // Check if already set to this value.
-            let pal_idx = self.indices[idx] as usize;
-            if self.palette[pal_idx] == id {
-                return;
-            }
             // Try to find or add to palette.
             if let Some(new_pal_idx) = self.find_or_add_palette(id) {
                 self.indices[idx] = new_pal_idx as u8;
@@ -137,12 +169,15 @@ impl Chunk {
                 self.flat[idx] = id;
             }
         } else {
-            if self.flat[idx] == id {
-                return;
-            }
             self.flat[idx] = id;
             // Try to switch to palette mode if beneficial.
             self.consider_palette_mode();
+        }
+        // Maintain the non-air count incrementally (old != id here).
+        match (old.is_air(), id.is_air()) {
+            (true, false) => self.non_air += 1,
+            (false, true) => self.non_air -= 1,
+            _ => {}
         }
         self.dirty = true;
     }
@@ -188,6 +223,10 @@ impl Chunk {
             self.indices[i] = pal_idx;
         }
         self.palette_mode = true;
+        // In palette mode the flat array is redundant; free its ~8 KB.
+        // The invariant `flat is populated iff !palette_mode` is restored by
+        // `convert_to_flat` before any flat-mode read.
+        self.flat = Box::new([]);
     }
 
     /// Convert from palette mode to flat mode.
@@ -195,9 +234,12 @@ impl Chunk {
         if !self.palette_mode {
             return;
         }
+        // `flat` was freed on entering palette mode; reallocate and repopulate.
+        let mut flat = vec![BlockId::AIR; CHUNK_CUBED].into_boxed_slice();
         for i in 0..CHUNK_CUBED {
-            self.flat[i] = self.palette[self.indices[i] as usize];
+            flat[i] = self.palette[self.indices[i] as usize];
         }
+        self.flat = flat;
         self.palette.clear();
         self.palette.shrink_to_fit();
         self.palette_mode = false;
@@ -353,8 +395,17 @@ impl Chunk {
     }
 
     /// Count non-air blocks (used for empty-chunk culling in the mesher).
+    /// O(1): returns the cached count maintained by `set` and the bulk paths.
+    #[inline]
     pub fn non_air_count(&self) -> usize {
-        if self.palette_mode {
+        self.non_air
+    }
+
+    /// Recompute the non-air count from current storage. Used by bulk paths
+    /// (fill/restore) which are already O(4096), so this adds no asymptotic
+    /// cost while keeping the cached `non_air` field authoritative.
+    fn recompute_non_air(&mut self) {
+        self.non_air = if self.palette_mode {
             // Fast path: check if air is in the palette.
             if let Some(air_idx) = self.palette.iter().position(|b| b.is_air()) {
                 let air_idx = air_idx as u8;
@@ -365,7 +416,7 @@ impl Chunk {
             }
         } else {
             self.flat.iter().filter(|b| !b.is_air()).count()
-        }
+        };
     }
 
     /// Highest non-air block in a local column `(x, z)`, or 0 if empty.
@@ -396,6 +447,7 @@ impl Chunk {
         }
         self.dirty = true;
         self.consider_palette_mode();
+        self.recompute_non_air();
     }
 
     /// Convenience: replace every block with `id`.
@@ -413,6 +465,7 @@ impl Chunk {
             }
             self.consider_palette_mode();
         }
+        self.non_air = if id.is_air() { 0 } else { CHUNK_CUBED };
         self.dirty = true;
     }
 
@@ -478,7 +531,10 @@ impl Chunk {
         self.palette = palette;
         self.indices = indices.into_boxed_slice();
         self.palette_mode = true;
+        // Palette mode keeps the flat array freed (see `consider_palette_mode`).
+        self.flat = Box::new([]);
         self.dirty = true;
+        self.recompute_non_air();
     }
 
     /// Restore from flat block data (for load).
@@ -487,6 +543,7 @@ impl Chunk {
         self.palette.clear();
         self.palette_mode = false;
         self.dirty = true;
+        self.recompute_non_air();
     }
 
     /// Restore sunlight data (for load).

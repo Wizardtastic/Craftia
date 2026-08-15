@@ -170,7 +170,7 @@ impl ChunkMesher {
                                 origin,
                             );
                         }
-                        _ if def.name.as_ref() == "cactus" => {
+                        _ if def.kind == BlockKind::Cactus => {
                             emit_cactus_block(
                                 &mut bundle,
                                 chunk,
@@ -263,7 +263,7 @@ fn build_mask_cell(
     if !def.is_rendered()
         || def.kind == BlockKind::Liquid
         || def.kind == BlockKind::Foliage
-        || def.name.as_ref() == "cactus"
+        || def.kind == BlockKind::Cactus
     {
         return EMPTY_CELL;
     }

@@ -918,7 +918,7 @@ mod tests {
         let torch = reg.id_of("torch").unwrap();
         chunk.set(8, 8, 8, torch);
 
-        let blocks_snapshot: Vec<BlockId> = chunk.blocks().to_vec();
+        let blocks_snapshot: Vec<BlockId> = chunk.snapshot_blocks();
         let sample_block_fn = move |x: i32, y: i32, z: i32| -> BlockId {
             if (0..voxel_core::CHUNK_SIZE).contains(&x)
                 && (0..voxel_core::CHUNK_SIZE).contains(&y)
@@ -971,7 +971,7 @@ mod tests {
                 chunk.set(x, 8, z, stone);
             }
         }
-        let blocks_snapshot: Vec<BlockId> = chunk.blocks().to_vec();
+        let blocks_snapshot: Vec<BlockId> = chunk.snapshot_blocks();
         let sample_block_fn = move |x: i32, y: i32, z: i32| -> BlockId {
             if (0..voxel_core::CHUNK_SIZE).contains(&x)
                 && (0..voxel_core::CHUNK_SIZE).contains(&y)
@@ -1019,7 +1019,7 @@ mod tests {
                 chunk.set(8, y, z, stone);
             }
         }
-        let blocks_snapshot: Vec<BlockId> = chunk.blocks().to_vec();
+        let blocks_snapshot: Vec<BlockId> = chunk.snapshot_blocks();
         let sample_block_fn = move |x: i32, y: i32, z: i32| -> BlockId {
             if (0..voxel_core::CHUNK_SIZE).contains(&x)
                 && (0..voxel_core::CHUNK_SIZE).contains(&y)
