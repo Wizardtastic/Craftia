@@ -2321,10 +2321,21 @@ pub(super) fn create_occlusion_pipeline(
     let multisampling =
         vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
 
-    // Depth test + write: standard LESS comparison.
+    // Depth TEST only — occlusion proxies must NOT write depth. This is an
+    // invisible bounding-box drawn purely to count, via an occlusion query,
+    // how many of its fragments pass the depth test against the already-drawn
+    // scene. If it also *wrote* depth, the box's front face (at the chunk's
+    // AABB boundary, nearer than the actual terrain surface inside) would
+    // stamp a false, closer depth into the scene buffer. That corrupts every
+    // later draw and creates a 2-frame limit cycle: the proxy writes near
+    // depth -> the chunk's real mesh then fails the LESS test next frame and
+    // its query reads 0 samples -> marked invisible -> proxy again -> passes
+    // -> marked visible -> mesh -> occluded... i.e. whole chunks flashing on
+    // and off every frame (and SSAO turning the phantom depth into ghost
+    // wireframe boxes). Depth-test-only breaks the loop.
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
-        .depth_write_enable(true)
+        .depth_write_enable(false)
         .depth_compare_op(vk::CompareOp::LESS)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);

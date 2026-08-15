@@ -1010,7 +1010,37 @@ impl GpuDriven {
                 log::warn!("cull_ubo flush failed: {e}");
             }
         }
+        // Cross-frame WAR hazard guard. `indirect_cmd_buf` is a single buffer
+        // shared by all frames in flight, so the previous frame's indirect
+        // draws may still be reading it on the GPU when this frame's cull
+        // compute is about to overwrite it. The intra-frame compute->draw
+        // barrier below does NOT cover this: it only orders work within one
+        // submission. Without an execution dependency from the prior frame's
+        // DRAW_INDIRECT reads to this frame's COMPUTE_SHADER writes, the
+        // compute shader stomps draw commands mid-read, producing garbage
+        // index counts/offsets that rasterize as whole-chunk white flashes
+        // (visible while moving/looking, since cull output changes each frame).
+        // Barriers chain across submissions in queue order, so this closes the
+        // gap. Access masks describe the read->write hazard; the execution
+        // dependency (DRAW_INDIRECT -> COMPUTE_SHADER) is what actually matters.
+        let pre_cull = vk::BufferMemoryBarrier::default()
+            .buffer(self.indirect_cmd_buf.buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE)
+            .src_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+            .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
         unsafe {
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::DRAW_INDIRECT,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[pre_cull],
+                &[],
+            );
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.cull_pipeline);
             device.cmd_bind_descriptor_sets(
                 cmd,
