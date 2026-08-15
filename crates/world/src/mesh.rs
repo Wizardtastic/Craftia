@@ -911,7 +911,7 @@ fn emit_cactus_block(
             continue;
         }
 
-        let (base, uvs, _) = FACE_GEO[fi];
+        let (base, _, _) = FACE_GEO[fi];
         let fn_f = GVec3::new(n.x as f32, n.y as f32, n.z as f32);
         let diffuse = fn_f.dot(-sun_dir).max(0.0);
         let directional = (diffuse * 0.65 + 0.35).clamp(0.0, 1.0);
@@ -920,28 +920,34 @@ fn emit_cactus_block(
         let tile = def.textures.tile(*face);
         let face_normal = IVec3::new(n.x, n.y, n.z);
         let corners = FACE_CORNERS[fi];
-        let p_base = GVec3::new(lx as f32, ly as f32, lz as f32) + base;
-        // Cactus is inset 2px (of 16) on every side, like Minecraft. Side
-        // faces are pushed inward along their normal; top/bottom faces are
-        // pulled in on all four horizontal edges. This keeps the block visibly
-        // smaller than a full cube (so you see the ground around its base).
-        const INSET: f32 = 2.0 / 16.0;
+
+        // Cactus renders as a clean box inset 2px (of 16) on all four
+        // horizontal sides, like Minecraft. Each side face is BOTH pushed in
+        // along its normal AND narrowed tangentially, so its edges meet the
+        // inset top/bottom faces exactly — no corner overhang, and the top
+        // lines up with the sides. UVs are derived from the corner's local
+        // position (V up the +Y axis) so the bark texture stays upright on
+        // every face instead of inheriting the greedy-mesh table's per-face
+        // rotation.
+        const INSET: f32 = 3.0 / 16.0;
+        // Pull a 0..1 tangential coordinate toward the block centre by INSET.
+        let narrow = |t: f32| 0.5 + (t - 0.5) * (1.0 - 2.0 * INSET);
 
         let start = bundle.opaque.vertices.len() as u32;
         let packed_color = chunk.get_combined_light_color(lx, ly, lz);
         for c in 0..4 {
-            let mut cp = p_base + corners[c];
-            match face {
-                Face::PosX => cp.x = lx as f32 + 1.0 - INSET,
-                Face::NegX => cp.x = lx as f32 + INSET,
-                Face::PosZ => cp.z = lz as f32 + 1.0 - INSET,
-                Face::NegZ => cp.z = lz as f32 + INSET,
-                Face::PosY | Face::NegY => {
-                    // Inset the horizontal footprint; leave the Y (set by base).
-                    cp.x = (lx as f32 + 0.5) + (corners[c].x - 0.5) * (1.0 - 2.0 * INSET);
-                    cp.z = (lz as f32 + 0.5) + (corners[c].z - 0.5) * (1.0 - 2.0 * INSET);
-                }
-            }
+            // Local 0..1 corner within the block (normal axis at its face value).
+            let f = base + corners[c];
+            // (fx,fy,fz) = inset local position; (u,v) = upright tile UV.
+            let (fx, fy, fz, u, v) = match face {
+                Face::PosX => (1.0 - INSET, f.y, narrow(f.z), f.z, 1.0 - f.y),
+                Face::NegX => (INSET, f.y, narrow(f.z), 1.0 - f.z, 1.0 - f.y),
+                Face::PosZ => (narrow(f.x), f.y, 1.0 - INSET, f.x, 1.0 - f.y),
+                Face::NegZ => (narrow(f.x), f.y, INSET, f.x, 1.0 - f.y),
+                Face::PosY => (narrow(f.x), f.y, narrow(f.z), f.x, f.z),
+                Face::NegY => (narrow(f.x), f.y, narrow(f.z), f.x, 1.0 - f.z),
+            };
+            let cp = GVec3::new(lx as f32 + fx, ly as f32 + fy, lz as f32 + fz);
             let ao = crate::light::compute_vertex_ao(
                 wx,
                 wy,
@@ -957,7 +963,7 @@ fn emit_cactus_block(
             );
             bundle.opaque.vertices.push(ChunkVertex {
                 pos: [cp.x, cp.y, cp.z],
-                uv: [uvs[c].x, uvs[c].y],
+                uv: [u, v],
                 light: light * ao,
                 tile: tile as u32,
                 light_color: packed_color,
