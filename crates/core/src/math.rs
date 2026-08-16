@@ -211,6 +211,20 @@ pub fn chunk_origin(c: ChunkPos) -> IVec3 {
     c.0 * CHUNK_SIZE
 }
 
+/// The world-space AABB of a chunk as `(min, max)` f32 corners, ready for
+/// frustum culling / occlusion-proxy tests.
+#[inline]
+pub fn chunk_aabb(c: ChunkPos) -> (Vec3, Vec3) {
+    let min = chunk_origin(c).as_vec3();
+    (min, min + Vec3::splat(CHUNK_SIZE as f32))
+}
+
+/// World-space centre of a chunk, for camera-distance sorting.
+#[inline]
+pub fn chunk_center(c: ChunkPos) -> Vec3 {
+    chunk_origin(c).as_vec3() + Vec3::splat(CHUNK_SIZE as f32 * 0.5)
+}
+
 /// Linear array index for a block local coordinate in `[0, CHUNK_SIZE)`.
 /// Layout is x-fastest: `idx = (y*16 + z)*16 + x`.
 #[inline]

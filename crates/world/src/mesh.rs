@@ -74,6 +74,26 @@ impl ChunkMeshBundle {
     }
 }
 
+// ── Baked lighting / geometry constants ──────────────────────────────────
+// Per-face lambert term: `diffuse * SUN_SHADE_SCALE + SUN_SHADE_BIAS`,
+// clamped to [0, 1]. Keeps shadow-side faces from going fully black.
+const SUN_SHADE_SCALE: f32 = 0.65;
+const SUN_SHADE_BIAS: f32 = 0.35;
+// Minimum light a solid face receives regardless of block light.
+const MIN_FACE_LIGHT: f32 = 0.15;
+// Foliage planes carry no AO; use a slightly higher floor so they stay
+// readable against the sky.
+const MIN_FOLIAGE_LIGHT: f32 = 0.2;
+// Half-width of the foliage cross planes, in blocks.
+const FOLIAGE_PLANE_WIDTH: f32 = 0.45;
+// How far a full water block's top surface sits below the block ceiling.
+const WATER_SURFACE_INSET: f32 = 2.0 / 16.0;
+// Extra vertex light per unit of water level (0..8) — brightens water as it
+// deepens.
+const WATER_LIGHT_BOOST: f32 = 0.5;
+// Cactus sides are pulled in from the block edge by this amount.
+const CACTUS_INSET: f32 = 3.0 / 16.0;
+
 #[rustfmt::skip]
 const FACE_GEO: [(GVec3, [Vec2; 4]); 6] = [
     (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0)]),
@@ -197,7 +217,7 @@ impl ChunkMesher {
             let n = face.normal();
             let fn_f = GVec3::new(n.x as f32, n.y as f32, n.z as f32);
             let diffuse = fn_f.dot(-sun_dir).max(0.0);
-            let directional = (diffuse * 0.65 + 0.35).clamp(0.0, 1.0);
+            let directional = (diffuse * SUN_SHADE_SCALE + SUN_SHADE_BIAS).clamp(0.0, 1.0);
 
             for slice in 0..CHUNK_SIZE {
                 for v in 0..S {
@@ -648,7 +668,7 @@ fn greedy_emit(
                 mask[v + dv][u + du].ao[ao_idx]
             });
 
-            let light = directional * (block_light as f32 / 15.0).max(0.15);
+            let light = directional * (block_light as f32 / 15.0).max(MIN_FACE_LIGHT);
             let positions = merged_positions(face, u as i32, v as i32, w as i32, h as i32, slice);
             let uvs = merged_uvs(face, w as u32, h as u32);
             let packed_color = cell.light_color;
@@ -659,16 +679,19 @@ fn greedy_emit(
             };
             let base = target.vertices.len() as u32;
 
+            for c in 0..4 {
+                target.vertices.push(ChunkVertex {
+                    pos: positions[c],
+                    uv: uvs[c],
+                    light: light * corner_ao[c],
+                    tile: tile as u32,
+                    light_color: packed_color,
+                });
+            }
+            // Both branches share the same four vertices; only the quad's
+            // diagonal — and thus the index winding — differs. Choose the
+            // diagonal that hides the AO seam along the brighter pair.
             if corner_ao[0] + corner_ao[2] > corner_ao[1] + corner_ao[3] {
-                for c in 0..4 {
-                    target.vertices.push(ChunkVertex {
-                        pos: positions[c],
-                        uv: uvs[c],
-                        light: light * corner_ao[c],
-                        tile: tile as u32,
-                        light_color: packed_color,
-                    });
-                }
                 target.indices.extend_from_slice(&[
                     base,
                     base + 1,
@@ -678,15 +701,6 @@ fn greedy_emit(
                     base + 3,
                 ]);
             } else {
-                for c in 0..4 {
-                    target.vertices.push(ChunkVertex {
-                        pos: positions[c],
-                        uv: uvs[c],
-                        light: light * corner_ao[c],
-                        tile: tile as u32,
-                        light_color: packed_color,
-                    });
-                }
                 target.indices.extend_from_slice(&[
                     base,
                     base + 1,
@@ -710,11 +724,11 @@ fn emit_foliage_cross(
 ) {
     let tile = def.textures.tile(Face::PosY);
     let block_light = chunk.get_combined_light(lx, ly, lz) as f32 / 15.0;
-    let light = block_light.max(0.2);
+    let light = block_light.max(MIN_FOLIAGE_LIGHT);
     let bx = lx as f32;
     let by = ly as f32;
     let bz = lz as f32;
-    let w = 0.45f32;
+    let w = FOLIAGE_PLANE_WIDTH;
     let cx = bx + 0.5;
     let cz = bz + 0.5;
     // Two perpendicular upright planes forming a `+` from above (not an X):
@@ -850,9 +864,9 @@ fn emit_water_block(
                 cp.y = ly as f32 + corners[c].y * y_scale;
             }
             if *face == Face::PosY && water_level == 8 {
-                cp.y -= 2.0 / 16.0;
+                cp.y -= WATER_SURFACE_INSET;
             }
-            let vertex_light = 1.0 + (water_f / 8.0) * 0.5;
+            let vertex_light = 1.0 + (water_f / 8.0) * WATER_LIGHT_BOOST;
             bundle.transparent.vertices.push(ChunkVertex {
                 pos: [cp.x, cp.y, cp.z],
                 uv: [uvs[c].x, uvs[c].y],
@@ -902,8 +916,8 @@ fn emit_cactus_block(
         let (base, _) = FACE_GEO[fi];
         let fn_f = GVec3::new(n.x as f32, n.y as f32, n.z as f32);
         let diffuse = fn_f.dot(-sun_dir).max(0.0);
-        let directional = (diffuse * 0.65 + 0.35).clamp(0.0, 1.0);
-        let light = directional * block_light.max(0.15);
+        let directional = (diffuse * SUN_SHADE_SCALE + SUN_SHADE_BIAS).clamp(0.0, 1.0);
+        let light = directional * block_light.max(MIN_FACE_LIGHT);
 
         let tile = def.textures.tile(*face);
         let face_normal = IVec3::new(n.x, n.y, n.z);
@@ -917,9 +931,9 @@ fn emit_cactus_block(
         // position (V up the +Y axis) so the bark texture stays upright on
         // every face instead of inheriting the greedy-mesh table's per-face
         // rotation.
-        const INSET: f32 = 3.0 / 16.0;
-        // Pull a 0..1 tangential coordinate toward the block centre by INSET.
-        let narrow = |t: f32| 0.5 + (t - 0.5) * (1.0 - 2.0 * INSET);
+        // Pull a 0..1 tangential coordinate toward the block centre by
+        // CACTUS_INSET.
+        let narrow = |t: f32| 0.5 + (t - 0.5) * (1.0 - 2.0 * CACTUS_INSET);
 
         let start = bundle.opaque.vertices.len() as u32;
         let packed_color = chunk.get_combined_light_color(lx, ly, lz);
@@ -928,10 +942,10 @@ fn emit_cactus_block(
             let f = base + corners[c];
             // (fx,fy,fz) = inset local position; (u,v) = upright tile UV.
             let (fx, fy, fz, u, v) = match face {
-                Face::PosX => (1.0 - INSET, f.y, narrow(f.z), f.z, 1.0 - f.y),
-                Face::NegX => (INSET, f.y, narrow(f.z), 1.0 - f.z, 1.0 - f.y),
-                Face::PosZ => (narrow(f.x), f.y, 1.0 - INSET, f.x, 1.0 - f.y),
-                Face::NegZ => (narrow(f.x), f.y, INSET, f.x, 1.0 - f.y),
+                Face::PosX => (1.0 - CACTUS_INSET, f.y, narrow(f.z), f.z, 1.0 - f.y),
+                Face::NegX => (CACTUS_INSET, f.y, narrow(f.z), 1.0 - f.z, 1.0 - f.y),
+                Face::PosZ => (narrow(f.x), f.y, 1.0 - CACTUS_INSET, f.x, 1.0 - f.y),
+                Face::NegZ => (narrow(f.x), f.y, CACTUS_INSET, f.x, 1.0 - f.y),
                 Face::PosY => (narrow(f.x), f.y, narrow(f.z), f.x, f.z),
                 Face::NegY => (narrow(f.x), f.y, narrow(f.z), f.x, 1.0 - f.z),
             };

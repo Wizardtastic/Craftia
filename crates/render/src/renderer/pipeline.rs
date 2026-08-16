@@ -1215,7 +1215,7 @@ pub(super) fn create_ui_pipeline(
         .dynamic_state(&dynamic)
         .layout(layout)
         .render_pass(render_pass)
-        .subpass(0);
+        .subpass(1);
 
     let result = unsafe {
         device.create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
@@ -1562,6 +1562,14 @@ pub(super) fn create_transparent_render_pass(
     }
     let subpass_0 = subpass_desc;
 
+    // Subpass 1: UI overlay. Color-only (no depth attachment — the UI
+    // pipeline disables depth test) so the UI is structurally the final
+    // consumer of the offscreen colour and can never be ordered behind the
+    // transparent geometry drawn in subpass 0.
+    let subpass_1 = vk::SubpassDescription::default()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(&color_refs_0);
+
     let dep_ext_to_0 = vk::SubpassDependency::default()
         .src_subpass(vk::SUBPASS_EXTERNAL)
         .dst_subpass(0)
@@ -1583,6 +1591,18 @@ pub(super) fn create_transparent_render_pass(
                 | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
         );
 
+    // Subpass 0 → 1: the UI blends over the transparent geometry, so its
+    // colour writes must be ordered after (and visible to) subpass 0's writes.
+    let dep_0_to_1 = vk::SubpassDependency::default()
+        .src_subpass(0)
+        .dst_subpass(1)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        );
+
     let mut attachments = vec![color_attachment, depth_attachment];
     if msaa {
         // We resolve into attachment 2 so the post-processing pass can sample
@@ -1599,8 +1619,8 @@ pub(super) fn create_transparent_render_pass(
                 .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
         );
     }
-    let subpasses = [subpass_0];
-    let dependencies = [dep_ext_to_0];
+    let subpasses = [subpass_0, subpass_1];
+    let dependencies = [dep_ext_to_0, dep_0_to_1];
     let create_info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
         .subpasses(&subpasses)

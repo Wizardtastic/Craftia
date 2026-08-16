@@ -20,7 +20,6 @@ mod init;
 mod pipeline;
 mod swapchain;
 
-use device::QueueFamilies;
 pub(crate) use pipeline::spirv_to_u32;
 use pipeline::{CameraUbo, FogUbo, ShadowUbo, SkyUbo};
 use swapchain::create_framebuffer_with;
@@ -41,7 +40,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::path::Path;
 
 use voxel_core::{
-    math::{chunk_origin, ChunkPos},
+    math::{chunk_aabb, chunk_center, chunk_origin, ChunkPos},
     Camera, Frustum,
 };
 
@@ -329,17 +328,13 @@ impl PanoramaPlaceholder {
     }
 }
 
-#[allow(dead_code)]
 pub struct Renderer {
     config: RendererConfig,
     _entry: Entry,
     instance: AshInstance,
-    #[allow(dead_code)]
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
-    #[allow(dead_code)]
-    queues: QueueFamilies,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
     surface: vk::SurfaceKHR,
@@ -368,16 +363,8 @@ pub struct Renderer {
     wireframe_pipeline: vk::Pipeline,
     transparent_pipeline: vk::Pipeline,
     wireframe_enabled: bool,
-    #[allow(dead_code)]
     descriptor_pool: vk::DescriptorPool,
-    #[allow(dead_code)]
     descriptor_set_layout: vk::DescriptorSetLayout,
-    /// Set-1 descriptor set layout for the chunk material pipeline
-    /// (`tile_remap` UBO consumed by `shaders/chunk.frag`). Held on the
-    /// renderer for `recreate_chunk_pipelines` + tile_remap descriptor set
-    /// allocation. See `pipeline::create_tile_remap_descriptor_set_layout`.
-    #[allow(dead_code)]
-    tile_remap_set_layout: vk::DescriptorSetLayout,
 
     command_pool: vk::CommandPool,
     // Cached shader SPIR-V blobs. Populated at startup from build.rs-compiled
@@ -394,17 +381,14 @@ pub struct Renderer {
     shadow_frag_spirv: Vec<u8>,
     post_vert_spirv: Vec<u8>,
     post_frag_spirv: Vec<u8>,
-    #[allow(dead_code)]
     entity_vert_spirv: Vec<u8>,
     entity_frag_spirv: Vec<u8>,
     atlas: AtlasTexture,
-    #[allow(dead_code)]
     fog_ubo: GpuBuffer,
     /// Tile material lookup table UBO (chunk descriptor binding 5). Updated
     /// each frame by the engine via [`Renderer::set_tile_material_table`]
     /// from the world's registry + the engine's water-level / strength
     /// scalars. Total size = `MaterialTable::SIZE_BYTES` (4112 bytes).
-    #[allow(dead_code)]
     tile_material_ubo: GpuBuffer,
     /// Per-frame scratch we copy the engine's `MaterialTable` into before
     /// uploading it to the host-visible UBO. Avoids aliasing engine-owned
@@ -418,12 +402,9 @@ pub struct Renderer {
     // â”€â”€ UI pipeline â”€â”€
     ui_pipeline: vk::Pipeline,
     ui_pipeline_layout: vk::PipelineLayout,
-    #[allow(dead_code)]
     ui_descriptor_set_layout: vk::DescriptorSetLayout,
-    #[allow(dead_code)]
     ui_descriptor_pool: vk::DescriptorPool,
     ui_descriptor_set: vk::DescriptorSet,
-    #[allow(dead_code)]
     font_texture: AtlasTexture,
     minimap_texture: crate::dynamic_texture::DynamicAtlasTexture,
     ui_vbo: GpuBuffer,
@@ -432,9 +413,7 @@ pub struct Renderer {
     // â”€â”€ Sky pipeline â”€â”€
     sky_pipeline: vk::Pipeline,
     sky_pipeline_layout: vk::PipelineLayout,
-    #[allow(dead_code)]
     sky_descriptor_set_layout: vk::DescriptorSetLayout,
-    #[allow(dead_code)]
     sky_descriptor_pool: vk::DescriptorPool,
     sky_descriptor_set: vk::DescriptorSet,
     sky_ubo: GpuBuffer,
@@ -632,6 +611,25 @@ pub struct PackInfo {
     pub tile_count: usize,
     pub animation_count: usize,
     pub enabled: bool,
+}
+
+/// Fill the 24-float chunk-material push-constant block shared by the opaque
+/// and transparent chunk passes: chunk origin in xyz of the first vec4, the
+/// 16-float column-major VP matrix in floats 4..20, game time in float 20.
+/// Remaining slots stay zero. (The occlusion-proxy variant packs min/max AABB
+/// corners instead — see `record_chunk_passes`.)
+fn write_chunk_push_constants(pc: &mut [f32; 24], origin: Vec3, vp_cols: &[f32], game_time: f32) {
+    pc[0] = origin.x;
+    pc[1] = origin.y;
+    pc[2] = origin.z;
+    pc[3] = 0.0;
+    if vp_cols.len() >= 16 {
+        pc[4..20].copy_from_slice(&vp_cols[..16]);
+    }
+    pc[20] = game_time;
+    pc[21] = 0.0;
+    pc[22] = 0.0;
+    pc[23] = 0.0;
 }
 
 /// Load texture pack tile mappings from `texture_packs_dir` (if configured)
@@ -1921,7 +1919,6 @@ impl Renderer {
             debug_messenger,
             physical_device,
             device,
-            queues,
             graphics_queue,
             present_queue,
             surface,
@@ -1947,7 +1944,6 @@ impl Renderer {
             wireframe_enabled: false,
             descriptor_pool,
             descriptor_set_layout,
-            tile_remap_set_layout,
             command_pool,
             atlas,
             chunk_vert_spirv,
@@ -3912,15 +3908,12 @@ impl Renderer {
             let chunks = self.chunks.read();
             let mut opaque = Vec::new();
             for (&pos, bufs) in chunks.iter() {
-                let origin = chunk_origin(pos);
-                let min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
-                let max = min + Vec3::splat(voxel_core::CHUNK_SIZE as f32);
+                let (min, max) = chunk_aabb(pos);
                 if !frustum.intersects_aabb(min, max) {
                     continue;
                 }
                 if let Some(b) = &bufs.opaque {
-                    let center = min + Vec3::splat(voxel_core::CHUNK_SIZE as f32 * 0.5);
-                    let dist_sq = (center - cam_pos).length_squared();
+                    let dist_sq = (chunk_center(pos) - cam_pos).length_squared();
                     opaque.push((pos, b.vbo.buffer, b.ibo.buffer, b.index_count, dist_sq));
                 }
             }
@@ -3973,13 +3966,8 @@ impl Renderer {
                           vbo_buf: vk::Buffer,
                           ibo_buf: vk::Buffer,
                           index_count: u32| {
-            let origin = chunk_origin(pos);
             let mut push = [0f32; 24];
-            push[0] = origin.x as f32;
-            push[1] = origin.y as f32;
-            push[2] = origin.z as f32;
-            push[4..20].copy_from_slice(vp_cols);
-            push[20] = game_time;
+            write_chunk_push_constants(&mut push, chunk_origin(pos).as_vec3(), vp_cols, game_time);
             unsafe {
                 device.cmd_push_constants(
                     cmd,
@@ -4050,9 +4038,7 @@ impl Renderer {
                     };
                     if qi < MAX_OCCLUSION_QUERIES {
                         frame.used_queries.push(qi);
-                        let origin = chunk_origin(pos);
-                        let min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
-                        let max = min + Vec3::splat(voxel_core::CHUNK_SIZE as f32);
+                        let (min, max) = chunk_aabb(pos);
                         // Push constants: min.xyz in first vec4, VP matrix, max.xyz in last vec4.
                         let mut push = [0f32; 24];
                         push[0] = min.x;
@@ -5489,18 +5475,14 @@ impl Renderer {
         // geometry this frame" check, so the whole map is only walked once.
         let mut draws: Vec<(glam::Vec3, vk::Buffer, vk::Buffer, u32, f32)> = Vec::new();
         {
-            let chunk_size = voxel_core::CHUNK_SIZE as f32;
             let chunks = self.chunks.read();
             for (pos, bufs) in chunks.iter() {
                 if let Some(ref t) = bufs.transparent {
-                    let origin = chunk_origin(*pos);
-                    let origin = glam::Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
-                    let min = origin;
-                    let max = origin + glam::Vec3::splat(chunk_size);
-                    if !frustum.intersects_aabb(min, max) {
+                    let (origin, max) = chunk_aabb(*pos);
+                    if !frustum.intersects_aabb(origin, max) {
                         continue;
                     }
-                    let center = origin + glam::Vec3::splat(chunk_size * 0.5);
+                    let center = chunk_center(*pos);
                     draws.push((
                         origin,
                         t.vbo.buffer,
@@ -5603,17 +5585,7 @@ impl Renderer {
             );
             for (origin, vbo_buffer, ibo_buffer, index_count, _dist_sq) in draws.iter() {
                 let mut pc = [0.0f32; 24];
-                pc[0] = origin.x;
-                pc[1] = origin.y;
-                pc[2] = origin.z;
-                pc[3] = 0.0;
-                if vp_cols.len() >= 16 {
-                    pc[4..20].copy_from_slice(&vp_cols[..16]);
-                }
-                pc[20] = game_time;
-                pc[21] = 0.0;
-                pc[22] = 0.0;
-                pc[23] = 0.0;
+                write_chunk_push_constants(&mut pc, *origin, vp_cols, game_time);
                 device.cmd_push_constants(
                     cmd,
                     self.pipeline_layout,
@@ -5638,9 +5610,11 @@ impl Renderer {
                     q,
                 );
             }
-            // UI is recorded last in the transparent pass so it is guaranteed
-            // to composite over water, foliage, and every other world pass.
+            // UI runs in subpass 1 of the transparent render pass — the final
+            // subpass — so it is structurally guaranteed to composite over
+            // water, foliage, and every other world pass drawn in subpass 0.
             if ui_index_count > 0 {
+                device.cmd_next_subpass(cmd, vk::SubpassContents::INLINE);
                 self.record_ui(device, cmd, ui_index_count);
             }
             // Timestamp 5: UI end (≈ the transparent-end timestamp on frames
