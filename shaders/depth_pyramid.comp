@@ -1,0 +1,47 @@
+#version 450
+// Phase 3 — Hi-Z depth pyramid builder for GPU occlusion culling.
+//
+// One dispatch per mip level. Mip 0 downsamples the full-res resolved scene
+// depth (2x2 MIN = nearest occluder), each subsequent mip downsamples the
+// previous one. `chunk_cull.comp` samples the finished pyramid to reject
+// chunks fully hidden behind the previous frame's geometry.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D scene_depth; // full-res resolved depth
+layout(set = 0, binding = 1) uniform sampler2D pyramid;     // full-mip-chain sampled view
+layout(set = 0, binding = 2, r32f) uniform image2D dst_mip;
+
+layout(push_constant) uniform PC {
+    ivec2 dst_size;   // size of the mip being written
+    uint  dst_mip;    // which mip (0 = half-res of scene_depth)
+    uint  from_scene; // 1 when the source is scene_depth (mip 0), else pyramid
+} pc;
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(gid, pc.dst_size))) return;
+
+    // Source is twice the destination size (2x2 box downsample).
+    ivec2 src_size = pc.dst_size * 2;
+    ivec2 base = gid * 2;
+    vec2 uv00 = (vec2(base) + vec2(0.5)) / vec2(src_size);
+    vec2 uv10 = (vec2(base) + vec2(1.5, 0.5)) / vec2(src_size);
+    vec2 uv01 = (vec2(base) + vec2(0.5, 1.5)) / vec2(src_size);
+    vec2 uv11 = (vec2(base) + vec2(1.5)) / vec2(src_size);
+
+    float d;
+    if (pc.from_scene == 1u) {
+        d = min(min(textureLod(scene_depth, uv00, 0.0).x,
+                    textureLod(scene_depth, uv10, 0.0).x),
+                min(textureLod(scene_depth, uv01, 0.0).x,
+                    textureLod(scene_depth, uv11, 0.0).x));
+    } else {
+        float src_mip = float(pc.dst_mip - 1u);
+        d = min(min(textureLod(pyramid, uv00, src_mip).x,
+                    textureLod(pyramid, uv10, src_mip).x),
+                min(textureLod(pyramid, uv01, src_mip).x,
+                    textureLod(pyramid, uv11, src_mip).x));
+    }
+    imageStore(dst_mip, gid, vec4(d, 0.0, 0.0, 0.0));
+}

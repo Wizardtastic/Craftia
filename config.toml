@@ -12,6 +12,7 @@ msaa_samples = 2
 occlusion_culling = true
 ssao_enabled = true
 gpu_driven = false
+gpu_meshing = false
 ssao_radius = 1.5
 ssao_bias = 0.02500000037252903
 ssao_strength = 1.0
@@ -25,6 +26,7 @@ reflection_strength = 0.8500000238418579
 seed = 1337
 load_radius = 4
 unload_radius = 6
+gpu_mesh_distance = 0
 day_length = 1200.0
 assets_path = "assets"
 

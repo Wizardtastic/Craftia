@@ -284,9 +284,29 @@ impl crate::EngineApp {
                         }
                     }
                     ChunkStreamEvent::Generated(_) => {}
-                    ChunkStreamEvent::GpuMeshReady { .. } => {
-                        // GPU compute meshing is not wired into the legacy
-                        // renderer path yet; ignore these events.
+                    ChunkStreamEvent::GpuMeshReady { pos, voxels } => {
+                        // Mesh LOD 0 (full 16³) and LOD 1 (2x downsample) for
+                        // both passes so the cull shader can switch LOD by
+                        // camera distance. Must stay in sync with `MAX_LODS`
+                        // in renderer/indirect.rs. Jobs are only *queued* here;
+                        // `drain_gpu_meshes` below runs them asynchronously.
+                        const GPU_LODS: u32 = 2;
+                        if let Some(r) = self.render.renderer.as_mut() {
+                            for lod in 0..GPU_LODS {
+                                r.enqueue_chunk_gpu_mesh(
+                                    pos,
+                                    voxel_render::MeshPass::Opaque,
+                                    voxels.clone(),
+                                    lod,
+                                );
+                                r.enqueue_chunk_gpu_mesh(
+                                    pos,
+                                    voxel_render::MeshPass::Transparent,
+                                    voxels.clone(),
+                                    lod,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -296,6 +316,14 @@ impl crate::EngineApp {
                 }
             }
             chunk_upload_ms = upload_t0.elapsed().as_secs_f32() * 1000.0;
+        }
+
+        // Drive the deferred GPU-mesh pipeline (Phase 2). Queued jobs are
+        // processed asynchronously — the fence is polled, never waited on — so
+        // a burst of distant chunks streaming in doesn't stall the render
+        // thread on GPU round-trips.
+        if let Some(r) = self.render.renderer.as_mut() {
+            r.drain_gpu_meshes();
         }
 
         // Fixed-timestep simulation.
@@ -1453,6 +1481,7 @@ impl crate::EngineApp {
                 let snap = crate::telemetry::TelemetrySnapshot {
                     time: self.telemetry.elapsed_secs(),
                     cpu_frame_ms: (self.input.frame_time * 1000.0) as f32,
+                    chunk_record_cpu_ms: r.chunk_record_cpu_ms(),
                     gpu_frame_ms: gpu.frame_ms,
                     gpu_shadow_ms: gpu.shadow_ms,
                     gpu_sky_ms: gpu.sky_ms,
@@ -1508,6 +1537,7 @@ impl crate::EngineApp {
             if !self.input.captured && self.input.frame_count >= after {
                 self.input.captured = true;
                 self.do_capture();
+                self.log_bench_summary();
             }
         }
     }
@@ -1572,6 +1602,57 @@ impl crate::EngineApp {
             }
             Err(e) => log::error!("capture_frame: {e}"),
         }
+    }
+
+    /// Log a trimmed telemetry summary after an auto-capture run so headless
+    /// A/B benchmarks (e.g. `--capture N --no-vsync` with `gpu_driven` toggled)
+    /// can compare CPU/GPU frame costs without the interactive dashboard.
+    fn log_bench_summary(&self) {
+        let samples = self.telemetry.samples();
+        let n = samples.len();
+        if n < 10 {
+            return;
+        }
+        // Skip the first 20% of frames as warmup: world streaming, pipeline
+        // builds, and first-frame stalls dominate the head of the run.
+        let window = samples.iter().skip(n / 5);
+        let mut count = 0usize;
+        let mut cpu_sum = 0f32;
+        let mut cpu_min = f32::MAX;
+        let mut cpu_max = 0f32;
+        let mut gpu_sum = 0f32;
+        let mut chunk_sum = 0f32;
+        let mut gen_sum = 0f32;
+        let mut mesh_sum = 0f32;
+        for s in window {
+            count += 1;
+            cpu_sum += s.cpu_frame_ms;
+            cpu_min = cpu_min.min(s.cpu_frame_ms);
+            cpu_max = cpu_max.max(s.cpu_frame_ms);
+            gpu_sum += s.gpu_frame_ms;
+            chunk_sum += s.chunk_record_cpu_ms;
+            gen_sum += s.streamer_gen_ms;
+            mesh_sum += s.streamer_mesh_ms;
+        }
+        if count == 0 {
+            return;
+        }
+        let last = samples.back();
+        log::info!(
+            "bench summary: frames={} avg_cpu={:.2}ms [{:.2}..{:.2}] avg_chunk_cpu={:.3}ms avg_gpu={:.2}ms avg_gen={:.2}ms avg_mesh={:.2}ms | chunks gpu={} loaded={} meshed={} upload={:.2}ms",
+            count,
+            cpu_sum / count as f32,
+            cpu_min,
+            cpu_max,
+            chunk_sum / count as f32,
+            gpu_sum / count as f32,
+            gen_sum / count as f32,
+            mesh_sum / count as f32,
+            last.map(|s| s.chunks_gpu).unwrap_or(0),
+            last.map(|s| s.chunks_loaded).unwrap_or(0),
+            last.map(|s| s.chunks_meshed).unwrap_or(0),
+            last.map(|s| s.chunk_upload_ms).unwrap_or(0.0),
+        );
     }
 }
 

@@ -51,6 +51,8 @@ fn main() {
         ("chunk_indirect.vert", "chunk_indirect.vert.spv"),
         // Phase 2 — GPU compute chunk meshing.
         ("chunk_mesh.comp", "chunk_mesh.comp.spv"),
+        // Phase 3 — Hi-Z depth pyramid builder.
+        ("depth_pyramid.comp", "depth_pyramid.comp.spv"),
     ];
 
     // Register rerun-if-changed for all sources + build.rs itself.

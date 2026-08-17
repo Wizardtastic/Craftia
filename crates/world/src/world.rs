@@ -798,6 +798,31 @@ impl World {
         let sample_loaded = |x: i32, y: i32, z: i32| world_arc.is_block_loaded(x, y, z);
         f(&chunk, &sample, &sample_water, &sample_loaded)
     }
+
+    /// Snapshot a chunk as an 18³ `u16` BlockId volume for the GPU compute
+    /// mesher: the 16³ chunk interior plus a 1-voxel border from the 26
+    /// neighbouring chunks. Output layout is z-major, then y, then x so it
+    /// matches the `cmd_copy_buffer_to_image` upload (`buffer_row_length =
+    /// buffer_image_height = 18`): index `(z * 18 + y) * 18 + x` holds the
+    /// block at chunk-local `(x - 1, y - 1, z - 1)`. Border voxels (coords
+    /// 0 or 17) read the neighbour block, falling back to air when the
+    /// neighbour chunk is unloaded or the coordinate is outside world Y.
+    pub fn gpu_mesh_voxels(&self, pos: ChunkPos) -> Box<[u16]> {
+        const N: usize = 18;
+        let origin = chunk_origin(pos);
+        let mut out = vec![0u16; N * N * N];
+        for oz in 0..N {
+            for oy in 0..N {
+                for ox in 0..N {
+                    let wx = origin.x + ox as i32 - 1;
+                    let wy = origin.y + oy as i32 - 1;
+                    let wz = origin.z + oz as i32 - 1;
+                    out[(oz * N + oy) * N + ox] = self.get_block(wx, wy, wz).0;
+                }
+            }
+        }
+        out.into_boxed_slice()
+    }
 }
 
 /// Four cardinal neighbour offsets of `pos` on the same Y plane.

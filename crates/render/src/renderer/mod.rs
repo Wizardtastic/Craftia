@@ -15,6 +15,7 @@
 //! - per-chunk: vertex + index buffers in a `HashMap`
 
 mod device;
+mod hiz;
 mod indirect;
 mod init;
 mod pipeline;
@@ -576,6 +577,9 @@ pub struct Renderer {
     /// `None` otherwise (legacy per-chunk path). When present, `upload_chunks`,
     /// `remove_chunk`, `chunk_count`, and `record_chunk_passes` route here.
     gpu_driven: Option<indirect::GpuDriven>,
+    /// Phase-3 Hi-Z depth pyramid used by the GPU-driven cull shader for
+    /// occlusion culling. `Some` when `config.gpu_driven`.
+    hiz: Option<hiz::HiZ>,
     /// Per-frame deletion queue — buffers that `upload_chunks` could not
     /// destroy immediately because the GPU was still mid-draw with them.
     /// Drained at the start of `draw_frame` once they are at least
@@ -586,6 +590,9 @@ pub struct Renderer {
     query_pool: vk::QueryPool,
     timestamp_period: f32,
     timings: GpuTimings,
+    /// CPU time (ms) spent recording the opaque chunk pass this frame
+    /// (`record_chunk_passes` legacy loop or `record_main` indirect dispatch).
+    chunk_record_cpu_ms: f32,
 
     /// Set when the window was resized; swapchain is recreated next draw.
     needs_resize: bool,
@@ -1886,9 +1893,31 @@ impl Renderer {
         // in the struct literal below moves `config` into Self.
         let cfg_particle_softness = config.particle_softness;
         let cfg_occlusion_culling = config.occlusion_culling;
+        // Phase-3 Hi-Z depth pyramid for GPU occlusion culling. Only built for
+        // the GPU-driven path (the legacy path uses HW occlusion queries).
+        let hiz = if config.gpu_driven {
+            match hiz::HiZ::new(
+                &device,
+                &alloc,
+                command_pool,
+                graphics_queue,
+                swapchain_extent,
+                scene_opaque_depth.view,
+                scene_depth_sampler,
+            ) {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    log::error!("HiZ init failed, disabling GPU-driven path: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         // Phase-1 GPU-driven pipeline: build before the struct literal so
         // `device`/`alloc` (moved into Self below) are still borrowable.
-        let gpu_driven = if config.gpu_driven {
+        let gpu_driven = if config.gpu_driven && hiz.is_some() {
+            let h = hiz.as_ref().expect("hiz present");
             match indirect::GpuDriven::new(
                 indirect::GpuTransferCtx {
                     device: &device,
@@ -1898,9 +1927,13 @@ impl Renderer {
                 },
                 indirect::GpuDrivenConfig {
                     render_pass,
+                    transparent_render_pass,
                     chunk_set_layout: descriptor_set_layout,
                     msaa_samples,
                     gpu_meshing: config.gpu_meshing,
+                    hiz_view: h.sampled_view(),
+                    hiz_sampler: h.sampler(),
+                    hiz_params: h.params(),
                 },
             ) {
                 Ok(g) => Some(g),
@@ -2054,9 +2087,11 @@ impl Renderer {
             frames,
             chunks: RwLock::new(HashMap::new()),
             gpu_driven,
+            hiz,
             query_pool,
             timestamp_period,
             timings: GpuTimings::default(),
+            chunk_record_cpu_ms: 0.0,
             needs_resize: false,
             frame_counter: 0,
             sky_horizon: [0.52, 0.72, 0.95],
@@ -2096,6 +2131,11 @@ impl Renderer {
     /// Latest GPU timing results (1-2 frame lag).
     pub fn latest_timings(&self) -> GpuTimings {
         self.timings
+    }
+
+    /// CPU time (ms) spent recording the opaque chunk pass last frame.
+    pub fn chunk_record_cpu_ms(&self) -> f32 {
+        self.chunk_record_cpu_ms
     }
 
     /// Rebuild the texture atlas from `config.textures_dir` and swap it into
@@ -2920,29 +2960,33 @@ impl Renderer {
         }
     }
 
-    /// GPU-mesh a chunk from raw voxel data (18³ u16, 16³ chunk + 1-voxel
-    /// border). Dispatches the compute mesher and inserts the result into the
-    /// mega VBO/IBO. No-op (returns false) if GPU meshing is disabled.
-    pub fn upload_chunk_gpu_mesh(
+    /// Queue a chunk for GPU compute meshing (Phase 2) at a given LOD
+    /// (0 = full 16³, 1 = 2x downsample). Non-blocking: the compute + copy-out
+    /// run later via [`Self::drain_gpu_meshes`]. No-op if GPU meshing is off.
+    pub fn enqueue_chunk_gpu_mesh(
         &mut self,
         pos: voxel_core::ChunkPos,
         pass: MeshPass,
-        voxels: &[u16],
-    ) -> bool {
+        voxels: Box<[u16]>,
+        lod: u32,
+    ) {
         if let Some(gpu) = self.gpu_driven.as_mut() {
-            return gpu.upload_chunk_gpu_mesh(
-                indirect::GpuTransferCtx {
-                    device: &self.device,
-                    alloc: &self.alloc,
-                    command_pool: self.command_pool,
-                    graphics_queue: self.graphics_queue,
-                },
-                pos,
-                pass,
-                voxels,
-            );
+            gpu.enqueue_gpu_mesh(pos, pass, voxels, lod);
         }
-        false
+    }
+
+    /// Drive the deferred GPU-mesh pipeline one step (call once per frame).
+    /// Never blocks on the GPU: polls the in-flight fence and advances queued
+    /// meshes through compute -> copy-out -> slot as they complete.
+    pub fn drain_gpu_meshes(&mut self) {
+        if let Some(gpu) = self.gpu_driven.as_mut() {
+            gpu.drain_gpu_meshes(indirect::GpuTransferCtx {
+                device: &self.device,
+                alloc: &self.alloc,
+                command_pool: self.command_pool,
+                graphics_queue: self.graphics_queue,
+            });
+        }
     }
 
     /// Load a glTF model from disk and register it in the model registry.
@@ -3200,14 +3244,17 @@ impl Renderer {
                 if let Ok(()) = read_ok {
                     let ns_to_ms = self.timestamp_period / 1_000_000.0;
                     let t = &timestamps;
+                    // saturating_sub: a skipped/partial frame can leave the
+                    // query-pool slot with non-monotonic timestamps; clamp to
+                    // 0 instead of panicking on underflow.
                     self.timings = GpuTimings {
-                        shadow_ms: (t[1] - t[0]) as f32 * ns_to_ms,
-                        sky_ms: (t[2] - t[1]) as f32 * ns_to_ms,
-                        opaque_ms: (t[3] - t[2]) as f32 * ns_to_ms,
-                        transparent_ms: (t[4] - t[3]) as f32 * ns_to_ms,
-                        ui_ms: (t[5] - t[4]) as f32 * ns_to_ms,
-                        post_ms: (t[7] - t[6]) as f32 * ns_to_ms,
-                        frame_ms: (t[7] - t[0]) as f32 * ns_to_ms,
+                        shadow_ms: t[1].saturating_sub(t[0]) as f32 * ns_to_ms,
+                        sky_ms: t[2].saturating_sub(t[1]) as f32 * ns_to_ms,
+                        opaque_ms: t[3].saturating_sub(t[2]) as f32 * ns_to_ms,
+                        transparent_ms: t[4].saturating_sub(t[3]) as f32 * ns_to_ms,
+                        ui_ms: t[5].saturating_sub(t[4]) as f32 * ns_to_ms,
+                        post_ms: t[7].saturating_sub(t[6]) as f32 * ns_to_ms,
+                        frame_ms: t[7].saturating_sub(t[0]) as f32 * ns_to_ms,
                     };
                 }
                 // On error (queries not yet available), keep previous timings.
@@ -3272,6 +3319,21 @@ impl Renderer {
         // â”€â”€ Shadow pass: render chunk depth from the light's perspective â”€â”€
         self.record_shadow_pass(device, cmd, Some(query_offset + 1));
 
+        // GPU-driven frustum cull runs OUTSIDE the main render pass (a compute
+        // dispatch inside a render pass is illegal). It must precede
+        // `record_main_pass_setup`, which begins the render pass.
+        if let Some(gpu) = self.gpu_driven.as_mut() {
+            gpu.record_cull(
+                &self.device,
+                cmd,
+                indirect::RecordUniforms {
+                    vp_cols: &vp_cols,
+                    game_time,
+                    cam_pos: camera.pos,
+                },
+            );
+        }
+
         self.record_main_pass_setup(
             device,
             cmd,
@@ -3302,28 +3364,20 @@ impl Renderer {
         }
 
         // Chunk passes: Phase-1 GPU-driven indirect path or legacy per-chunk loop.
-        // The transparent_end timestamp (query 4) is written by whichever path
-        // draws the transparent geometry: the indirect path writes it after
-        // its own transparent slot draws, the legacy path gets it from
-        // `record_transparent_pass` (where water/foliage actually render).
-        let mut transparent_end_ts = Some(query_offset + 4);
+        // Transparent geometry (water/foliage) renders in
+        // `record_transparent_pass` for both paths, so query 4 is written there.
+        let transparent_end_ts = Some(query_offset + 4);
+        let chunk_t0 = std::time::Instant::now();
         if let Some(gpu) = self.gpu_driven.as_mut() {
-            gpu.record(
+            gpu.record_opaque(
                 &self.device,
                 cmd,
                 descriptor_set,
-                indirect::RecordUniforms {
-                    vp_cols: &vp_cols,
-                    game_time,
-                    cam_pos: camera.pos,
-                },
-                indirect::QueryTimestamps {
-                    pool: self.query_pool,
-                    opaque_end_ts: Some(query_offset + 3),
-                    transparent_end_ts,
-                },
+                &vp_cols,
+                game_time,
+                self.query_pool,
+                Some(query_offset + 3),
             );
-            transparent_end_ts = None; // already written by the indirect path
         } else {
             self.record_chunk_passes(
                 device,
@@ -3337,6 +3391,7 @@ impl Renderer {
                 Some(query_offset + 3),
             );
         }
+        self.chunk_record_cpu_ms = chunk_t0.elapsed().as_secs_f32() * 1000.0;
 
         // Entity pass: upload quad vertices then draw entity meshes.
         if !world_entities.is_empty() {
@@ -3402,6 +3457,11 @@ impl Renderer {
 
         // Slice 2 (draw_frame): scene_opaque_color copy + transparent pass.
         self.record_scene_opaque_copy(device, cmd, image_index);
+        // Build the Hi-Z pyramid from this frame's resolved depth for the
+        // next frame's GPU-driven occlusion cull.
+        if let Some(h) = &self.hiz {
+            h.record(device, cmd);
+        }
         self.record_transparent_pass(
             device,
             cmd,
@@ -3539,6 +3599,19 @@ impl Renderer {
         // â”€â”€ Shadow pass (capture) â”€â”€
         self.record_shadow_pass(device, cmd, None);
 
+        // GPU-driven frustum cull runs OUTSIDE the main render pass.
+        if let Some(gpu) = self.gpu_driven.as_mut() {
+            gpu.record_cull(
+                &self.device,
+                cmd,
+                indirect::RecordUniforms {
+                    vp_cols: &vp_cols,
+                    game_time,
+                    cam_pos: camera.pos,
+                },
+            );
+        }
+
         self.record_main_pass_setup(
             device,
             cmd,
@@ -3564,20 +3637,14 @@ impl Renderer {
         // Chunk passes: Phase-1 GPU-driven indirect path or legacy per-chunk loop.
         let chunk_ds = self.frames[0].descriptor_set;
         if let Some(gpu) = self.gpu_driven.as_mut() {
-            gpu.record(
+            gpu.record_opaque(
                 &self.device,
                 cmd,
                 chunk_ds,
-                indirect::RecordUniforms {
-                    vp_cols: &vp_cols,
-                    game_time,
-                    cam_pos: camera.pos,
-                },
-                indirect::QueryTimestamps {
-                    pool: self.query_pool,
-                    opaque_end_ts: None,
-                    transparent_end_ts: None,
-                },
+                &vp_cols,
+                game_time,
+                self.query_pool,
+                None,
             );
         } else {
             self.record_chunk_passes(
@@ -3604,6 +3671,11 @@ impl Renderer {
         // this ran after post and captures silently dropped all translucent
         // geometry.
         self.record_scene_opaque_copy(device, cmd, image_index);
+        // Build the Hi-Z pyramid from this frame's resolved depth for the
+        // next frame's GPU-driven occlusion cull.
+        if let Some(h) = &self.hiz {
+            h.record(device, cmd);
+        }
         self.record_transparent_pass(
             device,
             cmd,
@@ -5093,6 +5165,33 @@ impl Renderer {
         self.scene_opaque_color = scene_opaque_color;
         self.scene_opaque_depth = scene_opaque_depth;
 
+        // Recreate the Hi-Z depth pyramid for the new extent and re-point the
+        // GPU-driven cull shader at it.
+        if self.config.gpu_driven {
+            if let Some(mut old) = self.hiz.take() {
+                old.destroy(&self.device, &self.alloc);
+            }
+            match hiz::HiZ::new(
+                &self.device,
+                &self.alloc,
+                self.command_pool,
+                self.graphics_queue,
+                swapchain_extent,
+                self.scene_opaque_depth.view,
+                self.scene_depth_sampler,
+            ) {
+                Ok(h) => {
+                    if let Some(gpu) = self.gpu_driven.as_mut() {
+                        gpu.update_hiz(&self.device, h.sampled_view(), h.sampler(), h.params());
+                    }
+                    self.hiz = Some(h);
+                }
+                Err(e) => {
+                    log::error!("HiZ resize failed: {e}");
+                }
+            }
+        }
+
         // Recreate the transparent pass framebuffers against the new
         // offscreen images (they referenced the destroyed ones before).
         // Transparent pass is always single-sample (MSAA=1) — see comment
@@ -5493,7 +5592,14 @@ impl Renderer {
                 }
             }
         }
-        if draws.is_empty() && ui_index_count == 0 {
+        // GPU-driven transparent slots (when `gpu_driven` is enabled the
+        // legacy `draws` list is empty and vice-versa, so at most one of
+        // these is non-empty).
+        let gpu_transparent = self
+            .gpu_driven
+            .as_ref()
+            .map_or(false, |g| g.transparent_slots() > 0);
+        if draws.is_empty() && ui_index_count == 0 && !gpu_transparent {
             // No transparent draws this frame. Both bracketing timestamps
             // (4: transparent_end, 5: ui_end) must still be written — the
             // per-frame pool slots were reset at the top of draw_frame, and
@@ -5598,6 +5704,14 @@ impl Renderer {
                 device.cmd_bind_index_buffer(cmd, *ibo_buffer, 0, vk::IndexType::UINT32);
                 device.cmd_draw_indexed(cmd, *index_count, 1, 0, 0, 0);
             }
+            // GPU-driven transparent draw: one indirect multi-draw against the
+            // same scene copy the legacy path uses, so water samples the
+            // current frame (not the previous frame's stale copy).
+            if let Some(gpu) = self.gpu_driven.as_ref() {
+                if gpu.transparent_slots() > 0 {
+                    gpu.record_transparent(device, cmd, descriptor_set, vp_cols, game_time);
+                }
+            }
             // Timestamp 4: transparent pass end. Written here — after the
             // water/foliage draws, before the UI — because that is where
             // transparent geometry actually renders since it moved out of
@@ -5655,7 +5769,11 @@ impl Drop for Renderer {
         }
         // Phase-1 GPU-driven pipeline.
         if let Some(mut gpu) = self.gpu_driven.take() {
-            gpu.destroy(device, &self.alloc);
+            gpu.destroy(device, &self.alloc, self.command_pool);
+        }
+        // Phase-3 Hi-Z depth pyramid.
+        if let Some(mut h) = self.hiz.take() {
+            h.destroy(device, &self.alloc);
         }
 
         // Loaded models.

@@ -3441,6 +3441,7 @@ impl crate::EngineApp {
                 occlusion_culling: self.config.render.occlusion_culling,
                 ssao_enabled: self.config.ssao_enabled,
                 gpu_driven: self.config.render.gpu_driven,
+                gpu_meshing: self.config.render.gpu_meshing,
                 ssao_radius: self.config.ssao_radius,
                 ssao_bias: self.config.ssao_bias,
                 ssao_strength: self.config.ssao_strength,

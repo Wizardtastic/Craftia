@@ -15,6 +15,8 @@ pub struct TelemetrySnapshot {
     // -- Frame timing --
     pub cpu_frame_ms: f32,
     pub gpu_frame_ms: f32,
+    /// CPU time (ms) spent recording the opaque chunk pass.
+    pub chunk_record_cpu_ms: f32,
 
     // -- GPU pass breakdown (for stacked graph) --
     pub gpu_shadow_ms: f32,
@@ -67,6 +69,7 @@ impl Default for TelemetrySnapshot {
             time: 0.0,
             cpu_frame_ms: 0.0,
             gpu_frame_ms: 0.0,
+            chunk_record_cpu_ms: 0.0,
             gpu_shadow_ms: 0.0,
             gpu_sky_ms: 0.0,
             gpu_opaque_ms: 0.0,

@@ -1,26 +1,235 @@
-[2026-08-15T04:12:14Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
-[2026-08-15T04:12:14Z INFO  voxel] ============ voxel sandbox startup ============
-[2026-08-15T04:12:14Z INFO  voxel]   binary:    voxel-app 0.1.0
-[2026-08-15T04:12:14Z INFO  voxel]   git:       a0a36d5 (dirty)
-[2026-08-15T04:12:14Z INFO  voxel]   rustc:     rustc 1.96.0 (ac68faa20 2026-05-25)
-[2026-08-15T04:12:14Z INFO  voxel]   target:    x86_64-pc-windows-msvc
-[2026-08-15T04:12:14Z INFO  voxel]   build unx: 1786767102
-[2026-08-15T04:12:14Z INFO  voxel]   pid:       4796
-[2026-08-15T04:12:14Z INFO  voxel] ===============================================
-[2026-08-15T04:12:14Z INFO  voxel_engine::settings] Loaded config from config.toml
-[2026-08-15T04:12:14Z INFO  voxel] starting voxel engine (seed=1337)
-[2026-08-15T04:12:14Z WARN  voxel_world::world] failed to load blocks from assets: failed to read assets\blocks.json. Using builtins.
-[2026-08-15T04:12:14Z INFO  voxel_engine] spawn search: land column at (2, 65, 2) -> spawn pos [2.5, 67.0, 2.5]
-[2026-08-15T04:12:14Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
-[2026-08-15T04:12:14Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
-[2026-08-15T04:12:14Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
-[2026-08-15T04:12:14Z INFO  voxel_render::renderer] MSAA TYPE_2 enabled
-[2026-08-15T04:12:14Z INFO  voxel_render::renderer] occlusion culling: 16384 queries per frame
-[2026-08-15T04:12:14Z INFO  voxel_engine] file-watcher: active (config = config.toml)
-[2026-08-15T04:12:14Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
-[2026-08-15T04:12:14Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
-[2026-08-15T04:12:14Z INFO  voxel_engine] Audio system initialized
-[2026-08-15T04:12:14Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
-[2026-08-15T04:12:17Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
-[2026-08-15T04:12:20Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
-[2026-08-15T04:13:04Z INFO  voxel_render::hot_reload] file-watcher: shut down
+[2026-08-16T04:15:37Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
+[2026-08-16T04:15:37Z INFO  voxel] ============ voxel sandbox startup ============
+[2026-08-16T04:15:37Z INFO  voxel]   binary:    voxel-app 0.1.0
+[2026-08-16T04:15:37Z INFO  voxel]   git:       eed783d (dirty)
+[2026-08-16T04:15:37Z INFO  voxel]   rustc:     rustc 1.96.0 (ac68faa20 2026-05-25)
+[2026-08-16T04:15:37Z INFO  voxel]   target:    x86_64-pc-windows-msvc
+[2026-08-16T04:15:37Z INFO  voxel]   build unx: 1786852495
+[2026-08-16T04:15:37Z INFO  voxel]   pid:       23156
+[2026-08-16T04:15:37Z INFO  voxel] ===============================================
+[2026-08-16T04:15:37Z INFO  voxel_engine::settings] Loaded config from config.toml
+[2026-08-16T04:15:37Z INFO  voxel] starting voxel engine (seed=1337)
+[2026-08-16T04:15:37Z WARN  voxel_world::world] failed to load blocks from assets: failed to read assets\blocks.json. Using builtins.
+[2026-08-16T04:15:37Z INFO  voxel_engine] spawn search: land column at (2, 65, 2) -> spawn pos [2.5, 67.0, 2.5]
+[2026-08-16T04:15:37Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
+[2026-08-16T04:15:37Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
+[2026-08-16T04:15:37Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
+[2026-08-16T04:15:37Z INFO  voxel_render::renderer] MSAA TYPE_2 enabled
+[2026-08-16T04:15:37Z INFO  voxel_render::renderer] occlusion culling: 16384 queries per frame
+[2026-08-16T04:15:37Z WARN  voxel_render::texture] unhandled image layout transition: UNDEFINED -> GENERAL
+[2026-08-16T04:15:37Z INFO  voxel_render::renderer::indirect] GPU compute mesher ready (voxel tex 18³, max 98304 verts)
+[2026-08-16T04:15:37Z INFO  voxel_render::renderer::indirect] GPU-driven chunk pipeline ready (VBO 4096 KiB, IBO 1024 KiB, max 8192 slots)
+[2026-08-16T04:15:37Z INFO  voxel_engine] file-watcher: active (config = config.toml)
+[2026-08-16T04:15:37Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
+[2026-08-16T04:15:37Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
+[2026-08-16T04:15:37Z INFO  voxel_engine] Audio system initialized
+[2026-08-16T04:15:37Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
+[2026-08-16T04:15:38Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:38Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:38Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:38Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:38Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:38Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_render::renderer::indirect] gpu-mesh compute submit: queue_submit failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] draw_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z ERROR voxel_engine::frame] capture_frame: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>
+[2026-08-16T04:15:39Z INFO  voxel_engine::frame] bench summary: frames=120 avg_cpu=13.36ms [0.11..1000.53] avg_chunk_cpu=0.003ms avg_gpu=0.39ms avg_gen=1.07ms avg_mesh=0.00ms | chunks gpu=16 loaded=1379 meshed=345 upload=0.00ms
+[2026-08-16T04:15:39Z WARN  voxel_render::renderer] Renderer::drop: device_wait_idle failed: ERROR_DEVICE_LOST
+[2026-08-16T04:15:39Z WARN  voxel_render::buffer] GpuBuffer dropped without calling destroy_in_place — GPU resource leaked (occurrence 1/8; set RUST_BACKTRACE=1 to capture a stack trace on the first leak)
+[2026-08-16T04:15:39Z WARN  voxel_render::buffer] GpuBuffer dropped without calling destroy_in_place — GPU resource leaked (occurrence 2/8; set RUST_BACKTRACE=1 to capture a stack trace on the first leak)
+[2026-08-16T04:15:39Z WARN  gpu_allocator::allocator::free_list_allocator] leak detected: {
+        memory type: 1
+        memory block: 0
+        chunk: {
+            chunk_id: 20,
+            size: 0x90000,
+            offset: 0xd738400,
+            allocation_type: Linear,
+            name: mesh_out_idxs,
+            backtrace: disabled backtrace
+        }
+    }
+[2026-08-16T04:15:39Z WARN  gpu_allocator::allocator::free_list_allocator] leak detected: {
+        memory type: 1
+        memory block: 0
+        chunk: {
+            chunk_id: 19,
+            size: 0x300000,
+            offset: 0xd438400,
+            allocation_type: Linear,
+            name: mesh_out_verts,
+            backtrace: disabled backtrace
+        }
+    }
+[2026-08-16T04:15:39Z INFO  voxel_render::hot_reload] file-watcher: shut down

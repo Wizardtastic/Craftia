@@ -34,6 +34,7 @@ layout(std430, set = 0, binding = 4) buffer CtrBuf { uint ctr[2]; };
 
 layout(push_constant) uniform PC {
     uint pass_mode; // 0 = opaque, 1 = transparent
+    uint lod;       // 0 = full 16³, 1 = 8³ (2x), 2 = 4³ (4x)
 } pc;
 
 const uint FLAG_OPAQUE = 1u;
@@ -87,10 +88,17 @@ uint block_tile(uint id, uint fi) {
 }
 
 void main() {
+    // LOD grid: each thread meshes a cell of `cell`³ voxels. `lod` selects the
+    // downsampling factor (0 = 1 voxel/cell, 1 = 2³, 2 = 4³). Positions are
+    // still emitted in full-chunk block units (0..16) so the vertex shader
+    // treats every LOD identically.
+    uint cell = 1u << pc.lod;
+    uint grid = 16u >> pc.lod;
     ivec3 coord = ivec3(gl_GlobalInvocationID);
-    if (any(greaterThanEqual(coord, ivec3(16)))) return;
+    if (any(greaterThanEqual(coord, ivec3(grid)))) return;
 
-    uint cur_id = texelFetch(voxels, coord + ivec3(1), 0).r;
+    ivec3 sample_pos = coord * int(cell) + ivec3(1);
+    uint cur_id = texelFetch(voxels, sample_pos, 0).r;
     uint cur_flags = props[cur_id].w;
     if ((cur_flags & FLAG_RENDER) == 0u) return; // air
 
@@ -98,10 +106,10 @@ void main() {
     bool cur_liquid = (cur_flags & FLAG_LIQUID) != 0u;
     bool cur_transparent = !cur_opaque;
 
-    vec3 bpos = vec3(coord);
+    vec3 bpos = vec3(coord) * float(cell);
 
     for (int fi = 0; fi < 6; fi++) {
-        uint neighbor_id = texelFetch(voxels, coord + ivec3(1) + FACE_NORMAL[fi], 0).r;
+        uint neighbor_id = texelFetch(voxels, sample_pos + FACE_NORMAL[fi] * int(cell), 0).r;
         uint n_flags = props[neighbor_id].w;
         bool n_opaque = (n_flags & FLAG_OPAQUE) != 0u;
         bool n_air = (n_flags & FLAG_RENDER) == 0u;
@@ -118,11 +126,11 @@ void main() {
         uint i_base = atomicAdd(ctr[1], 6u);
         uint tile = block_tile(cur_id, uint(fi));
         float light = cur_liquid ? 1.5 : FACE_SHADE[fi];
-        vec3 base = bpos + FACE_BASE[fi];
+        vec3 base = bpos + FACE_BASE[fi] * float(cell);
 
         uint vo = v_base * 8u;
         for (int c = 0; c < 4; c++) {
-            vec3 p = base + FACE_CORNER[fi * 4 + c];
+            vec3 p = base + FACE_CORNER[fi * 4 + c] * float(cell);
             uint o = vo + uint(c) * 8u;
             verts[o + 0] = floatBitsToUint(p.x);
             verts[o + 1] = floatBitsToUint(p.y);

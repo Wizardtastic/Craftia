@@ -74,10 +74,7 @@ pub enum ChunkStreamEvent {
     /// A chunk's raw voxel data is ready for GPU compute meshing (Phase 2).
     /// `voxels` is 18³ u16 BlockIds (16³ chunk + 1-voxel border from neighbours).
     /// Emitted for distant chunks when `gpu_mesh_distance` is configured.
-    GpuMeshReady {
-        pos: ChunkPos,
-        voxels: Box<[u16]>,
-    },
+    GpuMeshReady { pos: ChunkPos, voxels: Box<[u16]> },
     /// A chunk left the loaded set; free its GPU resources.
     Unloaded(ChunkPos),
 }
@@ -531,37 +528,64 @@ fn run_worker(
             .collect();
 
         if !mesh_batch.is_empty() {
-            let world = world.clone();
-            let reg = reg.clone();
-            let mesher = &mesher;
-            let sun_dir_for_mesh = sun_dir;
-            let mesh_t0 = Instant::now();
-            let meshes: Vec<(ChunkPos, ChunkMeshBundle)> = pool.install(|| {
-                mesh_batch
-                    .par_iter()
-                    .map(|&pos| {
-                        let bundle = world.with_chunk_for_mesh(
-                            pos,
-                            |chunk, sample, sample_water, sample_loaded| {
-                                mesher.build(
-                                    chunk,
-                                    &reg,
-                                    sample,
-                                    sample_water,
-                                    sample_loaded,
-                                    sun_dir_for_mesh,
-                                )
-                            },
-                        );
-                        (pos, bundle)
-                    })
-                    .collect()
-            });
-            mesh_accum_ms += mesh_t0.elapsed().as_secs_f32() * 1000.0;
-            for (pos, bundle) in meshes {
-                world.insert_mesh(pos);
-                state.insert(pos, State::Meshed);
-                let _ = event_tx.send(ChunkStreamEvent::MeshReady { pos, bundle });
+            // Split the batch into near (CPU greedy mesher) and far (GPU
+            // compute mesher, Phase 2). With `gpu_mesh_distance <= 0` every
+            // chunk is "near" and the GPU path never engages.
+            let gpu_dist = config.gpu_mesh_distance.max(0) as i64;
+            let (near, far): (Vec<ChunkPos>, Vec<ChunkPos>) =
+                mesh_batch.iter().copied().partition(|p| {
+                    if config.gpu_mesh_distance <= 0 {
+                        return true;
+                    }
+                    let dx = (p.x() - focus_chunk.x()) as i64;
+                    let dy = (p.y() - focus_chunk.y()) as i64;
+                    let dz = (p.z() - focus_chunk.z()) as i64;
+                    dx * dx + dy * dy + dz * dz <= gpu_dist * gpu_dist
+                });
+
+            // --- GPU meshing for distant chunks (Phase 2) ---
+            if !far.is_empty() {
+                for pos in &far {
+                    let voxels = world.gpu_mesh_voxels(*pos);
+                    world.insert_mesh(*pos);
+                    state.insert(*pos, State::Meshed);
+                    let _ = event_tx.send(ChunkStreamEvent::GpuMeshReady { pos: *pos, voxels });
+                }
+            }
+
+            // --- CPU meshing for near chunks ---
+            if !near.is_empty() {
+                let world = world.clone();
+                let reg = reg.clone();
+                let mesher = &mesher;
+                let sun_dir_for_mesh = sun_dir;
+                let mesh_t0 = Instant::now();
+                let meshes: Vec<(ChunkPos, ChunkMeshBundle)> = pool.install(|| {
+                    near.par_iter()
+                        .map(|&pos| {
+                            let bundle = world.with_chunk_for_mesh(
+                                pos,
+                                |chunk, sample, sample_water, sample_loaded| {
+                                    mesher.build(
+                                        chunk,
+                                        &reg,
+                                        sample,
+                                        sample_water,
+                                        sample_loaded,
+                                        sun_dir_for_mesh,
+                                    )
+                                },
+                            );
+                            (pos, bundle)
+                        })
+                        .collect()
+                });
+                mesh_accum_ms += mesh_t0.elapsed().as_secs_f32() * 1000.0;
+                for (pos, bundle) in meshes {
+                    world.insert_mesh(pos);
+                    state.insert(pos, State::Meshed);
+                    let _ = event_tx.send(ChunkStreamEvent::MeshReady { pos, bundle });
+                }
             }
         }
 

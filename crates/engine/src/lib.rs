@@ -478,6 +478,27 @@ impl GamePlayState {
     // pause/menu state, ECS inspector toggles, the camera pin target.
 }
 
+/// Build the GPU compute mesher's per-block property table (indexed by
+/// `BlockId.0`). Flags mirror the CPU mesher's opaque/transparent split:
+/// `Solid`/`Cactus` are opaque, `Liquid` marks water/lava, and anything
+/// that isn't `Air` is rendered.
+pub(crate) fn gpu_block_properties(
+    reg: &voxel_world::BlockRegistry,
+) -> Vec<voxel_render::BlockPropertiesGpu> {
+    use voxel_render::BlockPropertiesGpu;
+    use voxel_world::registry::BlockKind;
+    (0..reg.count())
+        .map(|i| {
+            let id = voxel_core::BlockId(i as u16);
+            let def = reg.get(id);
+            let opaque = matches!(def.kind, BlockKind::Solid | BlockKind::Cactus);
+            let liquid = matches!(def.kind, BlockKind::Liquid);
+            let not_air = !matches!(def.kind, BlockKind::Air);
+            BlockPropertiesGpu::pack(def.textures.tiles, opaque, liquid, not_air)
+        })
+        .collect()
+}
+
 /// Categorize a block for the creative inventory tabs.
 fn categorize_block(name: &str, def: &voxel_world::registry::BlockDef) -> String {
     let n = name.to_lowercase();
@@ -1136,7 +1157,7 @@ impl ApplicationHandler for EngineApp {
                 self.config.render.clone(),
                 (window_size.width, window_size.height),
             ) {
-                Ok(r) => {
+                Ok(mut r) => {
                     self.render.window_size = (r.extent().width, r.extent().height);
                     // Populate texture pack manager from initial renderer pack info.
                     self.texture_pack_manager.loaded_packs = r
@@ -1152,6 +1173,12 @@ impl ApplicationHandler for EngineApp {
                             enabled: p.enabled,
                         })
                         .collect();
+                    // Push the GPU mesher's block-properties table once the
+                    // renderer exists (no-op unless gpu_meshing is enabled).
+                    if self.config.render.gpu_meshing {
+                        let table = gpu_block_properties(self.world_state.world.registry_ref());
+                        r.set_block_properties(&table);
+                    }
                     self.render.renderer = Some(r);
                 }
                 Err(e) => {

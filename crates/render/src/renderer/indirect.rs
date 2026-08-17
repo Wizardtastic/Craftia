@@ -6,7 +6,7 @@
 //! remains the default; this subsystem is enabled via
 //! [`crate::renderer::RendererConfig::gpu_driven`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use anyhow::{anyhow, Result};
 use ash::vk;
@@ -28,6 +28,11 @@ const MEGA_VBO_INITIAL: vk::DeviceSize = 4 * 1024 * 1024;
 const MEGA_IBO_INITIAL: vk::DeviceSize = 1024 * 1024;
 const MAX_DRAW_SLOTS: usize = 8192;
 const TILE_REMAP_UBO_SIZE: vk::DeviceSize = 1024;
+/// Number of LOD levels stored per chunk pass. LOD 0 = full detail (CPU
+/// greedy mesher), LOD 1+ = progressively downsampled GPU compute meshes.
+const MAX_LODS: usize = 2;
+/// World-units distance from the camera at which LOD 0 switches to LOD 1.
+const LOD0_DISTANCE: f32 = 64.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -51,6 +56,10 @@ pub struct ChunkAabb {
 pub struct CullUbo {
     pub view_proj: [f32; 16],
     pub cam_pos: [f32; 4],
+    /// xyz = LOD switch distances (world units), w = LOD count.
+    pub lod_dist: [f32; 4],
+    /// xy = Hi-Z pyramid mip-0 size, z = mip count, w = occlusion depth bias.
+    pub hiz: [f32; 4],
 }
 
 #[repr(C)]
@@ -69,8 +78,17 @@ struct MegaSlot {
 
 #[derive(Default)]
 struct GpuChunk {
-    opaque: Option<MegaSlot>,
-    transparent: Option<MegaSlot>,
+    /// Indexed by LOD level (0 = full detail, 1 = 2x downsample, ...).
+    opaque: [Option<MegaSlot>; MAX_LODS],
+    transparent: [Option<MegaSlot>; MAX_LODS],
+}
+
+/// A queued GPU-mesh job (Phase 2): one (chunk, pass, LOD) to compute + slot.
+struct GpuMeshJob {
+    pos: ChunkPos,
+    pass: MeshPass,
+    lod: u32,
+    voxels: Box<[u16]>,
 }
 
 pub struct GpuDriven {
@@ -86,6 +104,9 @@ pub struct GpuDriven {
     opaque_slots: usize,
     transparent_slots: usize,
     indirect_cmd_buf: GpuBuffer,
+    /// Candidate draw commands, `MAX_LODS` per slot. The cull shader copies
+    /// the selected LOD's command into `indirect_cmd_buf` each frame.
+    lod_cmd_buf: GpuBuffer,
     aabb_buf: GpuBuffer,
     origins_buf: GpuBuffer,
     cull_ubo: GpuBuffer,
@@ -103,6 +124,18 @@ pub struct GpuDriven {
     indirect_descriptor_set: vk::DescriptorSet,
     /// Phase-2 GPU compute mesher. `Some` when `config.gpu_meshing` is enabled.
     gpu_mesher: Option<GpuMesher>,
+    /// xy = Hi-Z pyramid mip-0 size, z = mip count, w = occlusion depth bias.
+    hiz_params: [f32; 4],
+    /// Queued GPU-mesh jobs (Phase 2) waiting to be processed. Drained one
+    /// job per frame by [`GpuDriven::drain_gpu_meshes`], which amortizes a
+    /// burst of streaming chunks across frames instead of stalling on N×2
+    /// per-chunk fence waits.
+    pending_meshes: VecDeque<GpuMeshJob>,
+    /// Old mega buffers retired by `grow_and_compact`. They cannot be freed
+    /// immediately: with `FRAMES_IN_FLIGHT > 1` an in-flight render command
+    /// buffer may still be reading them as vertex/index buffers. They are
+    /// destroyed in bulk at [`GpuDriven::destroy`] (after the device is idle).
+    retired_buffers: Vec<GpuBuffer>,
 }
 
 /// Device/queue handles shared by GPU transfer helpers.
@@ -118,9 +151,16 @@ pub struct GpuTransferCtx<'a> {
 #[derive(Clone, Copy)]
 pub struct GpuDrivenConfig {
     pub render_pass: vk::RenderPass,
+    /// Single-sample transparent render pass (subpass 0) where water/glass
+    /// draws after the scene_opaque copy so it samples the current frame.
+    pub transparent_render_pass: vk::RenderPass,
     pub chunk_set_layout: vk::DescriptorSetLayout,
     pub msaa_samples: vk::SampleCountFlags,
     pub gpu_meshing: bool,
+    /// Hi-Z depth pyramid inputs for the cull shader's occlusion test.
+    pub hiz_view: vk::ImageView,
+    pub hiz_sampler: vk::Sampler,
+    pub hiz_params: [f32; 4],
 }
 
 /// Per-frame uniforms for [`GpuDriven::record`].
@@ -131,29 +171,50 @@ pub struct RecordUniforms<'a> {
     pub cam_pos: Vec3,
 }
 
-/// Occlusion-query timestamp slots for [`GpuDriven::record`].
-#[derive(Clone, Copy)]
-pub struct QueryTimestamps {
-    pub pool: vk::QueryPool,
-    pub opaque_end_ts: Option<u32>,
-    pub transparent_end_ts: Option<u32>,
+/// Nearest available slot for `lod`: prefer the exact level, then fall back to
+/// the closest lower/higher level so the cull shader never selects an empty
+/// command (which would make the chunk invisible for a frame during a partial
+/// LOD upload).
+fn lod_slot(slots: &[Option<MegaSlot>; MAX_LODS], lod: usize) -> Option<MegaSlot> {
+    if let Some(s) = slots[lod] {
+        return Some(s);
+    }
+    for d in 1..MAX_LODS {
+        if lod >= d {
+            if let Some(s) = slots[lod - d] {
+                return Some(s);
+            }
+        }
+        if lod + d < MAX_LODS {
+            if let Some(s) = slots[lod + d] {
+                return Some(s);
+            }
+        }
+    }
+    None
 }
 
-/// Destination buffers/offsets for one GPU-meshed chunk.
-#[derive(Clone, Copy)]
-pub struct MegaTargets {
-    pub mega_vbo: vk::Buffer,
-    pub mega_ibo: vk::Buffer,
-    pub vbo_offset: vk::DeviceSize,
-    pub ibo_offset: vk::DeviceSize,
+/// Lowest LOD index with a slot present (used to prefill `cmds`).
+fn lowest_lod(slots: &[Option<MegaSlot>; MAX_LODS]) -> usize {
+    slots.iter().position(|s| s.is_some()).unwrap_or(0)
+}
+
+/// Build a `DrawIndexedIndirectCommand` for `s` at the given chunk slot.
+/// `first_instance` = slot index so the vertex shader's `gl_InstanceIndex`
+/// still indexes the correct entry in the origins SSBO regardless of LOD.
+fn indirect_cmd(s: MegaSlot, slot_index: u32) -> DrawIndexedIndirectCommand {
+    DrawIndexedIndirectCommand {
+        index_count: s.index_count,
+        instance_count: 1,
+        first_index: (s.ibo_offset / INDEX_STRIDE) as u32,
+        vertex_offset: (s.vbo_offset / VERTEX_STRIDE) as i32,
+        first_instance: slot_index,
+    }
 }
 
 impl GpuDriven {
     #[allow(clippy::too_many_lines)]
-    pub fn new(
-        ctx: GpuTransferCtx<'_>,
-        config: GpuDrivenConfig,
-    ) -> Result<Self> {
+    pub fn new(ctx: GpuTransferCtx<'_>, config: GpuDrivenConfig) -> Result<Self> {
         let GpuTransferCtx {
             device,
             alloc,
@@ -162,22 +223,32 @@ impl GpuDriven {
         } = ctx;
         let GpuDrivenConfig {
             render_pass,
+            transparent_render_pass,
             chunk_set_layout,
             msaa_samples,
             gpu_meshing,
+            hiz_view,
+            hiz_sampler,
+            hiz_params,
         } = config;
         let mega_vbo = GpuBuffer::device_local(
             device,
             alloc,
             MEGA_VBO_INITIAL,
-            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::BufferUsageFlags::VERTEX_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::STORAGE_BUFFER,
             "mega_vbo",
         )?;
         let mega_ibo = GpuBuffer::device_local(
             device,
             alloc,
             MEGA_IBO_INITIAL,
-            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::BufferUsageFlags::INDEX_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::STORAGE_BUFFER,
             "mega_ibo",
         )?;
         let cmd_sz =
@@ -190,6 +261,13 @@ impl GpuDriven {
             cmd_sz,
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER,
             "indirect_cmd_buf",
+        )?;
+        let lod_cmd_buf = GpuBuffer::host_visible(
+            device,
+            alloc,
+            cmd_sz * MAX_LODS as vk::DeviceSize,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "lod_cmd_buf",
         )?;
         let aabb_buf = GpuBuffer::host_visible(
             device,
@@ -243,6 +321,9 @@ impl GpuDriven {
             cull_ubo.buffer,
             indirect_cmd_buf.buffer,
             aabb_buf.buffer,
+            lod_cmd_buf.buffer,
+            hiz_view,
+            hiz_sampler,
         );
         let ind_set_layout = create_indirect_set_layout(device)?;
         let ind_pl = create_indirect_pipeline_layout(device, chunk_set_layout, ind_set_layout)?;
@@ -261,14 +342,14 @@ impl GpuDriven {
         )?;
         let transparent_pipeline = create_graphics_pipeline(
             device,
-            render_pass,
+            transparent_render_pass,
             ind_pl,
             super::pipeline::GraphicsPipelineConfig {
                 polygon_mode: vk::PolygonMode::FILL,
                 cull_mode: vk::CullModeFlags::NONE,
                 vs_spirv: &vert_spv,
                 fs_spirv: &frag_spv,
-                msaa_samples,
+                msaa_samples: vk::SampleCountFlags::TYPE_1,
                 depth_write: false,
             },
         )?;
@@ -305,6 +386,7 @@ impl GpuDriven {
             opaque_slots: 0,
             transparent_slots: 0,
             indirect_cmd_buf,
+            lod_cmd_buf,
             aabb_buf,
             origins_buf,
             cull_ubo,
@@ -321,10 +403,40 @@ impl GpuDriven {
             indirect_descriptor_pool: ind_pool,
             indirect_descriptor_set: ind_set,
             gpu_mesher,
+            hiz_params,
+            pending_meshes: VecDeque::new(),
+            retired_buffers: Vec::new(),
         })
     }
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Number of transparent draw slots in the current indirect command buffer.
+    pub fn transparent_slots(&self) -> usize {
+        self.transparent_slots
+    }
+
+    /// Re-point the cull shader's Hi-Z binding at a (possibly resized) pyramid
+    /// and update the occlusion-test parameters. Called on swapchain resize.
+    pub fn update_hiz(
+        &mut self,
+        device: &ash::Device,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+        params: [f32; 4],
+    ) {
+        let info = [vk::DescriptorImageInfo::default()
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_view(view)
+            .sampler(sampler)];
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(self.cull_descriptor_set)
+            .dst_binding(4)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&info);
+        unsafe { device.update_descriptor_sets(&[write], &[]) };
+        self.hiz_params = params;
     }
 
     /// Update the block properties table used by the GPU compute mesher.
@@ -339,94 +451,106 @@ impl GpuDriven {
         }
     }
 
-    /// GPU-mesh a chunk: dispatch the compute mesher and insert the result into
-    /// the mega VBO/IBO. Returns true on success.
-    pub fn upload_chunk_gpu_mesh(
-        &mut self,
-        ctx: GpuTransferCtx<'_>,
-        pos: ChunkPos,
-        pass: MeshPass,
-        voxels: &[u16],
-    ) -> bool {
-        let GpuTransferCtx {
-            device,
-            alloc,
-            command_pool,
-            graphics_queue,
-        } = ctx;
+    /// Queue a (chunk, pass, LOD) GPU-mesh job (Phase 2). Cheap and non-
+    /// blocking: the job is only queued here and processed one-per-frame by
+    /// [`Self::drain_gpu_meshes`].
+    pub fn enqueue_gpu_mesh(&mut self, pos: ChunkPos, pass: MeshPass, voxels: Box<[u16]>, lod: u32) {
         if self.gpu_mesher.is_none() {
-            return false;
+            return;
         }
-        let pass_mode = match pass {
+        self.pending_meshes.push_back(GpuMeshJob {
+            pos,
+            pass,
+            lod,
+            voxels,
+        });
+    }
+
+    /// Drive the deferred GPU-mesh pipeline (Phase 2), call once per frame.
+    /// Processes AT MOST ONE queued job: compute -> copy-out -> slot. Each of
+    /// the two submits is a short blocking wait, but because a burst of chunks
+    /// streaming in is spread across frames (one job/frame) rather than
+    /// hammered out in a tight loop, the render thread no longer stalls on
+    /// N×2 per-chunk fence waits (the original streaming-hitch source).
+    pub fn drain_gpu_meshes(&mut self, ctx: GpuTransferCtx<'_>) {
+        if self.gpu_mesher.is_none() {
+            self.pending_meshes.clear();
+            return;
+        }
+        let Some(job) = self.pending_meshes.pop_front() else {
+            return;
+        };
+        let pass_mode = match job.pass {
             MeshPass::Opaque => 0u32,
             MeshPass::Transparent => 1u32,
         };
-        let est_vbo = (16 * 16 * 16) as vk::DeviceSize * 6 * 4 * 32;
-        let est_ibo = (16 * 16 * 16) as vk::DeviceSize * 6 * 6 * 4;
+        let est_vbo = (16 * 16 * 16) as vk::DeviceSize * 6 * 4 * VERTEX_STRIDE;
+        let est_ibo = (16 * 16 * 16) as vk::DeviceSize * 6 * 6 * INDEX_STRIDE;
         if self.mega_vbo_used + est_vbo > self.mega_vbo_capacity
             || self.mega_ibo_used + est_ibo > self.mega_ibo_capacity
         {
             if let Err(e) = self.grow_and_compact(
-                device,
-                alloc,
-                command_pool,
-                graphics_queue,
+                ctx.device,
+                ctx.alloc,
+                ctx.command_pool,
+                ctx.graphics_queue,
                 est_vbo,
                 est_ibo,
             ) {
                 log::error!("gpu-mesh grow_and_compact: {e}");
-                return false;
+                return;
             }
         }
-        let vbo_off = self.mega_vbo_used;
-        let ibo_off = self.mega_ibo_used;
-        let mega_vbo = self.mega_vbo.buffer;
-        let mega_ibo = self.mega_ibo.buffer;
-        let result = self.gpu_mesher.as_mut().unwrap().mesh_chunk(
-            GpuTransferCtx {
-                device,
-                alloc,
-                command_pool,
-                graphics_queue,
-            },
-            voxels,
-            pass_mode,
-            MegaTargets {
-                mega_vbo,
-                mega_ibo,
-                vbo_offset: vbo_off,
-                ibo_offset: ibo_off,
-            },
-        );
-        let Some((vert_count, idx_count)) = result else {
-            return false;
+        let vbo_offset = self.mega_vbo_used;
+        let ibo_offset = self.mega_ibo_used;
+        let (vert_count, idx_count) = match self
+            .gpu_mesher
+            .as_mut()
+            .unwrap()
+            .submit_compute(ctx, &job.voxels, pass_mode, job.lod)
+        {
+            Ok(counts) => counts,
+            Err(e) => {
+                log::error!("gpu-mesh compute submit: {e}");
+                return;
+            }
         };
         if vert_count == 0 || idx_count == 0 {
-            let entry = self.chunks.entry(pos).or_default();
-            let slot = match pass {
-                MeshPass::Opaque => &mut entry.opaque,
-                MeshPass::Transparent => &mut entry.transparent,
-            };
-            *slot = None;
-            return true;
+            // Empty mesh: no geometry to slot, no mega advance.
+            let entry = self.chunks.entry(job.pos).or_default();
+            match job.pass {
+                MeshPass::Opaque => entry.opaque[job.lod as usize] = None,
+                MeshPass::Transparent => entry.transparent[job.lod as usize] = None,
+            }
+            self.dirty = true;
+            return;
         }
-        let v_bytes = vert_count as vk::DeviceSize * 32;
-        let i_bytes = idx_count as vk::DeviceSize * 4;
+        if let Err(e) = self.gpu_mesher.as_ref().unwrap().submit_copy_out(
+            ctx,
+            self.mega_vbo.buffer,
+            self.mega_ibo.buffer,
+            vbo_offset,
+            ibo_offset,
+            vert_count,
+            idx_count,
+        ) {
+            log::error!("gpu-mesh copy-out submit: {e}");
+            return;
+        }
         let slot = MegaSlot {
-            vbo_offset: vbo_off,
-            ibo_offset: ibo_off,
+            vbo_offset,
+            ibo_offset,
             vertex_count: vert_count,
             index_count: idx_count,
         };
-        let entry = self.chunks.entry(pos).or_default();
-        *match pass {
-            MeshPass::Opaque => &mut entry.opaque,
-            MeshPass::Transparent => &mut entry.transparent,
-        } = Some(slot);
-        self.mega_vbo_used += v_bytes;
-        self.mega_ibo_used += i_bytes;
+        let entry = self.chunks.entry(job.pos).or_default();
+        match job.pass {
+            MeshPass::Opaque => entry.opaque[job.lod as usize] = Some(slot),
+            MeshPass::Transparent => entry.transparent[job.lod as usize] = Some(slot),
+        }
+        self.mega_vbo_used += vert_count as vk::DeviceSize * VERTEX_STRIDE;
+        self.mega_ibo_used += idx_count as vk::DeviceSize * INDEX_STRIDE;
         self.dirty = true;
-        true
     }
 }
 
@@ -445,6 +569,17 @@ fn create_cull_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayou
         vk::DescriptorSetLayoutBinding::default()
             .binding(2)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(3)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        // Hi-Z depth pyramid (sampled for the occlusion test)
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(4)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::COMPUTE),
     ];
@@ -497,7 +632,11 @@ fn create_cull_descriptor_pool(device: &ash::Device) -> Result<vk::DescriptorPoo
         },
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: 2,
+            descriptor_count: 3,
+        },
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
         },
     ];
     let info = vk::DescriptorPoolCreateInfo::default()
@@ -512,6 +651,9 @@ fn update_cull_set(
     ubo: vk::Buffer,
     cmd_buf: vk::Buffer,
     aabb_buf: vk::Buffer,
+    lod_cmd_buf: vk::Buffer,
+    hiz_view: vk::ImageView,
+    hiz_sampler: vk::Sampler,
 ) {
     let ubo_info = [vk::DescriptorBufferInfo::default()
         .buffer(ubo)
@@ -525,6 +667,14 @@ fn update_cull_set(
         .buffer(aabb_buf)
         .offset(0)
         .range(vk::WHOLE_SIZE)];
+    let lod_info = [vk::DescriptorBufferInfo::default()
+        .buffer(lod_cmd_buf)
+        .offset(0)
+        .range(vk::WHOLE_SIZE)];
+    let hiz_info = [vk::DescriptorImageInfo::default()
+        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .image_view(hiz_view)
+        .sampler(hiz_sampler)];
     let writes = [
         vk::WriteDescriptorSet::default()
             .dst_set(set)
@@ -541,6 +691,16 @@ fn update_cull_set(
             .dst_binding(2)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .buffer_info(&aabb_info),
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(3)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&lod_info),
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(4)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&hiz_info),
     ];
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
@@ -770,10 +930,10 @@ impl GpuDriven {
                 index_count: u.index_count,
             };
             let entry = self.chunks.entry(u.pos).or_default();
-            *match u.pass {
-                MeshPass::Opaque => &mut entry.opaque,
-                MeshPass::Transparent => &mut entry.transparent,
-            } = Some(slot);
+            match u.pass {
+                MeshPass::Opaque => entry.opaque[0] = Some(slot),
+                MeshPass::Transparent => entry.transparent[0] = Some(slot),
+            }
             vc += vs;
             ic += is;
         }
@@ -800,7 +960,8 @@ impl GpuDriven {
             new_vc,
             vk::BufferUsageFlags::VERTEX_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST
-                | vk::BufferUsageFlags::TRANSFER_SRC,
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::STORAGE_BUFFER,
             "mega_vbo_new",
         )?;
         let new_ibo = GpuBuffer::device_local(
@@ -809,24 +970,30 @@ impl GpuDriven {
             new_ic,
             vk::BufferUsageFlags::INDEX_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST
-                | vk::BufferUsageFlags::TRANSFER_SRC,
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::STORAGE_BUFFER,
             "mega_ibo_new",
         )?;
-        let mut live: Vec<(ChunkPos, MeshPass, MegaSlot)> = Vec::new();
+        let mut live: Vec<(ChunkPos, MeshPass, u32, MegaSlot)> = Vec::new();
         for (&pos, chunk) in &self.chunks {
-            if let Some(s) = chunk.opaque {
-                live.push((pos, MeshPass::Opaque, s));
+            for (lod, s) in chunk.opaque.iter().enumerate() {
+                if let Some(s) = s {
+                    live.push((pos, MeshPass::Opaque, lod as u32, *s));
+                }
             }
-            if let Some(s) = chunk.transparent {
-                live.push((pos, MeshPass::Transparent, s));
+            for (lod, s) in chunk.transparent.iter().enumerate() {
+                if let Some(s) = s {
+                    live.push((pos, MeshPass::Transparent, lod as u32, *s));
+                }
             }
         }
-        live.sort_by_key(|(_, _, s)| s.vbo_offset);
+        live.sort_by_key(|(_, _, _, s)| s.vbo_offset);
         let cmd = begin_one_time(device, command_pool)?;
         let mut nvc: vk::DeviceSize = 0;
         let mut nic: vk::DeviceSize = 0;
-        let mut new_slots: Vec<(ChunkPos, MeshPass, MegaSlot)> = Vec::with_capacity(live.len());
-        for (pos, pass, old) in &live {
+        let mut new_slots: Vec<(ChunkPos, MeshPass, u32, MegaSlot)> =
+            Vec::with_capacity(live.len());
+        for (pos, pass, lod, old) in &live {
             let vb = (old.vertex_count as vk::DeviceSize) * VERTEX_STRIDE;
             let ib = (old.index_count as vk::DeviceSize) * INDEX_STRIDE;
             unsafe {
@@ -854,6 +1021,7 @@ impl GpuDriven {
             new_slots.push((
                 *pos,
                 *pass,
+                *lod,
                 MegaSlot {
                     vbo_offset: nvc,
                     ibo_offset: nic,
@@ -865,19 +1033,23 @@ impl GpuDriven {
             nic += ib;
         }
         end_and_submit(device, command_pool, graphics_queue, cmd)?;
-        self.mega_vbo.destroy_in_place(device, alloc);
-        self.mega_ibo.destroy_in_place(device, alloc);
-        self.mega_vbo = new_vbo;
-        self.mega_ibo = new_ibo;
+        // Retire the old buffers instead of freeing them: an in-flight render
+        // command buffer (FRAMES_IN_FLIGHT > 1) may still be reading them as
+        // vertex/index buffers, so freeing here is a use-after-free that can
+        // drop the device. They are destroyed at `destroy()` after idle.
+        self.retired_buffers
+            .push(std::mem::replace(&mut self.mega_vbo, new_vbo));
+        self.retired_buffers
+            .push(std::mem::replace(&mut self.mega_ibo, new_ibo));
         self.mega_vbo_capacity = new_vc;
         self.mega_ibo_capacity = new_ic;
         self.mega_vbo_used = nvc;
         self.mega_ibo_used = nic;
-        for (pos, pass, slot) in new_slots {
+        for (pos, pass, lod, slot) in new_slots {
             let ch = self.chunks.get_mut(&pos).expect("live chunk must exist");
             match pass {
-                MeshPass::Opaque => ch.opaque = Some(slot),
-                MeshPass::Transparent => ch.transparent = Some(slot),
+                MeshPass::Opaque => ch.opaque[lod as usize] = Some(slot),
+                MeshPass::Transparent => ch.transparent[lod as usize] = Some(slot),
             }
         }
         self.dirty = true;
@@ -897,10 +1069,10 @@ impl GpuDriven {
         let (mut oc, mut tc) = (0usize, 0usize);
         for pos in &self.order {
             let ch = &self.chunks[pos];
-            if ch.opaque.is_some() {
+            if ch.opaque.iter().any(|s| s.is_some()) {
                 oc += 1;
             }
-            if ch.transparent.is_some() {
+            if ch.transparent.iter().any(|s| s.is_some()) {
                 tc += 1;
             }
         }
@@ -908,6 +1080,7 @@ impl GpuDriven {
         self.transparent_slots = tc;
         let total = oc + tc;
         let mut cmds = vec![DrawIndexedIndirectCommand::default(); total];
+        let mut lod_cmds = vec![DrawIndexedIndirectCommand::default(); total * MAX_LODS];
         let mut aabbs = vec![ChunkAabb::default(); total];
         let mut origins = vec![ChunkOrigin::default(); total];
         let (mut oi, mut ti) = (0usize, oc);
@@ -921,26 +1094,24 @@ impl GpuDriven {
                 min: [mn.x, mn.y, mn.z, 0.0],
                 max: [mx.x, mx.y, mx.z, 0.0],
             };
-            if let Some(s) = ch.opaque {
-                cmds[oi] = DrawIndexedIndirectCommand {
-                    index_count: s.index_count,
-                    instance_count: 1,
-                    first_index: (s.ibo_offset / INDEX_STRIDE) as u32,
-                    vertex_offset: (s.vbo_offset / VERTEX_STRIDE) as i32,
-                    first_instance: oi as u32,
-                };
+            if ch.opaque.iter().any(|s| s.is_some()) {
+                for lod in 0..MAX_LODS {
+                    if let Some(s) = lod_slot(&ch.opaque, lod) {
+                        lod_cmds[oi * MAX_LODS + lod] = indirect_cmd(s, oi as u32);
+                    }
+                }
+                cmds[oi] = lod_cmds[oi * MAX_LODS + lowest_lod(&ch.opaque)];
                 aabbs[oi] = ab;
                 origins[oi] = ChunkOrigin { origin: o4 };
                 oi += 1;
             }
-            if let Some(s) = ch.transparent {
-                cmds[ti] = DrawIndexedIndirectCommand {
-                    index_count: s.index_count,
-                    instance_count: 1,
-                    first_index: (s.ibo_offset / INDEX_STRIDE) as u32,
-                    vertex_offset: (s.vbo_offset / VERTEX_STRIDE) as i32,
-                    first_instance: ti as u32,
-                };
+            if ch.transparent.iter().any(|s| s.is_some()) {
+                for lod in 0..MAX_LODS {
+                    if let Some(s) = lod_slot(&ch.transparent, lod) {
+                        lod_cmds[ti * MAX_LODS + lod] = indirect_cmd(s, ti as u32);
+                    }
+                }
+                cmds[ti] = lod_cmds[ti * MAX_LODS + lowest_lod(&ch.transparent)];
                 aabbs[ti] = ab;
                 origins[ti] = ChunkOrigin { origin: o4 };
                 ti += 1;
@@ -951,6 +1122,13 @@ impl GpuDriven {
             slice[..n].copy_from_slice(bytemuck::cast_slice(&cmds));
             if let Err(e) = self.indirect_cmd_buf.flush_whole(device) {
                 log::warn!("indirect_cmd_buf flush failed: {e}");
+            }
+        }
+        if let Ok(slice) = self.lod_cmd_buf.mapped_slice_mut() {
+            let n = std::mem::size_of::<DrawIndexedIndirectCommand>() * total * MAX_LODS;
+            slice[..n].copy_from_slice(bytemuck::cast_slice(&lod_cmds));
+            if let Err(e) = self.lod_cmd_buf.flush_whole(device) {
+                log::warn!("lod_cmd_buf flush failed: {e}");
             }
         }
         if let Ok(slice) = self.aabb_buf.mapped_slice_mut() {
@@ -970,27 +1148,18 @@ impl GpuDriven {
         self.dirty = false;
     }
 
-    /// Record the GPU-driven chunk passes: dispatch the frustum-cull compute
-    /// shader, then issue one `vkCmdDrawIndexedIndirect` per pass (opaque +
-    /// transparent). Replaces the legacy per-chunk draw loop.
-    pub fn record(
+    /// Record the GPU-driven frustum-cull compute dispatch + the barriers
+    /// around it. Runs OUTSIDE any render pass (a compute dispatch inside a
+    /// render pass is illegal — VUID-vkCmdDispatch-None-10672) and before
+    /// [`Self::record_opaque`] issues the opaque indirect draw inside the
+    /// main render pass. Rebuilds the indirect command buffer if dirty.
+    pub fn record_cull(
         &mut self,
         device: &ash::Device,
         cmd: vk::CommandBuffer,
-        chunk_descriptor_set: vk::DescriptorSet,
         uniforms: RecordUniforms<'_>,
-        timestamps: QueryTimestamps,
     ) {
-        let RecordUniforms {
-            vp_cols,
-            game_time,
-            cam_pos,
-        } = uniforms;
-        let QueryTimestamps {
-            pool: query_pool,
-            opaque_end_ts,
-            transparent_end_ts,
-        } = timestamps;
+        let RecordUniforms { vp_cols, cam_pos, .. } = uniforms;
         if self.dirty {
             self.rebuild(device);
         }
@@ -1004,6 +1173,10 @@ impl GpuDriven {
             let ubo = CullUbo {
                 view_proj: a,
                 cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
+                // xyz = LOD switch distances, w = LOD count. With MAX_LODS
+                // levels there are MAX_LODS-1 thresholds; remaining slots 0.
+                lod_dist: [LOD0_DISTANCE, 0.0, 0.0, MAX_LODS as f32],
+                hiz: self.hiz_params,
             };
             slice[..std::mem::size_of::<CullUbo>()].copy_from_slice(bytemuck::bytes_of(&ubo));
             if let Err(e) = self.cull_ubo.flush_whole(device) {
@@ -1079,6 +1252,21 @@ impl GpuDriven {
                 &[],
             );
         }
+    }
+
+    /// Record the GPU-driven opaque `vkCmdDrawIndexedIndirect`. Runs inside
+    /// subpass 0 of the main render pass, after [`Self::record_cull`] has
+    /// already dispatched the cull compute outside the render pass.
+    pub fn record_opaque(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        chunk_descriptor_set: vk::DescriptorSet,
+        vp_cols: &[f32],
+        game_time: f32,
+        query_pool: vk::QueryPool,
+        opaque_end_ts: Option<u32>,
+    ) {
         let mut push = [0f32; 20];
         push[0..16].copy_from_slice(vp_cols);
         push[16] = game_time;
@@ -1126,48 +1314,62 @@ impl GpuDriven {
                 }
             }
         }
-        if self.transparent_slots > 0 {
-            let off = (self.opaque_slots * std::mem::size_of::<DrawIndexedIndirectCommand>())
-                as vk::DeviceSize;
-            unsafe {
-                device.cmd_bind_pipeline(
-                    cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.transparent_pipeline,
-                );
-                device.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.indirect_pipeline_layout,
-                    0,
-                    &sets,
-                    &[],
-                );
-                device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
-                device.cmd_bind_index_buffer(cmd, self.mega_ibo.buffer, 0, vk::IndexType::UINT32);
-                device.cmd_push_constants(
-                    cmd,
-                    self.indirect_pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX,
-                    0,
-                    bytemuck::bytes_of(&push),
-                );
-                device.cmd_draw_indexed_indirect(
-                    cmd,
-                    self.indirect_cmd_buf.buffer,
-                    off,
-                    self.transparent_slots as u32,
-                    stride,
-                );
-                if let Some(q) = transparent_end_ts {
-                    device.cmd_write_timestamp(
-                        cmd,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        query_pool,
-                        q,
-                    );
-                }
-            }
+    }
+
+    /// Record the GPU-driven transparent draw. Call after
+    /// [`Self::record_opaque`] in the same command buffer, inside subpass 0 of
+    /// the transparent render pass (after the scene_opaque copy). No-op when
+    /// there are no transparent slots. Timestamps are written by the caller
+    /// (`record_transparent_pass`).
+    pub fn record_transparent(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        chunk_descriptor_set: vk::DescriptorSet,
+        vp_cols: &[f32],
+        game_time: f32,
+    ) {
+        if self.transparent_slots == 0 {
+            return;
+        }
+        let mut push = [0f32; 20];
+        push[0..16].copy_from_slice(vp_cols);
+        push[16] = game_time;
+        let stride = std::mem::size_of::<DrawIndexedIndirectCommand>() as u32;
+        let sets = [chunk_descriptor_set, self.indirect_descriptor_set];
+        let vbo = [self.mega_vbo.buffer];
+        let off = (self.opaque_slots * std::mem::size_of::<DrawIndexedIndirectCommand>())
+            as vk::DeviceSize;
+        unsafe {
+            device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.transparent_pipeline,
+            );
+            device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.indirect_pipeline_layout,
+                0,
+                &sets,
+                &[],
+            );
+            device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
+            device.cmd_bind_index_buffer(cmd, self.mega_ibo.buffer, 0, vk::IndexType::UINT32);
+            device.cmd_push_constants(
+                cmd,
+                self.indirect_pipeline_layout,
+                vk::ShaderStageFlags::VERTEX,
+                0,
+                bytemuck::bytes_of(&push),
+            );
+            device.cmd_draw_indexed_indirect(
+                cmd,
+                self.indirect_cmd_buf.buffer,
+                off,
+                self.transparent_slots as u32,
+                stride,
+            );
         }
     }
 }
@@ -1175,7 +1377,9 @@ impl GpuDriven {
 impl GpuDriven {
     /// Destroy all Vulkan resources. Call before drop (mirrors
     /// [`crate::buffer::GpuBuffer::destroy`]).
-    pub fn destroy(&mut self, device: &ash::Device, alloc: &Alloc) {
+    pub fn destroy(&mut self, device: &ash::Device, alloc: &Alloc, command_pool: vk::CommandPool) {
+        self.pending_meshes.clear();
+        self.cancel_inflight(device, command_pool);
         unsafe {
             device.destroy_pipeline(self.opaque_pipeline, None);
             self.opaque_pipeline = vk::Pipeline::null();
@@ -1196,7 +1400,11 @@ impl GpuDriven {
         }
         self.mega_vbo.destroy_in_place(device, alloc);
         self.mega_ibo.destroy_in_place(device, alloc);
+        for mut b in self.retired_buffers.drain(..) {
+            b.destroy_in_place(device, alloc);
+        }
         self.indirect_cmd_buf.destroy_in_place(device, alloc);
+        self.lod_cmd_buf.destroy_in_place(device, alloc);
         self.aabb_buf.destroy_in_place(device, alloc);
         self.origins_buf.destroy_in_place(device, alloc);
         self.cull_ubo.destroy_in_place(device, alloc);
@@ -1489,7 +1697,7 @@ impl GpuMesher {
                 cmd,
                 voxel_image,
                 vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::GENERAL,
                 vk::ImageAspectFlags::COLOR,
                 1,
                 1,
@@ -1656,28 +1864,24 @@ impl GpuMesher {
         self.block_count = props.len() as u32;
     }
 
-    pub fn mesh_chunk(
+    /// Upload voxels + dispatch the mesh compute (non-blocking). Returns the
+    /// command buffer + fence; poll the fence before calling
+    /// [`Self::read_counts`].
+    fn submit_compute(
         &mut self,
         ctx: GpuTransferCtx<'_>,
         voxels: &[u16],
         pass_mode: u32,
-        targets: MegaTargets,
-    ) -> Option<(u32, u32)> {
+        lod: u32,
+    ) -> Result<(vk::CommandBuffer, vk::Fence)> {
         let GpuTransferCtx {
             device,
-            alloc: _alloc,
             command_pool,
             graphics_queue,
+            ..
         } = ctx;
-        let MegaTargets {
-            mega_vbo,
-            mega_ibo,
-            vbo_offset,
-            ibo_offset,
-        } = targets;
-        use crate::texture::{begin_one_time, end_and_submit};
         {
-            let slice = self.voxel_staging.mapped_slice_mut().ok()?;
+            let slice = self.voxel_staging.mapped_slice_mut()?;
             let n = (voxels.len() * 2).min(slice.len());
             slice[..n].copy_from_slice(bytemuck::cast_slice(voxels));
             // GPU reads this via `cmd_copy_buffer_to_image` immediately
@@ -1686,7 +1890,7 @@ impl GpuMesher {
                 log::warn!("voxel_staging flush failed: {e}");
             }
         }
-        let cmd = begin_one_time(device, command_pool).ok()?;
+        let cmd = begin_one_time(device, command_pool)?;
         unsafe {
             let region = vk::BufferImageCopy::default()
                 .buffer_offset(0)
@@ -1708,10 +1912,43 @@ impl GpuMesher {
                 cmd,
                 self.voxel_staging.buffer,
                 self.voxel_image,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::GENERAL,
                 &[region],
             );
             device.cmd_fill_buffer(cmd, self.counter.buffer, 0, 8, 0);
+            // Make the voxel-image + counter writes visible to the compute
+            // before it samples them / atomic-adds them. Without this, a stale
+            // counter can drive out-of-bounds writes into the mega buffers.
+            let pre_buffer = [vk::BufferMemoryBarrier::default()
+                .buffer(self.counter.buffer)
+                .offset(0)
+                .size(8)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)];
+            let pre_image = [vk::ImageMemoryBarrier::default()
+                .image(self.voxel_image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::GENERAL)];
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &pre_buffer,
+                &pre_image,
+            );
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.mesh_pipeline);
             device.cmd_bind_descriptor_sets(
                 cmd,
@@ -1721,12 +1958,13 @@ impl GpuMesher {
                 &[self.mesh_descriptor_set],
                 &[],
             );
+            let pc = [pass_mode, lod];
             device.cmd_push_constants(
                 cmd,
                 self.mesh_pipeline_layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                bytemuck::bytes_of(&pass_mode),
+                bytemuck::bytes_of(&pc),
             );
             device.cmd_dispatch(cmd, 2, 2, 2);
             let barriers = [
@@ -1765,16 +2003,43 @@ impl GpuMesher {
                 &[],
             );
         }
-        end_and_submit(device, command_pool, graphics_queue, cmd).ok()?;
-        let (vert_count, idx_count) = {
-            let slice = self.counter.mapped_slice_mut().ok()?;
-            let counts: &[u32] = bytemuck::cast_slice(&slice[..8]);
-            (counts[0], counts[1])
-        };
-        if vert_count == 0 || idx_count == 0 {
-            return Some((0, 0));
+        let fence = submit_one_time(device, graphics_queue, cmd)?;
+        Ok((cmd, fence))
+    }
+
+    /// Read the vertex/index counts. Only valid after the compute fence has
+    /// signaled; the counter is HOST_COHERENT, so no invalidate is needed.
+    fn read_counts(&mut self) -> (u32, u32) {
+        match self.counter.mapped_slice_mut() {
+            Ok(slice) => {
+                let counts: &[u32] = bytemuck::cast_slice(&slice[..8]);
+                (counts[0], counts[1])
+            }
+            Err(e) => {
+                log::warn!("gpu-mesh counter read failed: {e}");
+                (0, 0)
+            }
         }
-        let cmd = begin_one_time(device, command_pool).ok()?;
+    }
+
+    /// Submit the mega-buffer copy-out for a finished mesh (non-blocking).
+    fn submit_copy_out(
+        &self,
+        ctx: GpuTransferCtx<'_>,
+        mega_vbo: vk::Buffer,
+        mega_ibo: vk::Buffer,
+        vbo_offset: vk::DeviceSize,
+        ibo_offset: vk::DeviceSize,
+        vert_count: u32,
+        idx_count: u32,
+    ) -> Result<(vk::CommandBuffer, vk::Fence)> {
+        let GpuTransferCtx {
+            device,
+            command_pool,
+            graphics_queue,
+            ..
+        } = ctx;
+        let cmd = begin_one_time(device, command_pool)?;
         unsafe {
             let v_bytes = vert_count as vk::DeviceSize * 32;
             let i_bytes = idx_count as vk::DeviceSize * 4;
@@ -1797,8 +2062,8 @@ impl GpuMesher {
                     .size(i_bytes)],
             );
         }
-        end_and_submit(device, command_pool, graphics_queue, cmd).ok()?;
-        Some((vert_count, idx_count))
+        let fence = submit_one_time(device, graphics_queue, cmd)?;
+        Ok((cmd, fence))
     }
 
     pub fn destroy(&mut self, device: &ash::Device, alloc: &Alloc) {
@@ -1821,8 +2086,6 @@ impl GpuMesher {
         }
         self.voxel_staging.destroy_in_place(device, alloc);
         self.block_props.destroy_in_place(device, alloc);
-        self.out_verts.destroy_in_place(device, alloc);
-        self.out_idxs.destroy_in_place(device, alloc);
         self.counter.destroy_in_place(device, alloc);
     }
 }
@@ -1867,7 +2130,7 @@ fn create_mesh_pipeline_layout(
     let push = vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
         .offset(0)
-        .size(std::mem::size_of::<u32>() as u32);
+        .size((4 * std::mem::size_of::<u32>()) as u32);
     let set_layouts = [set_layout];
     let info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
@@ -1905,7 +2168,7 @@ fn update_mesh_set(
     ctr_buf: vk::Buffer,
 ) {
     let img_info = [vk::DescriptorImageInfo::default()
-        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .image_layout(vk::ImageLayout::GENERAL)
         .image_view(voxel_view)
         .sampler(voxel_sampler)];
     let props_info = [vk::DescriptorBufferInfo::default()

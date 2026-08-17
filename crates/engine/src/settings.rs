@@ -73,6 +73,10 @@ pub struct GraphicsSettings {
     /// multi-draw + compute-shader frustum culling + bindless origins).
     pub gpu_driven: bool,
 
+    /// Enable the Phase-2 GPU compute chunk mesher (requires `gpu_driven`,
+    /// which is auto-enabled when this is on).
+    pub gpu_meshing: bool,
+
     /// SSAO sampling radius (world-space distance).
     pub ssao_radius: f32,
 
@@ -108,6 +112,11 @@ pub struct WorldSettings {
     pub load_radius: i32,
 
     pub unload_radius: i32,
+
+    /// Chunks beyond this distance (in chunks) from the focus use the GPU
+    /// compute mesher instead of the CPU greedy mesher. 0 = always CPU mesh
+    /// (Phase 2 disabled).
+    pub gpu_mesh_distance: i32,
 
     pub day_length: f64,
 
@@ -582,6 +591,7 @@ impl Default for GraphicsSettings {
             occlusion_culling: true,
             ssao_enabled: true,
             gpu_driven: false,
+            gpu_meshing: false,
             ssao_radius: 1.5,
             ssao_bias: 0.025,
             ssao_strength: 1.0,
@@ -610,6 +620,8 @@ impl Default for WorldSettings {
             load_radius: 6,
 
             unload_radius: 8,
+
+            gpu_mesh_distance: 0,
 
             day_length: 1200.0,
 
@@ -808,9 +820,11 @@ impl GameSettings {
 
             ssao_enabled: self.graphics.ssao_enabled,
 
-            gpu_driven: self.graphics.gpu_driven,
+            // Phase-2 meshing implies Phase-1 rendering; auto-enable so a
+            // `gpu_meshing`/`gpu_mesh_distance` config never silently no-ops.
+            gpu_driven: self.graphics.gpu_driven || self.graphics.gpu_meshing,
 
-            gpu_meshing: false,
+            gpu_meshing: self.graphics.gpu_meshing,
         }
     }
 
@@ -823,7 +837,7 @@ impl GameSettings {
 
             vertical_half: 3,
 
-            gpu_mesh_distance: 0,
+            gpu_mesh_distance: self.world.gpu_mesh_distance,
 
             gen_batch: 24,
 

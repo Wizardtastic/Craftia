@@ -70,6 +70,18 @@ struct Cli {
     /// Disable hardware occlusion culling.
     #[arg(long)]
     no_occlusion_culling: bool,
+    /// Enable the GPU-driven chunk rendering pipeline (indirect multi-draw).
+    #[arg(long)]
+    gpu_driven: bool,
+    /// Enable the GPU compute chunk mesher (implies --gpu-driven).
+    #[arg(long)]
+    gpu_meshing: bool,
+    /// Distance (in chunks) beyond which chunks are GPU-meshed (implies --gpu-meshing).
+    #[arg(long, value_name = "N")]
+    gpu_mesh_distance: Option<i32>,
+    /// Load radius (in chunks) — how far around the player the world streams.
+    #[arg(long, value_name = "N")]
+    load_radius: Option<i32>,
     /// Capture-run camera position override "x,y,z" (teleports + flying).
     #[arg(long, value_name = "x,y,z")]
     campos: Option<String>,
@@ -309,6 +321,23 @@ fn main() -> anyhow::Result<()> {
     }
     if cli.no_occlusion_culling {
         config.render.occlusion_culling = false;
+    }
+    if cli.gpu_driven {
+        config.render.gpu_driven = true;
+    }
+    if cli.gpu_meshing {
+        config.render.gpu_meshing = true;
+        config.render.gpu_driven = true;
+    }
+    if let Some(d) = cli.gpu_mesh_distance {
+        config.stream.gpu_mesh_distance = d;
+        config.render.gpu_meshing = true;
+        config.render.gpu_driven = true;
+    }
+    if let Some(r) = cli.load_radius {
+        config.stream.load_radius = r.max(1);
+        // Keep unload radius strictly larger so the wider band doesn't thrash.
+        config.stream.unload_radius = (r + 2).max(config.stream.unload_radius);
     }
     if cli.debug {
         // Set debug overlay on via config — the engine reads this
