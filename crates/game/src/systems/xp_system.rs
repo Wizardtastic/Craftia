@@ -40,15 +40,13 @@ impl Experience {
         self.total_xp += amount;
         self.progress += amount as f32 / Self::xp_to_next_level(self.level) as f32;
 
-        // Handle multiple level-ups.
+        // Handle multiple level-ups. `progress` is a fraction of the current
+        // level's requirement, so after each level-up the remainder must be
+        // re-scaled against the NEW level's (larger) requirement.
         while self.progress >= 1.0 {
             self.level += 1;
-            self.progress -= 1.0;
-            // Recalculate for overflow.
-            let needed = Self::xp_to_next_level(self.level) as f32;
-            if needed > 0.0 {
-                // progress is already relative to the new level's requirement.
-            }
+            self.progress = (self.progress - 1.0) * Self::xp_to_next_level(self.level - 1) as f32
+                / Self::xp_to_next_level(self.level) as f32;
         }
     }
 

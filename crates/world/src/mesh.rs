@@ -302,12 +302,9 @@ fn build_mask_cell(
         let nlx = lx + n.x;
         let nly = ly + n.y;
         let nlz = lz + n.z;
-        let neighbour = if nlx >= 0
-            && nlx < CHUNK_SIZE
-            && nly >= 0
-            && nly < CHUNK_SIZE
-            && nlz >= 0
-            && nlz < CHUNK_SIZE
+        let neighbour = if (0..CHUNK_SIZE).contains(&nlx)
+            && (0..CHUNK_SIZE).contains(&nly)
+            && (0..CHUNK_SIZE).contains(&nlz)
         {
             chunk.get(nlx, nly, nlz)
         } else {
@@ -327,7 +324,10 @@ fn build_mask_cell(
         let lx = x - origin.x;
         let ly = y - origin.y;
         let lz = z - origin.z;
-        if lx >= 0 && lx < CHUNK_SIZE && ly >= 0 && ly < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE {
+        if (0..CHUNK_SIZE).contains(&lx)
+            && (0..CHUNK_SIZE).contains(&ly)
+            && (0..CHUNK_SIZE).contains(&lz)
+        {
             chunk.get(lx, ly, lz)
         } else {
             sample(x, y, z)
@@ -443,12 +443,10 @@ fn should_emit_face(
                 }
             }
         }
-        Face::NegY if ly == 0 && chunk.pos.y() > 0 => {
-            if sample_loaded(wx, wy - 1, wz) {
-                let nb = sample(wx + n.x, wy + n.y, wz + n.z);
-                if !nb.is_air() {
-                    return false;
-                }
+        Face::NegY if ly == 0 && chunk.pos.y() > 0 && sample_loaded(wx, wy - 1, wz) => {
+            let nb = sample(wx + n.x, wy + n.y, wz + n.z);
+            if !nb.is_air() {
+                return false;
             }
         }
         _ => {}
@@ -510,7 +508,10 @@ fn can_merge_down(
     for i in 0..w {
         let a = &top[u + i];
         let b = &bot[u + i];
-        if a.block_id != b.block_id || a.block_light != b.block_light || a.light_color != b.light_color {
+        if a.block_id != b.block_id
+            || a.block_light != b.block_light
+            || a.light_color != b.light_color
+        {
             return false;
         }
         if a.ao[pairs[0].0] != b.ao[pairs[0].1] || a.ao[pairs[1].0] != b.ao[pairs[1].1] {

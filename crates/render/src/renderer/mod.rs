@@ -11,7 +11,7 @@
 //! - swapchain + image views + depth image + framebuffers
 //! - render pass + chunk graphics pipeline + pipeline layout + descriptor sets
 //! - atlas texture + sampler
-//! - per-frame (Ã—2 in flight): command buffer, fences/semaphores, camera UBO
+//! - per-frame (×2 in flight): command buffer, fences/semaphores, camera UBO
 //! - per-chunk: vertex + index buffers in a `HashMap`
 
 mod device;
@@ -1916,8 +1916,7 @@ impl Renderer {
         };
         // Phase-1 GPU-driven pipeline: build before the struct literal so
         // `device`/`alloc` (moved into Self below) are still borrowable.
-        let gpu_driven = if config.gpu_driven && hiz.is_some() {
-            let h = hiz.as_ref().expect("hiz present");
+        let gpu_driven = if let (true, Some(h)) = (config.gpu_driven, hiz.as_ref()) {
             match indirect::GpuDriven::new(
                 indirect::GpuTransferCtx {
                     device: &device,
@@ -2298,6 +2297,46 @@ impl Renderer {
                 self.shadow_frag_spirv = bytes;
                 self.recreate_shadow_pipeline()
             }
+            "entity.vert" => {
+                self.entity_vert_spirv = bytes;
+                self.recreate_entity_pipeline()
+            }
+            "entity.frag" => {
+                self.entity_frag_spirv = bytes;
+                self.recreate_entity_pipeline()
+            }
+            "panorama.vert" => {
+                self.panorama_vert_spirv = bytes;
+                self.recreate_panorama_pipeline()
+            }
+            "panorama.frag" => {
+                self.panorama_frag_spirv = bytes;
+                self.recreate_panorama_pipeline()
+            }
+            "particle.vert" => {
+                self.particle_vert_spirv = bytes;
+                self.recreate_particle_pipeline()
+            }
+            "particle.frag" => {
+                self.particle_frag_spirv = bytes;
+                self.recreate_particle_pipeline()
+            }
+            "overlay.vert" => {
+                self.overlay_vert_spirv = bytes;
+                self.recreate_overlay_pipeline()
+            }
+            "overlay.frag" => {
+                self.overlay_frag_spirv = bytes;
+                self.recreate_overlay_pipeline()
+            }
+            "aabb_occlusion.vert" => {
+                self.aabb_vert_spirv = bytes;
+                self.recreate_occlusion_pipeline()
+            }
+            "aabb_occlusion.frag" => {
+                self.aabb_frag_spirv = bytes;
+                self.recreate_occlusion_pipeline()
+            }
             "post.vert" => {
                 self.post_vert_spirv = bytes;
                 self.recreate_post_pipeline()
@@ -2377,6 +2416,91 @@ impl Renderer {
             &self.ui_vert_spirv,
             &self.ui_frag_spirv,
             vk::SampleCountFlags::TYPE_1,
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the entity pipeline from the stored SPIR-V (hot reload).
+    fn recreate_entity_pipeline(&mut self) -> Result<()> {
+        unsafe {
+            self.device.destroy_pipeline(self.entity_pipeline, None);
+        }
+        self.entity_pipeline = vk::Pipeline::null();
+        self.entity_pipeline = crate::entity::create_entity_pipeline(
+            &self.device,
+            self.render_pass,
+            self.entity_pipeline_layout,
+            &self.entity_vert_spirv,
+            &self.entity_frag_spirv,
+            self.msaa_samples,
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the panorama pipeline from the stored SPIR-V (hot reload).
+    fn recreate_panorama_pipeline(&mut self) -> Result<()> {
+        unsafe {
+            self.device.destroy_pipeline(self.panorama_pipeline, None);
+        }
+        self.panorama_pipeline = vk::Pipeline::null();
+        self.panorama_pipeline = pipeline::create_panorama_pipeline(
+            &self.device,
+            self.render_pass,
+            self.panorama_pipeline_layout,
+            &self.panorama_vert_spirv,
+            &self.panorama_frag_spirv,
+            self.msaa_samples,
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the particle pipeline from the stored SPIR-V (hot reload).
+    fn recreate_particle_pipeline(&mut self) -> Result<()> {
+        unsafe {
+            self.device.destroy_pipeline(self.particle_pipeline, None);
+        }
+        self.particle_pipeline = vk::Pipeline::null();
+        self.particle_pipeline = pipeline::create_particle_pipeline(
+            &self.device,
+            self.render_pass,
+            self.particle_pipeline_layout,
+            &self.particle_vert_spirv,
+            &self.particle_frag_spirv,
+            self.msaa_samples,
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the overlay (wireframe lines) pipeline from the stored SPIR-V.
+    fn recreate_overlay_pipeline(&mut self) -> Result<()> {
+        unsafe {
+            self.device.destroy_pipeline(self.overlay_pipeline, None);
+        }
+        self.overlay_pipeline = vk::Pipeline::null();
+        self.overlay_pipeline = crate::overlay::create_overlay_pipeline(
+            &self.device,
+            self.render_pass,
+            self.overlay_pipeline_layout,
+            &self.overlay_vert_spirv,
+            &self.overlay_frag_spirv,
+            self.msaa_samples,
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the AABB occlusion pipeline from the stored SPIR-V.
+    fn recreate_occlusion_pipeline(&mut self) -> Result<()> {
+        unsafe {
+            self.device.destroy_pipeline(self.occlusion_pipeline, None);
+        }
+        self.occlusion_pipeline = vk::Pipeline::null();
+        self.occlusion_pipeline = pipeline::create_occlusion_pipeline(
+            &self.device,
+            self.render_pass,
+            self.pipeline_layout,
+            &self.aabb_vert_spirv,
+            &self.aabb_frag_spirv,
+            self.msaa_samples,
         )?;
         Ok(())
     }
@@ -3328,7 +3452,6 @@ impl Renderer {
                 cmd,
                 indirect::RecordUniforms {
                     vp_cols: &vp_cols,
-                    game_time,
                     cam_pos: camera.pos,
                 },
             );
@@ -3606,7 +3729,6 @@ impl Renderer {
                 cmd,
                 indirect::RecordUniforms {
                     vp_cols: &vp_cols,
-                    game_time,
                     cam_pos: camera.pos,
                 },
             );
@@ -5598,7 +5720,7 @@ impl Renderer {
         let gpu_transparent = self
             .gpu_driven
             .as_ref()
-            .map_or(false, |g| g.transparent_slots() > 0);
+            .is_some_and(|g| g.transparent_slots() > 0);
         if draws.is_empty() && ui_index_count == 0 && !gpu_transparent {
             // No transparent draws this frame. Both bracketing timestamps
             // (4: transparent_end, 5: ui_end) must still be written — the

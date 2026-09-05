@@ -148,11 +148,12 @@ impl SystemSchedule {
         }
     }
 
-    /// Run systems with parallel timing collection. When timing is enabled,
-    /// wall-clock measurements are collected via `AtomicUsize` so the
-    /// per-system timer overhead is amortised. Systems still execute
-    /// sequentially (the `World` is `!Sync`), but the timing writes are
-    /// lock-free.
+    /// Run systems in consecutive parallelizable batches. Systems still
+    /// execute sequentially (the `World` is `!Sync`), but the batching
+    /// infrastructure is ready for a future `World` partitioning scheme,
+    /// at which point each batch could run on its own thread.
+    ///
+    /// Timing (when enabled) is collected the same way as in `run`.
     pub fn run_parallel(&mut self, world: &mut World, dt: f32) {
         if self.timings_enabled {
             // Sequential execution with atomic timing — avoids the

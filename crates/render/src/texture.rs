@@ -201,6 +201,39 @@ pub fn begin_one_time(device: &ash::Device, pool: vk::CommandPool) -> Result<vk:
     Ok(cmd)
 }
 
+/// End and submit a one-time command buffer, returning its fence WITHOUT
+/// waiting on it. The caller owns the returned fence and MUST eventually
+/// `destroy_fence` it; it signals only after the command buffer finishes
+/// executing. The command buffer stays allocated until the caller frees it —
+/// only do so once the fence has signalled (a pending command buffer must not
+/// be freed). Use [`end_and_submit`] instead when a blocking wait is fine.
+pub fn end_and_submit_no_wait(
+    device: &ash::Device,
+    pool: vk::CommandPool,
+    queue: vk::Queue,
+    cmd: vk::CommandBuffer,
+) -> Result<vk::Fence> {
+    unsafe {
+        device
+            .end_command_buffer(cmd)
+            .map_err(|e| anyhow!("end_command_buffer failed: {e:?}"))?;
+        let command_buffers = [cmd];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        let submit_infos = [submit_info];
+        let fence = device
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+            .map_err(|e| anyhow!("create_fence failed: {e:?}"))?;
+        if let Err(e) = device.queue_submit(queue, &submit_infos, fence) {
+            // Never submitted, so the cmd buffer is no longer pending and can
+            // be freed here; the fence was never registered anywhere.
+            device.destroy_fence(fence, None);
+            device.free_command_buffers(pool, &[cmd]);
+            return Err(anyhow!("queue_submit failed: {e:?}"));
+        }
+        Ok(fence)
+    }
+}
+
 /// End, submit, and wait on a one-time command buffer, then free it.
 pub fn end_and_submit(
     device: &ash::Device,

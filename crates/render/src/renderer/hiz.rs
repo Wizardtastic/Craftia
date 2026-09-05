@@ -42,7 +42,8 @@ impl HiZ {
     /// full-res scene depth), so the chain runs from `extent / 2` down to 1x1.
     pub fn mip_count_for(extent: vk::Extent2D) -> u32 {
         let m = (extent.width / 2).min(extent.height / 2).max(1);
-        (32 - m.leading_zeros()).min(MAX_MIPS).max(1)
+        // Bits needed to represent `m` = ceil(log2(m + 1)) chain length.
+        (32 - m.leading_zeros()).clamp(1, MAX_MIPS)
     }
 
     #[allow(clippy::too_many_lines)]

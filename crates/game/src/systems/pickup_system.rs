@@ -6,12 +6,11 @@
 //! 3. For now, adds to the hotbar (simplified inventory)
 
 use glam::Vec3;
-use voxel_ecs::World;
+use voxel_ecs::{Entity, World};
 
 use crate::components::{PlayerEntity, Transform};
 use crate::inv::Hotbar;
 use crate::item_entity::ItemEntity;
-use voxel_core::BlockId;
 
 /// Vacuum range in blocks (items within this range are attracted to the player).
 const VACUUM_RANGE: f32 = 1.5;
@@ -78,35 +77,21 @@ pub fn item_pickup_system(world: &mut World, _dt: f32) {
     for (entity, item) in to_pickup {
         // Try to add to hotbar.
         if let Some(hotbar) = world.resource_mut::<Hotbar>() {
-            let block_id = BlockId::new(item.item_id);
+            let block_id = item.block_id();
 
-            // Try to find a slot with the same block that isn't full.
+            // Prefer an empty slot; a matching occupied slot just means the
+            // item type is already carried (there are no counts yet), so
+            // dropping a duplicate on top would lose the item.
             let mut added = false;
             for i in 0..9 {
-                if let Some(slot_id) = hotbar.slot(i) {
-                    if slot_id == block_id {
-                        // Found matching slot. For now, just keep it there.
-                        // In a full inventory, we'd increment the count.
-                        added = true;
-                        break;
-                    }
+                if matches!(hotbar.slot(i), Some(id) if id.is_air()) {
+                    hotbar.set_slot(i, block_id);
+                    added = true;
+                    break;
                 }
             }
 
-            // If no matching slot, try to find an empty slot.
-            if !added {
-                for i in 0..9 {
-                    if let Some(slot_id) = hotbar.slot(i) {
-                        if slot_id.is_air() {
-                            hotbar.set_slot(i, block_id);
-                            added = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // If still not added, the item stays on the ground.
+            // If no empty slot, the item stays on the ground.
             if !added {
                 continue;
             }
@@ -116,5 +101,3 @@ pub fn item_pickup_system(world: &mut World, _dt: f32) {
         world.despawn(entity);
     }
 }
-
-use voxel_ecs::Entity;

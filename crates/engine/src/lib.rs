@@ -51,15 +51,15 @@ mod ui;
 /// routed. The flow is:
 ///
 /// ```text
-/// TitleScreen ──Singleplayer──ΓåÆ WorldSelect ──Pick World──ΓåÆ Playing
-///      Γöé                            Γöé
-///      Γö£──Options──────ΓåÆ SettingsMenu ΓåÉ──ΓöÉ
-///      Γöö──Quit─────────ΓåÆ exit            Γöé
-///                                        Γöé
-/// Playing ──Escape──ΓåÆ PauseMenu ──Back to Game──ΓåÆ Playing
-///                             Γö£──Options──────────────ΓåÆ SettingsMenu
-///                             Γö£──Save & Quit to Title──ΓåÆ TitleScreen
-///                             Γöö──Quit Game─────────────ΓåÆ exit
+/// TitleScreen ──Singleplayer──→ WorldSelect ──Pick World──→ Playing
+///      │                            │
+///      ├──Options──────→ SettingsMenu ←──┐
+///      └──Quit─────────→ exit            │
+///                                        │
+/// Playing ──Escape──→ PauseMenu ──Back to Game──→ Playing
+///                             ├──Options──────────────→ SettingsMenu
+///                             ├──Save & Quit to Title──→ TitleScreen
+///                             └──Quit Game─────────────→ exit
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GameState {
@@ -213,7 +213,7 @@ struct EngineInputState {
     pub running: bool,
     /// True once the player's spawn chunk has loaded; physics is paused until then.
     pub spawned: bool,
-    /// Resolved keybind map: KeyCode ΓåÆ Action.
+    /// Resolved keybind map: KeyCode → Action.
     pub keybinds: settings::KeybindMap,
     /// Last sun_dir sent to streamer (avoid redundant sends).
     pub last_sun_dir: Vec3,
@@ -1971,7 +1971,7 @@ mod eol_invariant {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    /// `crates/engine/Cargo.toml` ΓåÆ two directory levels up is the
+    /// `crates/engine/Cargo.toml` → two directory levels up is the
     /// workspace root.
     fn workspace_root() -> PathBuf {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

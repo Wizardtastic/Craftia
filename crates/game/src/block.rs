@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use voxel_core::{math::block_to_chunk, BlockId};
+use voxel_core::{chunk_neighbours, math::block_to_chunk, BlockId};
 use voxel_physics::{raycast_voxels, RayHit};
 use voxel_world::{ChunkStreamer, World};
 
@@ -167,15 +167,11 @@ impl BlockAction {
     }
 }
 
-fn neighbours(p: voxel_core::ChunkPos) -> [voxel_core::ChunkPos; 6] {
-    [
-        voxel_core::ChunkPos::new(p.x() - 1, p.y(), p.z()),
-        voxel_core::ChunkPos::new(p.x() + 1, p.y(), p.z()),
-        voxel_core::ChunkPos::new(p.x(), p.y() - 1, p.z()),
-        voxel_core::ChunkPos::new(p.x(), p.y() + 1, p.z()),
-        voxel_core::ChunkPos::new(p.x(), p.y(), p.z() - 1),
-        voxel_core::ChunkPos::new(p.x(), p.y(), p.z() + 1),
-    ]
+use voxel_core::ChunkPos;
+
+/// Alias for the shared helper so existing call sites read unchanged.
+fn neighbours(p: ChunkPos) -> [ChunkPos; 6] {
+    chunk_neighbours(p)
 }
 
 #[cfg(test)]

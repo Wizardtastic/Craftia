@@ -95,16 +95,13 @@ pub fn hunger_system(world: &mut World, _dt: f32) {
         false
     };
 
-    // Sprint gating: force sprint off when food <= 6
-    if !hunger.can_sprint() && input.sprinting {
-        // We can't directly modify input here, but we set a flag
-        // The movement system will check hunger.can_sprint()
-    }
+    // Sprint gating note: sprint is not force-disabled here because systems
+    // share the same `PlayerInput` component; `movement_system` consults
+    // `Hunger::can_sprint()` when computing its speed instead.
 
-    // Starvation damage
+    // Starvation damage: applied as a small per-tick amount (0.5 hearts per
+    // second at 20 tps), bypassing the 1-heart-per-4-seconds vanilla cadence.
     if should_starve && difficulty.has_starvation() {
-        // Starvation damage: 1 heart per 4 seconds (every 80 ticks at 20 tps)
-        // We use a simple approach: damage every tick at a low rate
         if let Some(dq) = world.resource_mut::<DamageQueue>() {
             dq.push(
                 player_entity,

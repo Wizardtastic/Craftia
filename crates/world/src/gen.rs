@@ -331,12 +331,7 @@ impl TerrainGenerator {
     ///
     /// Coordinate + surface data bundled so `carve` stays under the
     /// `too_many_arguments` threshold.
-    fn carve(
-        &self,
-        _chunk: &mut Chunk,
-        point: CarvePoint,
-        _reg: &BlockRegistry,
-    ) -> bool {
+    fn carve(&self, _chunk: &mut Chunk, point: CarvePoint, _reg: &BlockRegistry) -> bool {
         let CarvePoint {
             x,
             y,
@@ -593,12 +588,7 @@ impl TerrainGenerator {
 
     /// Decorate carved caves with water/lava pools, scattered floor blocks,
     /// extra ore near walls, and simple stalactites/stalagmites.
-    pub fn decorate_caves(
-        &self,
-        chunk: &mut Chunk,
-        reg: &BlockRegistry,
-        columns: &ColumnTable,
-    ) {
+    pub fn decorate_caves(&self, chunk: &mut Chunk, reg: &BlockRegistry, columns: &ColumnTable) {
         let origin = chunk_origin(chunk.pos);
         let Some(stone) = reg.id_of("stone") else {
             return;
@@ -1118,19 +1108,15 @@ impl TerrainGenerator {
                                         let mut clear = true;
                                         'height: for i in 0..cactus_h {
                                             let cy = sy + 1 + i;
-                                            if cy >= CHUNK_SIZE
-                                                || !chunk.get(lx, cy, lz).is_air()
-                                            {
+                                            if cy >= CHUNK_SIZE || !chunk.get(lx, cy, lz).is_air() {
                                                 clear = false;
                                                 break;
                                             }
                                             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                                                 let nx = lx + dx;
                                                 let nz = lz + dz;
-                                                if nx >= 0
-                                                    && nx < CHUNK_SIZE
-                                                    && nz >= 0
-                                                    && nz < CHUNK_SIZE
+                                                if (0..CHUNK_SIZE).contains(&nx)
+                                                    && (0..CHUNK_SIZE).contains(&nz)
                                                     && !chunk.get(nx, cy, nz).is_air()
                                                 {
                                                     clear = false;

@@ -13,6 +13,7 @@ use rayon::prelude::*;
 
 use glam::Vec3;
 use voxel_core::{
+    chunk_neighbours,
     math::{block_to_chunk, chunk_origin, world_to_block, ChunkPos},
     BlockId, Frustum, CHUNK_SIZE,
 };
@@ -214,6 +215,7 @@ fn run_worker(
     loop {
         // --- drain commands ---
         let mut remesh_requests: Vec<ChunkPos> = Vec::new();
+        let mut shutdown = false;
         let mut focus_changed = false;
         for cmd in cmd_rx.drain() {
             match cmd {
@@ -249,8 +251,14 @@ fn run_worker(
                     mesh_accum_ms = 0.0;
                     let _ = tx.try_send(stats);
                 }
-                Cmd::Shutdown => return,
+                Cmd::Shutdown => {
+                    shutdown = true;
+                    break;
+                }
             }
+        }
+        if shutdown {
+            return;
         }
 
         // Desired loaded set (cylindrical band around focus).
@@ -353,7 +361,8 @@ fn run_worker(
             })
             .collect();
 
-        if !gen_batch.is_empty() {                    let gen = gen.clone();
+        if !gen_batch.is_empty() {
+            let gen = gen.clone();
             let reg = reg.clone();
             let world_for_light = world.clone();
             // Cache the stone block ID once per batch — the sample_block
@@ -371,11 +380,13 @@ fn run_worker(
                             log::error!("chunk generation failed for {pos:?}");
                             return None;
                         }
-                        gen.decorate(&mut chunk, &reg, &columns, |wx, wy, wz| {
-                            world_for_light.get_block(wx, wy, wz)
-                        }, |wx, wy, wz, id| {
-                            world_for_light.set_block_no_light(wx, wy, wz, id)
-                        });
+                        gen.decorate(
+                            &mut chunk,
+                            &reg,
+                            &columns,
+                            |wx, wy, wz| world_for_light.get_block(wx, wy, wz),
+                            |wx, wy, wz, id| world_for_light.set_block_no_light(wx, wy, wz, id),
+                        );
                         // Compute lighting: ray-based sunlight + torchlight BFS.
                         let mut cross_updates = Vec::new();
                         crate::light::compute_all(
@@ -402,7 +413,8 @@ fn run_worker(
                         // Apply cross-chunk torchlight updates to the world.
                         for (pos, level, color) in cross_updates {
                             world_for_light.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
-                            world_for_light.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
+                            world_for_light
+                                .set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
                         }
                         Some((pos, chunk))
                     })
@@ -589,44 +601,17 @@ fn run_worker(
             }
         }
 
-        // If nothing happened this iteration and no commands are pending, idle
-        // briefly to avoid a busy loop.
+        // If nothing happened this iteration and the focus didn't just move,
+        // sleep briefly to avoid a busy polling loop. Commands stay queued in
+        // the channel and are handled by the next iteration's drain — there
+        // is exactly one command-processing path.
         if gen_batch.is_empty()
             && struct_batch.is_empty()
             && mesh_batch.is_empty()
             && !focus_changed
+            && cmd_rx.is_empty()
         {
-            // Block on the command channel instead of polling with a sleep.
-            // This avoids 500Hz wake-ups and reduces CPU usage when idle.
-            if let Ok(cmd) = cmd_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                // Process the command we received and loop back.
-                match cmd {
-                    Cmd::Focus(p) => { focus = p; focus_changed = true; }
-                    Cmd::SunDir(d) => { sun_dir = d; }
-                    Cmd::Frustum(f) => { frustum = Some(f); }
-                    Cmd::LoadRadius(r) => { load_radius = r as i32; }
-                    Cmd::Remesh(pos) => { remesh_requests.push(pos); }
-                    Cmd::Stats(tx) => {
-                        let mut stats = StreamerStats::default();
-                        for s in state.values() {
-                            stats.total_tracked += 1;
-                            match s {
-                                State::Generating => stats.gen_queue += 1,
-                                State::Meshing => stats.mesh_queue += 1,
-                                _ => {}
-                            }
-                        }
-                        stats.pending_remesh = remesh_requests.len() as u32;
-                        stats.gen_ms = gen_accum_ms;
-                        stats.mesh_ms = mesh_accum_ms;
-                        gen_accum_ms = 0.0;
-                        mesh_accum_ms = 0.0;
-                        let _ = tx.try_send(stats);
-                    }
-                    Cmd::Shutdown => return,
-                }
-                continue;
-            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 }
@@ -675,14 +660,7 @@ fn horizontal_neighbours(p: ChunkPos) -> [ChunkPos; 8] {
 }
 
 fn neighbours(p: ChunkPos) -> [ChunkPos; 6] {
-    [
-        ChunkPos::new(p.x() - 1, p.y(), p.z()),
-        ChunkPos::new(p.x() + 1, p.y(), p.z()),
-        ChunkPos::new(p.x(), p.y() - 1, p.z()),
-        ChunkPos::new(p.x(), p.y() + 1, p.z()),
-        ChunkPos::new(p.x(), p.y(), p.z() - 1),
-        ChunkPos::new(p.x(), p.y(), p.z() + 1),
-    ]
+    chunk_neighbours(p)
 }
 
 fn sort_by_distance(mut v: Vec<ChunkPos>, focus: ChunkPos) -> Vec<ChunkPos> {

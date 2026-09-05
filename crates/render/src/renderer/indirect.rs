@@ -17,7 +17,7 @@ use voxel_core::{math::chunk_origin, ChunkPos, CHUNK_SIZE};
 
 use crate::alloc::Alloc;
 use crate::buffer::GpuBuffer;
-use crate::texture::{begin_one_time, end_and_submit};
+use crate::texture::{begin_one_time, end_and_submit, end_and_submit_no_wait};
 use crate::MeshPass;
 
 use super::pipeline::{create_graphics_pipeline, spirv_to_u32};
@@ -91,6 +91,37 @@ struct GpuMeshJob {
     voxels: Box<[u16]>,
 }
 
+/// How far the in-flight job has progressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GpuMeshStage {
+    /// Compute dispatch submitted; output counts not yet read.
+    Compute,
+    /// Mega-buffer copy-out submitted; slot not yet recorded.
+    CopyOut,
+}
+
+/// A GPU-mesh job that has been submitted to the device and is awaiting its
+/// fence. Owns the fence and the partially-reserved mega-buffer range; the
+/// range is only committed to `mega_vbo_used`/`mega_ibo_used` when the copy-out
+/// completes (or released by [`GpuDriven::cancel_inflight`] on teardown).
+struct InFlightGpuMesh {
+    job: GpuMeshJob,
+    stage: GpuMeshStage,
+    /// Command buffer recorded for the current stage. It stays allocated
+    /// until its fence has signalled; free it together with the fence in
+    /// [`GpuDriven::cancel_inflight`], or after retirement in `drain_gpu_meshes`.
+    cmd: vk::CommandBuffer,
+    fence: vk::Fence,
+    /// Start of this job's reserved range in the mega VBO/IBO.
+    vbo_offset: vk::DeviceSize,
+    ibo_offset: vk::DeviceSize,
+    /// Bytes reserved in the mega VBO/IBO for this job. During `Compute` this
+    /// is the mesher's worst case; after `Compute` completes it is narrowed to
+    /// the actual output size for the `CopyOut` submission.
+    reserved_vbo: vk::DeviceSize,
+    reserved_ibo: vk::DeviceSize,
+}
+
 pub struct GpuDriven {
     mega_vbo: GpuBuffer,
     mega_ibo: GpuBuffer,
@@ -131,6 +162,10 @@ pub struct GpuDriven {
     /// burst of streaming chunks across frames instead of stalling on N×2
     /// per-chunk fence waits.
     pending_meshes: VecDeque<GpuMeshJob>,
+    /// GPU-mesh job currently executing on the device, if any. `drain_gpu_meshes`
+    /// polls its fence each frame and only retires the job once signalled, so a
+    /// burst of chunks never blocks the render thread on a GPU round-trip.
+    gpu_inflight: Option<InFlightGpuMesh>,
     /// Old mega buffers retired by `grow_and_compact`. They cannot be freed
     /// immediately: with `FRAMES_IN_FLIGHT > 1` an in-flight render command
     /// buffer may still be reading them as vertex/index buffers. They are
@@ -167,7 +202,6 @@ pub struct GpuDrivenConfig {
 #[derive(Clone, Copy)]
 pub struct RecordUniforms<'a> {
     pub vp_cols: &'a [f32],
-    pub game_time: f32,
     pub cam_pos: Vec3,
 }
 
@@ -405,6 +439,7 @@ impl GpuDriven {
             gpu_mesher,
             hiz_params,
             pending_meshes: VecDeque::new(),
+            gpu_inflight: None,
             retired_buffers: Vec::new(),
         })
     }
@@ -454,7 +489,13 @@ impl GpuDriven {
     /// Queue a (chunk, pass, LOD) GPU-mesh job (Phase 2). Cheap and non-
     /// blocking: the job is only queued here and processed one-per-frame by
     /// [`Self::drain_gpu_meshes`].
-    pub fn enqueue_gpu_mesh(&mut self, pos: ChunkPos, pass: MeshPass, voxels: Box<[u16]>, lod: u32) {
+    pub fn enqueue_gpu_mesh(
+        &mut self,
+        pos: ChunkPos,
+        pass: MeshPass,
+        voxels: Box<[u16]>,
+        lod: u32,
+    ) {
         if self.gpu_mesher.is_none() {
             return;
         }
@@ -467,16 +508,124 @@ impl GpuDriven {
     }
 
     /// Drive the deferred GPU-mesh pipeline (Phase 2), call once per frame.
-    /// Processes AT MOST ONE queued job: compute -> copy-out -> slot. Each of
-    /// the two submits is a short blocking wait, but because a burst of chunks
-    /// streaming in is spread across frames (one job/frame) rather than
-    /// hammered out in a tight loop, the render thread no longer stalls on
-    /// N×2 per-chunk fence waits (the original streaming-hitch source).
+    ///
+    /// At most one job is executing at a time, and its fence is *polled* —
+    /// never waited on — so a burst of streaming chunks never stalls the
+    /// render thread on a GPU round-trip (the original streaming-hitch
+    /// source). A frame in which the fence is still pending costs nothing but
+    /// a `vkGetFenceStatus`; the job is retired on the first frame after the
+    /// device finishes it.
     pub fn drain_gpu_meshes(&mut self, ctx: GpuTransferCtx<'_>) {
         if self.gpu_mesher.is_none() {
             self.pending_meshes.clear();
             return;
         }
+
+        // Retire the in-flight job first: nothing is safe to reuse (mesher
+        // scratch buffers, staging) until its fence has signalled.
+        if let Some(inf) = &mut self.gpu_inflight {
+            // Treat a fence-status error (e.g. device lost) as "not done";
+            // the job stays in flight and we simply retry next frame.
+            let done = unsafe { ctx.device.get_fence_status(inf.fence).unwrap_or(false) };
+            if !done {
+                return;
+            }
+            // The fence has signalled, so this stage's command buffer is no
+            // longer executing and can be freed right away.
+            unsafe {
+                ctx.device
+                    .free_command_buffers(ctx.command_pool, &[inf.cmd]);
+            }
+            let inf = self.gpu_inflight.take().unwrap();
+            match inf.stage {
+                GpuMeshStage::Compute => {
+                    // Compute finished: read the counts and immediately chain
+                    // the copy-out pass into the mega buffers (unless empty).
+                    let (vert_count, idx_count) = self.gpu_mesher.as_mut().unwrap().read_counts();
+                    if vert_count == 0 || idx_count == 0 {
+                        // Empty mesh: no geometry to slot, no mega advance.
+                        let entry = self.chunks.entry(inf.job.pos).or_default();
+                        match inf.job.pass {
+                            MeshPass::Opaque => entry.opaque[inf.job.lod as usize] = None,
+                            MeshPass::Transparent => entry.transparent[inf.job.lod as usize] = None,
+                        }
+                        self.dirty = true;
+                        unsafe { ctx.device.destroy_fence(inf.fence, None) };
+                        return;
+                    }
+                    if inf.reserved_vbo < vert_count as vk::DeviceSize * VERTEX_STRIDE
+                        || inf.reserved_ibo < idx_count as vk::DeviceSize * INDEX_STRIDE
+                    {
+                        // Defensive: the mesher's output buffers are sized to
+                        // the same worst case, so this is unreachable; treat it
+                        // as a hard error rather than corrupting the mega
+                        // buffers with an oversized copy.
+                        log::error!(
+                            "gpu-mesh produced {} verts / {} idxs, exceeding its {}-byte reservation; dropping mesh",
+                            vert_count,
+                            idx_count,
+                            inf.reserved_vbo
+                        );
+                        unsafe { ctx.device.destroy_fence(inf.fence, None) };
+                        return;
+                    }
+                    let vbo_offset = inf.vbo_offset;
+                    let ibo_offset = inf.ibo_offset;
+                    let job = inf.job;
+                    match self.gpu_mesher.as_ref().unwrap().submit_copy_out(
+                        ctx,
+                        self.mega_vbo.buffer,
+                        self.mega_ibo.buffer,
+                        vbo_offset,
+                        ibo_offset,
+                        vert_count,
+                        idx_count,
+                    ) {
+                        Ok((cmd, fence)) => {
+                            self.gpu_inflight = Some(InFlightGpuMesh {
+                                job,
+                                stage: GpuMeshStage::CopyOut,
+                                cmd,
+                                fence,
+                                vbo_offset,
+                                ibo_offset,
+                                reserved_vbo: vert_count as vk::DeviceSize * VERTEX_STRIDE,
+                                reserved_ibo: idx_count as vk::DeviceSize * INDEX_STRIDE,
+                            });
+                        }
+                        Err(e) => {
+                            log::error!("gpu-mesh copy-out submit: {e}");
+                            unsafe { ctx.device.destroy_fence(inf.fence, None) };
+                            return;
+                        }
+                    }
+                }
+                GpuMeshStage::CopyOut => {
+                    // Copy-out finished: the slot is now live and the mega
+                    // buffers permanently own the reserved ranges.
+                    let slot = MegaSlot {
+                        vbo_offset: inf.vbo_offset,
+                        ibo_offset: inf.ibo_offset,
+                        vertex_count: (inf.reserved_vbo / VERTEX_STRIDE) as u32,
+                        index_count: (inf.reserved_ibo / INDEX_STRIDE) as u32,
+                    };
+                    let entry = self.chunks.entry(inf.job.pos).or_default();
+                    match inf.job.pass {
+                        MeshPass::Opaque => entry.opaque[inf.job.lod as usize] = Some(slot),
+                        MeshPass::Transparent => {
+                            entry.transparent[inf.job.lod as usize] = Some(slot)
+                        }
+                    }
+                    self.dirty = true;
+                    unsafe { ctx.device.destroy_fence(inf.fence, None) };
+                }
+            }
+            return;
+        }
+
+        // Nothing in flight: launch the next queued job. Reserve the mesher's
+        // worst-case output in the mega buffers up front so the copy-out (which
+        // runs only after the compute completes) can never exceed capacity.
         let Some(job) = self.pending_meshes.pop_front() else {
             return;
         };
@@ -484,18 +633,16 @@ impl GpuDriven {
             MeshPass::Opaque => 0u32,
             MeshPass::Transparent => 1u32,
         };
-        let est_vbo = (16 * 16 * 16) as vk::DeviceSize * 6 * 4 * VERTEX_STRIDE;
-        let est_ibo = (16 * 16 * 16) as vk::DeviceSize * 6 * 6 * INDEX_STRIDE;
-        if self.mega_vbo_used + est_vbo > self.mega_vbo_capacity
-            || self.mega_ibo_used + est_ibo > self.mega_ibo_capacity
+        if self.mega_vbo_used + MESH_VERT_BYTES > self.mega_vbo_capacity
+            || self.mega_ibo_used + MESH_IDX_BYTES > self.mega_ibo_capacity
         {
             if let Err(e) = self.grow_and_compact(
                 ctx.device,
                 ctx.alloc,
                 ctx.command_pool,
                 ctx.graphics_queue,
-                est_vbo,
-                est_ibo,
+                MESH_VERT_BYTES,
+                MESH_IDX_BYTES,
             ) {
                 log::error!("gpu-mesh grow_and_compact: {e}");
                 return;
@@ -503,54 +650,28 @@ impl GpuDriven {
         }
         let vbo_offset = self.mega_vbo_used;
         let ibo_offset = self.mega_ibo_used;
-        let (vert_count, idx_count) = match self
-            .gpu_mesher
-            .as_mut()
-            .unwrap()
-            .submit_compute(ctx, &job.voxels, pass_mode, job.lod)
-        {
-            Ok(counts) => counts,
+        let (cmd, fence) = match self.gpu_mesher.as_mut().unwrap().submit_compute(
+            ctx,
+            &job.voxels,
+            pass_mode,
+            job.lod,
+        ) {
+            Ok(cf) => cf,
             Err(e) => {
                 log::error!("gpu-mesh compute submit: {e}");
                 return;
             }
         };
-        if vert_count == 0 || idx_count == 0 {
-            // Empty mesh: no geometry to slot, no mega advance.
-            let entry = self.chunks.entry(job.pos).or_default();
-            match job.pass {
-                MeshPass::Opaque => entry.opaque[job.lod as usize] = None,
-                MeshPass::Transparent => entry.transparent[job.lod as usize] = None,
-            }
-            self.dirty = true;
-            return;
-        }
-        if let Err(e) = self.gpu_mesher.as_ref().unwrap().submit_copy_out(
-            ctx,
-            self.mega_vbo.buffer,
-            self.mega_ibo.buffer,
+        self.gpu_inflight = Some(InFlightGpuMesh {
+            job,
+            stage: GpuMeshStage::Compute,
+            cmd,
+            fence,
             vbo_offset,
             ibo_offset,
-            vert_count,
-            idx_count,
-        ) {
-            log::error!("gpu-mesh copy-out submit: {e}");
-            return;
-        }
-        let slot = MegaSlot {
-            vbo_offset,
-            ibo_offset,
-            vertex_count: vert_count,
-            index_count: idx_count,
-        };
-        let entry = self.chunks.entry(job.pos).or_default();
-        match job.pass {
-            MeshPass::Opaque => entry.opaque[job.lod as usize] = Some(slot),
-            MeshPass::Transparent => entry.transparent[job.lod as usize] = Some(slot),
-        }
-        self.mega_vbo_used += vert_count as vk::DeviceSize * VERTEX_STRIDE;
-        self.mega_ibo_used += idx_count as vk::DeviceSize * INDEX_STRIDE;
-        self.dirty = true;
+            reserved_vbo: MESH_VERT_BYTES,
+            reserved_ibo: MESH_IDX_BYTES,
+        });
     }
 }
 
@@ -1159,7 +1280,9 @@ impl GpuDriven {
         cmd: vk::CommandBuffer,
         uniforms: RecordUniforms<'_>,
     ) {
-        let RecordUniforms { vp_cols, cam_pos, .. } = uniforms;
+        let RecordUniforms {
+            vp_cols, cam_pos, ..
+        } = uniforms;
         if self.dirty {
             self.rebuild(device);
         }
@@ -1375,6 +1498,23 @@ impl GpuDriven {
 }
 
 impl GpuDriven {
+    /// Wait (blocking) for any in-flight GPU-mesh job to finish, free its fence
+    /// and command buffer, and drop the job. Used only on teardown / shutdown;
+    /// the per-frame path polls instead (see [`Self::drain_gpu_meshes`]).
+    pub fn cancel_inflight(&mut self, device: &ash::Device, command_pool: vk::CommandPool) {
+        if let Some(inf) = self.gpu_inflight.take() {
+            unsafe {
+                // The device is (or is about to be) idle here, but waiting on
+                // the fence explicitly keeps this correct even if that changes.
+                if let Err(e) = device.wait_for_fences(&[inf.fence], true, u64::MAX) {
+                    log::warn!("gpu-mesh cancel_inflight: wait_for_fences failed: {e:?}");
+                }
+                device.destroy_fence(inf.fence, None);
+                device.free_command_buffers(command_pool, &[inf.cmd]);
+            }
+        }
+    }
+
     /// Destroy all Vulkan resources. Call before drop (mirrors
     /// [`crate::buffer::GpuBuffer::destroy`]).
     pub fn destroy(&mut self, device: &ash::Device, alloc: &Alloc, command_pool: vk::CommandPool) {
@@ -1421,6 +1561,13 @@ const VOXEL_TEX_SIZE: u32 = 18;
 const MESH_MAX_VERTS: vk::DeviceSize = (16 * 16 * 16) as vk::DeviceSize * 6 * 4;
 const MESH_MAX_IDXS: vk::DeviceSize = (16 * 16 * 16) as vk::DeviceSize * 6 * 6;
 const MESH_VERT_UINTS: vk::DeviceSize = 8;
+/// Worst-case bytes the compute mesher can write into the mega buffers for a
+/// single 16³ chunk. Every visible face is emitted as a quad (4 verts / 6
+/// indices), so these maxima bound both the out_verts/out_idxs scratch buffers
+/// and any per-job copy-out. `drain_gpu_meshes` reserves exactly this much
+/// mega-buffer space per job, so a compute result can never overrun a slot.
+const MESH_VERT_BYTES: vk::DeviceSize = MESH_MAX_VERTS * MESH_VERT_UINTS * 4;
+const MESH_IDX_BYTES: vk::DeviceSize = MESH_MAX_IDXS * 4;
 
 pub struct GpuMesher {
     voxel_image: vk::Image,
@@ -1865,8 +2012,9 @@ impl GpuMesher {
     }
 
     /// Upload voxels + dispatch the mesh compute (non-blocking). Returns the
-    /// command buffer + fence; poll the fence before calling
-    /// [`Self::read_counts`].
+    /// command buffer + fence; the caller must free the command buffer (only
+    /// after the fence signals) and destroy the fence. Poll the fence before
+    /// calling [`Self::read_counts`].
     fn submit_compute(
         &mut self,
         ctx: GpuTransferCtx<'_>,
@@ -2003,7 +2151,7 @@ impl GpuMesher {
                 &[],
             );
         }
-        let fence = submit_one_time(device, graphics_queue, cmd)?;
+        let fence = end_and_submit_no_wait(device, command_pool, graphics_queue, cmd)?;
         Ok((cmd, fence))
     }
 
@@ -2023,6 +2171,8 @@ impl GpuMesher {
     }
 
     /// Submit the mega-buffer copy-out for a finished mesh (non-blocking).
+    /// Returns the command buffer + fence; as with [`Self::submit_compute`],
+    /// the caller frees the command buffer only after the fence signals.
     fn submit_copy_out(
         &self,
         ctx: GpuTransferCtx<'_>,
@@ -2062,7 +2212,7 @@ impl GpuMesher {
                     .size(i_bytes)],
             );
         }
-        let fence = submit_one_time(device, graphics_queue, cmd)?;
+        let fence = end_and_submit_no_wait(device, command_pool, graphics_queue, cmd)?;
         Ok((cmd, fence))
     }
 

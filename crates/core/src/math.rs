@@ -211,6 +211,21 @@ pub fn chunk_origin(c: ChunkPos) -> IVec3 {
     c.0 * CHUNK_SIZE
 }
 
+/// The 6 axis-adjacent chunk positions around `p`. Shared by the block-edit
+/// path (gameplay remesh requests) and the chunk streamer (lighting spill and
+/// border-face rebuilds) so both agree on neighbour ordering.
+#[inline]
+pub fn chunk_neighbours(p: ChunkPos) -> [ChunkPos; 6] {
+    [
+        ChunkPos::new(p.0.x - 1, p.0.y, p.0.z),
+        ChunkPos::new(p.0.x + 1, p.0.y, p.0.z),
+        ChunkPos::new(p.0.x, p.0.y - 1, p.0.z),
+        ChunkPos::new(p.0.x, p.0.y + 1, p.0.z),
+        ChunkPos::new(p.0.x, p.0.y, p.0.z - 1),
+        ChunkPos::new(p.0.x, p.0.y, p.0.z + 1),
+    ]
+}
+
 /// The world-space AABB of a chunk as `(min, max)` f32 corners, ready for
 /// frustum culling / occlusion-proxy tests.
 #[inline]

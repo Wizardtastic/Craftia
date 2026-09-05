@@ -84,14 +84,13 @@ pub struct ChildMapResource(pub ChildMap);
 /// System: propagate transforms through the scene graph.
 pub fn hierarchy_system(world: &mut World, _dt: f32) {
     // Ensure ChildMapResource exists.
-    if !world.resource::<ChildMapResource>().is_some() {
+    if world.resource::<ChildMapResource>().is_none() {
         world.insert_resource(ChildMapResource::default());
     }
 
     // Single pass: collect Parent entities + detect orphans + build new ChildMap.
     let mut orphans = Vec::new();
     let mut new_child_map = ChildMap::default();
-    let mut parent_entities = Vec::new();
 
     for arch in world.archetypes().iter() {
         // Only scan archetypes that have Parent component.
@@ -105,7 +104,6 @@ pub fn hierarchy_system(world: &mut World, _dt: f32) {
                 } else {
                     new_child_map.add_child(parent_comp.entity, e);
                 }
-                parent_entities.push(e);
             }
         }
     }

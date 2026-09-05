@@ -52,10 +52,21 @@ impl crate::EngineApp {
                     self.gameplay.day_length, mult
                 ));
             }
-            CommandResult::Give(block, count) => {
+            CommandResult::Give(block, _count) => {
+                // The hotbar is block-oriented (no stack counts), so "give"
+                // places the block into the selected hotbar slot.
+                let reg = self.world_state.world.registry_ref();
+                let Some(id) = reg.id_of(&block) else {
+                    self.gameplay
+                        .chat
+                        .push_message(format!("Unknown block: {block}"));
+                    return;
+                };
+                let slot = self.gameplay.hotbar.selected;
+                self.gameplay.hotbar.set_slot(slot, id);
                 self.gameplay
                     .chat
-                    .push_message(format!("Gave {count} {block} (not yet implemented)"));
+                    .push_message(format!("Gave {block} to hotbar slot {}", slot + 1));
             }
             CommandResult::SetBlock(x, y, z, block) => {
                 let reg = self.world_state.world.registry_ref();
@@ -541,7 +552,7 @@ impl crate::EngineApp {
                     .push_message("  /time speed <x>  - set time speed multiplier".into());
                 self.gameplay
                     .chat
-                    .push_message("  /give <block> [n]- give block items (WIP)".into());
+                    .push_message("  /give <block> [n]- give block to selected hotbar slot".into());
                 self.gameplay
                     .chat
                     .push_message("  /setblock x y z <block>".into());
@@ -580,10 +591,10 @@ impl crate::EngineApp {
                 );
                 self.gameplay
                     .chat
-                    .push_message("  /gamemode <mode> - set gamemode (WIP)".into());
+                    .push_message("  /gamemode <mode> - set gamemode".into());
                 self.gameplay
                     .chat
-                    .push_message("  /difficulty <d>  - set difficulty (WIP)".into());
+                    .push_message("  /difficulty <d>  - set difficulty".into());
                 self.gameplay
                     .chat
                     .push_message("  /kill            - kill the player".into());

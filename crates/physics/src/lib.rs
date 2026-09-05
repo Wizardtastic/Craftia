@@ -209,6 +209,20 @@ fn move_axis(
     hit: &mut [bool; 6],
     axis: usize,
 ) -> glam::Vec3 {
+    // An axis with no movement can neither be blocked nor resolved. This must
+    // be checked before the direction logic below because `0.0f32.signum()`
+    // is `1.0`: treating a stationary axis as "moving positive" applied a
+    // bogus correction that teleported the box out of walls it overlapped.
+    let d = match axis {
+        0 => delta.x,
+        1 => delta.y,
+        _ => delta.z,
+    };
+    if d == 0.0 {
+        return pos;
+    }
+    let moving_pos = d > 0.0;
+
     let mut new_pos = pos + delta;
     let aabb = Aabb::from_center_size(new_pos, half * 2.0);
 
@@ -216,42 +230,64 @@ fn move_axis(
     let min_b = world_to_block(aabb.min);
     let max_b = world_to_block(aabb.max - glam::Vec3::splat(0.001));
 
+    // Pick the MOST RESTRICTIVE correction across every overlapping solid
+    // voxel. The previous "last voxel wins" loop let a farther block's
+    // correction overwrite a closer one, leaving the box embedded in the
+    // nearer block when the swept volume overlapped several solid voxels.
+    let mut correction: Option<f32> = None;
+
     for by in min_b.y..=max_b.y {
         for bz in min_b.z..=max_b.z {
             for bx in min_b.x..=max_b.x {
                 if !world.is_solid(bx, by, bz) {
                     continue;
                 }
-                // Collision on this axis: push the box back to the block face.
-                match axis {
-                    0 => {
-                        if delta.x > 0.0 {
-                            new_pos.x = bx as f32 - half.x - 1e-3;
-                            hit[1] = true; // +X blocked
-                        } else if delta.x < 0.0 {
-                            new_pos.x = (bx + 1) as f32 + half.x + 1e-3;
-                            hit[0] = true; // -X blocked
-                        }
-                    }
-                    1 => {
-                        if delta.y > 0.0 {
-                            new_pos.y = by as f32 - half.y - 1e-3;
-                            hit[2] = true; // +Y blocked (hit ceiling)
-                        } else if delta.y < 0.0 {
-                            new_pos.y = (by + 1) as f32 + half.y + 1e-3;
-                            hit[3] = true; // -Y blocked (on ground)
-                        }
-                    }
-                    2 => {
-                        if delta.z > 0.0 {
-                            new_pos.z = bz as f32 - half.z - 1e-3;
-                            hit[5] = true; // +Z blocked
-                        } else if delta.z < 0.0 {
-                            new_pos.z = (bz + 1) as f32 + half.z + 1e-3;
-                            hit[4] = true; // -Z blocked
-                        }
-                    }
-                    _ => {}
+                // Correction pushing the box back out to the block face it
+                // entered from.
+                let c = match (axis, moving_pos) {
+                    (0, true) => bx as f32 - half.x - 1e-3,
+                    (0, false) => (bx + 1) as f32 + half.x + 1e-3,
+                    (1, true) => by as f32 - half.y - 1e-3,
+                    (1, false) => (by + 1) as f32 + half.y + 1e-3,
+                    (2, true) => bz as f32 - half.z - 1e-3,
+                    (2, false) => (bz + 1) as f32 + half.z + 1e-3,
+                    _ => unreachable!("axis is always 0, 1 or 2"),
+                };
+                correction = Some(match correction {
+                    // Moving positive: the smallest coordinate is closest.
+                    // Moving negative: the largest coordinate is closest.
+                    Some(prev) if moving_pos => prev.min(c),
+                    Some(prev) => prev.max(c),
+                    None => c,
+                });
+            }
+        }
+    }
+
+    if let Some(c) = correction {
+        match axis {
+            0 => {
+                new_pos.x = c;
+                if moving_pos {
+                    hit[1] = true; // +X blocked
+                } else {
+                    hit[0] = true; // -X blocked
+                }
+            }
+            1 => {
+                new_pos.y = c;
+                if moving_pos {
+                    hit[2] = true; // +Y blocked (hit ceiling)
+                } else {
+                    hit[3] = true; // -Y blocked (on ground)
+                }
+            }
+            _ => {
+                new_pos.z = c;
+                if moving_pos {
+                    hit[5] = true; // +Z blocked
+                } else {
+                    hit[4] = true; // -Z blocked
                 }
             }
         }

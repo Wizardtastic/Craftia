@@ -10,14 +10,14 @@
 //!
 //! ```text
 //!   frame()                      tick(N) (TestSim)
-//!     Γöé                              Γöé
-//!     Γû╝                              Γû╝
+//!     │                              │
+//!     ▼                              ▼
 //!   set_player_input(snap)        hold/release
-//!     Γöé                              Γöé
-//!     Γû╝                              Γû╝
-//!   tick_fixed(frame_dt)          tick_fixed(FIXED_DT ├ù N)
-//!     Γöé                              Γöé
-//!     Γöö─Γû║  while acc >= FIXED_DT: ─Γöÿ
+//!     │                              │
+//!     ▼                              ▼
+//!   tick_fixed(frame_dt)          tick_fixed(FIXED_DT × N)
+//!     │                              │
+//!     └─►  while acc >= FIXED_DT: ─┘
 //!           step(FIXED_DT):
 //!             sched.run(&mut ecs, FIXED_DT)
 //!             world.tick_water(FIXED_DT)
@@ -225,7 +225,7 @@ impl Simulation {
         ecs_world.set(player_entity, DrowningState::default());
         ecs_world.insert_resource(PlayerEntity(Some(player_entity)));
 
-        // Two debug entities ┬▒5 blocks East/West so the inspector has
+        // Two debug entities ±5 blocks East/West so the inspector has
         // something to pin/cycle beyond the player.
         voxel_game::spawn_debug_entity(&mut ecs_world, spawn_pos + glam::Vec3::new(5.0, 2.0, 0.0));
         voxel_game::spawn_debug_entity(&mut ecs_world, spawn_pos + glam::Vec3::new(-5.0, 2.0, 0.0));
