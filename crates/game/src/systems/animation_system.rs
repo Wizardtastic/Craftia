@@ -387,7 +387,12 @@ mod tests {
             keyframe_times: vec![0.0, 1.0],
             keyframe_values: vec![
                 [0.0, 0.0, 0.0, 1.0],
-                [0.0, std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2],
+                [
+                    0.0,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    0.0,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                ],
             ],
             interpolation: AnimInterpolation::Linear,
         };

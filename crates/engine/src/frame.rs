@@ -712,76 +712,83 @@ impl crate::EngineApp {
         {
             if let Some(streamer) = &self.world_state.streamer {
                 let eye = self.simulation.player_eye_pos().unwrap_or(camera_now.pos);
-                let result = voxel_game::BlockAction::apply(
-                    &self.world_state.world,
-                    streamer,
-                    &mut self.gameplay.hotbar,
-                    eye,
-                    camera_now.forward(),
-                    clicks,
-                    player_pos_now,
-                );
-                if !result.edits.is_empty() {
-                    // Clone edits for particle spawning before moving into undo.
-                    let edits_for_particles = result.edits.clone();
-                    self.gameplay.undo_redo.push(voxel_game::EditAction {
-                        edits: result.edits,
-                    });
-                    // Spawn particles on block break.
-                    if result.broke {
-                        if let Some(hit) = result.target {
-                            // Skip if block ID is out of range (safety check).
-                            if hit.block_id.0 as usize >= self.world_state.world.registry().count()
-                            {
-                                // Block ID invalid, skip particles.
-                            } else {
+                // Block actions need the player's inventory (selected block,
+                // slot replacement); without a player entity there is nothing
+                // to interact with.
+                if let Some(result) = self.simulation.inventory_mut().map(|inventory| {
+                    voxel_game::BlockAction::apply(
+                        &self.world_state.world,
+                        streamer,
+                        inventory,
+                        eye,
+                        camera_now.forward(),
+                        clicks,
+                        player_pos_now,
+                    )
+                }) {
+                    if !result.edits.is_empty() {
+                        // Clone edits for particle spawning before moving into undo.
+                        let edits_for_particles = result.edits.clone();
+                        self.gameplay.undo_redo.push(voxel_game::EditAction {
+                            edits: result.edits,
+                        });
+                        // Spawn particles on block break.
+                        if result.broke {
+                            if let Some(hit) = result.target {
+                                // Skip if block ID is out of range (safety check).
+                                if hit.block_id.0 as usize
+                                    >= self.world_state.world.registry().count()
+                                {
+                                    // Block ID invalid, skip particles.
+                                } else {
+                                    let pos = glam::Vec3::new(
+                                        hit.block.x as f32 + 0.5,
+                                        hit.block.y as f32 + 0.5,
+                                        hit.block.z as f32 + 0.5,
+                                    );
+                                    let reg = self.world_state.world.registry();
+                                    let def = reg.get(hit.block_id);
+                                    let color = def.map_color;
+                                    let normal = camera_now.forward();
+                                    spawn_particles_break(
+                                        &mut self.render.renderer,
+                                        pos,
+                                        color,
+                                        normal,
+                                    );
+                                }
+                            }
+                        }
+                        // Spawn particles on block place (mirrors the break branch
+                        // above). Iterates `edits_for_particles` because brush-based
+                        // placement may place multiple blocks per click.
+                        if result.placed {
+                            let reg = self.world_state.world.registry();
+                            for edit in &edits_for_particles {
+                                let block_id = voxel_core::BlockId(edit.new_block);
+                                // Skip if block ID is out of range (safety check).
+                                if block_id.0 as usize >= reg.count() {
+                                    continue;
+                                }
                                 let pos = glam::Vec3::new(
-                                    hit.block.x as f32 + 0.5,
-                                    hit.block.y as f32 + 0.5,
-                                    hit.block.z as f32 + 0.5,
+                                    edit.x as f32 + 0.5,
+                                    edit.y as f32 + 0.5,
+                                    edit.z as f32 + 0.5,
                                 );
-                                let reg = self.world_state.world.registry();
-                                let def = reg.get(hit.block_id);
-                                let color = def.map_color;
-                                let normal = camera_now.forward();
-                                spawn_particles_break(
-                                    &mut self.render.renderer,
-                                    pos,
-                                    color,
-                                    normal,
-                                );
+                                let color = reg.get(block_id).map_color;
+                                spawn_particles_place(&mut self.render.renderer, pos, color);
                             }
                         }
-                    }
-                    // Spawn particles on block place (mirrors the break branch
-                    // above). Iterates `edits_for_particles` because brush-based
-                    // placement may place multiple blocks per click.
-                    if result.placed {
-                        let reg = self.world_state.world.registry();
-                        for edit in &edits_for_particles {
-                            let block_id = voxel_core::BlockId(edit.new_block);
-                            // Skip if block ID is out of range (safety check).
-                            if block_id.0 as usize >= reg.count() {
-                                continue;
-                            }
-                            let pos = glam::Vec3::new(
-                                edit.x as f32 + 0.5,
-                                edit.y as f32 + 0.5,
-                                edit.z as f32 + 0.5,
-                            );
-                            let color = reg.get(block_id).map_color;
-                            spawn_particles_place(&mut self.render.renderer, pos, color);
-                        }
-                    }
-                    // Trigger mining swing animation on PlayerState.
-                    if clicks.left {
-                        if let Some(player_entity) = self.simulation.player_entity() {
-                            if let Some(state) = self
-                                .simulation
-                                .ecs_world_mut()
-                                .get_mut::<voxel_game::PlayerState>(player_entity)
-                            {
-                                state.mining_swing = 1.0;
+                        // Trigger mining swing animation on PlayerState.
+                        if clicks.left {
+                            if let Some(player_entity) = self.simulation.player_entity() {
+                                if let Some(state) =
+                                    self.simulation
+                                        .ecs_world_mut()
+                                        .get_mut::<voxel_game::PlayerState>(player_entity)
+                                {
+                                    state.mining_swing = 1.0;
+                                }
                             }
                         }
                     }
@@ -885,32 +892,10 @@ impl crate::EngineApp {
             gt.0 = self.gameplay.game_time;
         }
 
-        // Sync hotbar selection to ECS resource so mining system can read it.
-        if let Some(hotbar_res) = self
-            .simulation
-            .ecs_world_mut()
-            .resource_mut::<voxel_game::HotbarResource>()
-        {
-            let selected = self
-                .gameplay
-                .hotbar
-                .selected_block()
-                .unwrap_or(voxel_core::BlockId::AIR);
-            hotbar_res.selected_block = selected;
-            // Keep the selected tool metadata synchronized with the slot. The
-            // current default palette carries tier 0, while tool-aware callers
-            // can attach a higher tier to a selected slot explicitly.
-            hotbar_res.selected_tool_tier = self.gameplay.hotbar.selected_tool_tier();
-            // Look up the tile index for the held item rendering.
-            if !selected.is_air() {
-                let reg = self.world_state.world.registry();
-                let def = reg.get(selected);
-                // Use the top face (PosY = index 3) tile for the held item.
-                hotbar_res.tile = def.textures.tiles[3] as u32;
-            } else {
-                hotbar_res.tile = 0;
-            }
-        }
+        // The single source of truth for hotbar contents + selection is the
+        // player's `SurvivalInventory` component; `simulation.inventory()` is
+        // the engine-side view of it. `HeldBlock`/tile lookups are written by
+        // the held-item system inside the sim, so no mirror sync needed here.
 
         // Drain one queued console script command per frame (from /exec).
         if let Some(script) = &mut self.gameplay.console_script {

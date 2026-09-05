@@ -1,37 +1,36 @@
-//! Held item system: bridges the engine's Hotbar state → ECS HeldBlock
-//! component on the player entity. Runs each tick so the renderer can
-//! read HeldBlock.tile for first-person held item rendering.
+//! Held item system: writes the `HeldBlock` component on the player entity
+//! from the player's [`SurvivalInventory`] (selected hotbar slot + registry
+//! tile lookup). Runs each tick so the renderer can read `HeldBlock.tile` for
+//! first-person held item rendering.
 
-use voxel_core::BlockId;
 use voxel_ecs::World;
 
 use crate::components::{HeldBlock, PlayerEntity};
+use crate::inventory::SurvivalInventory;
+use crate::systems::PhysicsWorldRes;
 
-/// Resource: hotbar slot → tile index mapping. Inserted by the engine
-/// each frame before running the schedule.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HotbarResource {
-    /// Atlas tile index of the currently selected hotbar slot (0 = air).
-    pub tile: u32,
-    /// BlockId of the currently selected hotbar slot.
-    pub selected_block: BlockId,
-    /// Tier of the currently selected tool. Zero means hand/no tool.
-    /// The hotbar currently stores block IDs, so the engine supplies this
-    /// separately until item/tool definitions are fully data-driven.
-    pub selected_tool_tier: u8,
-}
-
-/// System: writes HeldBlock.tile on the player entity from HotbarResource.
+/// System: writes `HeldBlock.tile` on the player entity from their inventory's
+/// selected hotbar slot. The registry lookup uses the top face (PosY) tile.
 pub fn held_item_system(world: &mut World, _dt: f32) {
     let player_entity = match world.resource::<PlayerEntity>().and_then(|p| p.0) {
         Some(e) => e,
         None => return,
     };
 
-    let tile = world
-        .resource::<HotbarResource>()
-        .map(|h| h.tile)
-        .unwrap_or(0);
+    // Selected block from the player's inventory (empty slot = no held item).
+    let selected = world
+        .get::<SurvivalInventory>(player_entity)
+        .and_then(|inv| inv.selected_block());
+
+    // Registry access for the tile index; skip if the physics world isn't
+    // wired yet (nothing to look up).
+    let tile = match selected {
+        Some(id) if !id.is_air() => world
+            .resource::<PhysicsWorldRes>()
+            .map(|phys| phys.0.registry().get(id).textures.tiles[3] as u32)
+            .unwrap_or(0),
+        _ => 0,
+    };
 
     if let Some(held) = world.get_mut::<HeldBlock>(player_entity) {
         held.tile = tile;

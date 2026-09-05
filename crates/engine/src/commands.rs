@@ -52,9 +52,10 @@ impl crate::EngineApp {
                     self.gameplay.day_length, mult
                 ));
             }
-            CommandResult::Give(block, _count) => {
-                // The hotbar is block-oriented (no stack counts), so "give"
-                // places the block into the selected hotbar slot.
+            CommandResult::Give(block, count) => {
+                // The hotbar is block-oriented (one item per slot), so "give"
+                // places `count` items of the block into the selected hotbar
+                // slot; overflow merges into existing stacks / empty slots.
                 let reg = self.world_state.world.registry_ref();
                 let Some(id) = reg.id_of(&block) else {
                     self.gameplay
@@ -62,11 +63,25 @@ impl crate::EngineApp {
                         .push_message(format!("Unknown block: {block}"));
                     return;
                 };
-                let slot = self.gameplay.hotbar.selected;
-                self.gameplay.hotbar.set_slot(slot, id);
-                self.gameplay
-                    .chat
-                    .push_message(format!("Gave {block} to hotbar slot {}", slot + 1));
+                let Some(inv) = self.simulation.inventory_mut() else {
+                    self.gameplay
+                        .chat
+                        .push_message("No player inventory yet".into());
+                    return;
+                };
+                let stack = voxel_game::ItemStack::new(id, count as u16);
+                let leftover = inv.insert(stack);
+                match leftover {
+                    None => self
+                        .gameplay
+                        .chat
+                        .push_message(format!("Gave {count} {block}")),
+                    Some(rest) => self.gameplay.chat.push_message(format!(
+                        "Gave {} {block} (inventory full: {} didn't fit)",
+                        count - rest.count as i32,
+                        rest.count
+                    )),
+                }
             }
             CommandResult::SetBlock(x, y, z, block) => {
                 let reg = self.world_state.world.registry_ref();

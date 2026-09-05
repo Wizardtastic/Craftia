@@ -12,8 +12,8 @@ use voxel_ecs::World;
 use voxel_world::registry::ToolType;
 
 use crate::components::{MiningProgress, PlayerEntity, PlayerInput, PlayerLookTarget, Transform};
+use crate::inventory::SurvivalInventory;
 use crate::item_entity::ItemEntity;
-use crate::systems::held_item_system::HotbarResource;
 use crate::systems::PhysicsWorldRes;
 
 /// Speed multiplier for each tool type when used on the correct block type.
@@ -209,15 +209,12 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
     let block_def = registry.get(block_id);
 
     // Get the player's held item to check tool type and speed.
-    let held = world
-        .resource::<HotbarResource>()
-        .map(|h| h.selected_block)
-        .unwrap_or(BlockId::AIR);
+    let (held, held_tool_tier) = world
+        .get::<SurvivalInventory>(player_entity)
+        .map(|inv| (inv.selected_block(), inv.selected_tool_tier()))
+        .unwrap_or((None, 0));
+    let held = held.unwrap_or(BlockId::AIR);
     let has_correct_tool = held_is_correct_tool(held, block_def.required_tool, &registry);
-    let held_tool_tier = world
-        .resource::<HotbarResource>()
-        .map(|h| h.selected_tool_tier)
-        .unwrap_or(0);
     let tool_speed =
         tool_speed_for_block(registry.get(held).required_tool, block_def.required_tool);
 

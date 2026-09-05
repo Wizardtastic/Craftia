@@ -671,9 +671,9 @@ impl crate::EngineApp {
             ui.rect_border(x, y0, slot, slot, 2.0, [80, 80, 80, 220]);
 
             let block_id = self
-                .gameplay
-                .hotbar
-                .slot(i)
+                .simulation
+                .inventory()
+                .and_then(|inv| inv.hotbar_block(i))
                 .unwrap_or(voxel_core::BlockId::AIR);
             if !block_id.is_air() {
                 let def = reg.get(block_id);
@@ -689,7 +689,7 @@ impl crate::EngineApp {
                 );
             }
 
-            if i == self.gameplay.hotbar.selected {
+            if i == self.simulation.inventory().map_or(0, |inv| inv.selected) {
                 ui.rect_border(
                     x - 2.0,
                     y0 - 2.0,
@@ -712,9 +712,9 @@ impl crate::EngineApp {
 
         // Get the selected block.
         let block_id = self
-            .gameplay
-            .hotbar
-            .selected_block()
+            .simulation
+            .inventory()
+            .and_then(|inv| inv.selected_block())
             .unwrap_or(voxel_core::BlockId::AIR);
         if block_id.is_air() {
             return;
@@ -1489,9 +1489,9 @@ impl crate::EngineApp {
             let idx = row * cols + col;
             if col < cols && row < visible_rows && idx < filtered_items.len() {
                 let item = filtered_items[idx];
-                self.gameplay
-                    .hotbar
-                    .set_slot(self.gameplay.hotbar.selected, item.id);
+                if let Some(inv) = self.simulation.inventory_mut() {
+                    inv.set_hotbar_block(inv.selected, item.id);
+                }
                 self.gameplay
                     .chat
                     .push_message(format!("Selected: {}", item.name));
@@ -1507,7 +1507,9 @@ impl crate::EngineApp {
         if mx >= hotbar_x0 && mx < hotbar_x0 + grid_w && my >= cy && my < cy + hotbar_h {
             let slot_idx = ((mx - hotbar_x0) / (slot_size + slot_gap)) as usize;
             if slot_idx < 9 {
-                self.gameplay.hotbar.selected = slot_idx;
+                if let Some(inv) = self.simulation.inventory_mut() {
+                    inv.select(slot_idx);
+                }
             }
         }
     }
@@ -4164,7 +4166,7 @@ impl crate::EngineApp {
             ui.quad(sx, cy + slot_size - 2.0, slot_size, 2.0, slate_light);
 
             // Highlight selected hotbar slot
-            if i == self.gameplay.hotbar.selected {
+            if i == self.simulation.inventory().map_or(0, |inv| inv.selected) {
                 ui.rect_border(
                     sx - 1.0,
                     cy - 1.0,
@@ -4177,9 +4179,9 @@ impl crate::EngineApp {
 
             // Show hotbar item if any
             let block_id = self
-                .gameplay
-                .hotbar
-                .slot(i)
+                .simulation
+                .inventory()
+                .and_then(|inv| inv.hotbar_block(i))
                 .unwrap_or(voxel_core::BlockId::AIR);
             if !block_id.is_air() {
                 // Try to find the item in our creative cache to get its tile

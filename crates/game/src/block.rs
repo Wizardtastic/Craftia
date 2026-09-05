@@ -12,7 +12,7 @@ use voxel_physics::{raycast_voxels, RayHit};
 use voxel_world::{ChunkStreamer, World};
 
 use crate::input::Clicks;
-use crate::inv::Hotbar;
+use crate::inventory::SurvivalInventory;
 use crate::undo::BlockEdit;
 
 /// How far the player can reach to interact with a block (Minecraft creative is
@@ -37,7 +37,7 @@ impl BlockAction {
     pub fn apply(
         world: &Arc<World>,
         streamer: &ChunkStreamer,
-        hotbar: &mut Hotbar,
+        inventory: &mut SurvivalInventory,
         eye: glam::Vec3,
         look_dir: glam::Vec3,
         clicks: Clicks,
@@ -74,7 +74,7 @@ impl BlockAction {
             } else if clicks.right {
                 // No slot selected -> nothing to place. Returning early keeps
                 // the rest of the function focusing on actual placement work.
-                let Some(id) = hotbar.selected_block() else {
+                let Some(id) = inventory.selected_block() else {
                     return out;
                 };
                 let reg = world.registry();
@@ -92,7 +92,7 @@ impl BlockAction {
                             out.placed = true;
                             // Swap to water_bucket.
                             if let Some(wb_id) = reg.id_of("water_bucket") {
-                                hotbar.set_slot(hotbar.selected, wb_id);
+                                inventory.set_hotbar_block(inventory.selected, wb_id);
                             }
                             let cp = block_to_chunk(h.block);
                             streamer.request_remesh(cp);
@@ -118,7 +118,7 @@ impl BlockAction {
                             out.placed = true;
                             // Swap to empty bucket.
                             if let Some(b_id) = reg.id_of("bucket") {
-                                hotbar.set_slot(hotbar.selected, b_id);
+                                inventory.set_hotbar_block(inventory.selected, b_id);
                             }
                             let cp = block_to_chunk(place);
                             streamer.request_remesh(cp);
@@ -178,7 +178,7 @@ fn neighbours(p: ChunkPos) -> [ChunkPos; 6] {
 mod tests {
     use super::*;
     use crate::input::Clicks;
-    use crate::inv::Hotbar;
+    use crate::inventory::SurvivalInventory;
     use voxel_core::ChunkPos;
     use voxel_world::chunk::Chunk;
 
@@ -195,11 +195,11 @@ mod tests {
     fn break_replaces_block_with_air() {
         let world = world_with_block(BlockId(2));
         let streamer = ChunkStreamer::spawn(world.clone(), Default::default()).unwrap();
-        let mut hotbar = Hotbar::new();
+        let mut inventory = SurvivalInventory::new();
         let result = BlockAction::apply(
             &world,
             &streamer,
-            &mut hotbar,
+            &mut inventory,
             glam::Vec3::new(5.5, 10.0, 5.5),
             glam::Vec3::new(0.0, -1.0, 0.0),
             Clicks {
@@ -221,11 +221,11 @@ mod tests {
             .unwrap();
         let world = world_with_block(bedrock_id);
         let streamer = ChunkStreamer::spawn(world.clone(), Default::default()).unwrap();
-        let mut hotbar = Hotbar::new();
+        let mut inventory = SurvivalInventory::new();
         let result = BlockAction::apply(
             &world,
             &streamer,
-            &mut hotbar,
+            &mut inventory,
             glam::Vec3::new(5.5, 10.0, 5.5),
             glam::Vec3::new(0.0, -1.0, 0.0),
             Clicks {
@@ -246,14 +246,14 @@ mod tests {
             .unwrap();
         let world = world_with_block(stone_id);
         let streamer = ChunkStreamer::spawn(world.clone(), Default::default()).unwrap();
-        let mut hotbar = Hotbar::new();
-        hotbar.set_slot(0, stone_id);
+        let mut inventory = SurvivalInventory::new();
+        inventory.set_hotbar_block(0, stone_id);
         // Look at the stone from the side (positive X direction). The place
         // position would be (4, 5, 5) which is air — placing should succeed.
         let result = BlockAction::apply(
             &world,
             &streamer,
-            &mut hotbar,
+            &mut inventory,
             glam::Vec3::new(0.5, 5.5, 5.5),
             glam::Vec3::new(1.0, 0.0, 0.0),
             Clicks {

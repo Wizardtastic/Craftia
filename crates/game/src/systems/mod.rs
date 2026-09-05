@@ -28,7 +28,7 @@ pub use armor_system::armor_system;
 pub use drowning_system::{drowning_system, DrowningState};
 pub use environmental_system::environmental_damage_system;
 pub use health_system::health_system;
-pub use held_item_system::{held_item_system, HotbarResource};
+pub use held_item_system::held_item_system;
 pub use hierarchy_system::{hierarchy_system, ChildMap, ChildMapResource};
 pub use hunger_system::{hunger_system, DifficultyResource, GameTimeResource};
 pub use input_system::{input_system, InputResource, InputSnapshot};

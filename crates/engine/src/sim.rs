@@ -66,7 +66,6 @@ use voxel_game::{
     // Survival mode components
     Health,
     HeldBlock,
-    HotbarResource,
     Hunger,
     InputResource,
     InputSnapshot,
@@ -80,6 +79,7 @@ use voxel_game::{
     PlayerLookTarget,
     PlayerState,
     RegenState,
+    SurvivalInventory,
     Transform,
     Velocity,
     ViewMode,
@@ -197,7 +197,6 @@ impl Simulation {
         ecs_world.insert_resource(DifficultyResource::default());
         ecs_world.insert_resource(GameTimeResource::default());
         ecs_world.insert_resource(PlayerLookTarget::default());
-        ecs_world.insert_resource(HotbarResource::default());
 
         // Spawn the player with the full component set the gameplay
         // systems expect.
@@ -223,6 +222,11 @@ impl Simulation {
         ecs_world.set(player_entity, EatingState::default());
         ecs_world.set(player_entity, Experience::default());
         ecs_world.set(player_entity, DrowningState::default());
+        // The consolidated inventory lives on the player entity; populate the
+        // default creative palette so the hotbar starts non-empty.
+        let mut inventory = SurvivalInventory::new();
+        inventory.populate_defaults(world.registry().as_ref());
+        ecs_world.set(player_entity, inventory);
         ecs_world.insert_resource(PlayerEntity(Some(player_entity)));
 
         // Two debug entities ±5 blocks East/West so the inspector has
@@ -378,6 +382,20 @@ impl Simulation {
     /// Resolve the player entity handle from the ECS resource.
     pub fn player_entity(&self) -> Option<Entity> {
         self.ecs_world.resource::<PlayerEntity>().and_then(|p| p.0)
+    }
+
+    /// Read the player's inventory (contents + hotbar selection). The
+    /// component on the player entity is the single source of truth.
+    pub fn inventory(&self) -> Option<&voxel_game::SurvivalInventory> {
+        let e = self.player_entity()?;
+        self.ecs_world.get::<voxel_game::SurvivalInventory>(e)
+    }
+
+    /// Mutably access the player's inventory, e.g. for hotbar selection and
+    /// block placement. Returns `None` before the player entity exists.
+    pub fn inventory_mut(&mut self) -> Option<&mut voxel_game::SurvivalInventory> {
+        let e = self.player_entity()?;
+        self.ecs_world.get_mut::<voxel_game::SurvivalInventory>(e)
     }
 
     /// Read the player's world-space position from the ECS, if any.

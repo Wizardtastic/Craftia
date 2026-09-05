@@ -2,14 +2,15 @@
 //!
 //! This system:
 //! 1. Checks for item entities near the player
-//! 2. If within vacuum range and pickup delay is 0, try to merge into inventory
-//! 3. For now, adds to the hotbar (simplified inventory)
+//! 2. If within vacuum range and pickup delay is 0, inserts the item into
+//!    the player's [`SurvivalInventory`]
+//! 3. If the inventory is full, the item stays on the ground
 
 use glam::Vec3;
 use voxel_ecs::{Entity, World};
 
 use crate::components::{PlayerEntity, Transform};
-use crate::inv::Hotbar;
+use crate::inventory::SurvivalInventory;
 use crate::item_entity::ItemEntity;
 
 /// Vacuum range in blocks (items within this range are attracted to the player).
@@ -75,24 +76,15 @@ pub fn item_pickup_system(world: &mut World, _dt: f32) {
 
     // Pick up items.
     for (entity, item) in to_pickup {
-        // Try to add to hotbar.
-        if let Some(hotbar) = world.resource_mut::<Hotbar>() {
+        // Try to add to the player's inventory.
+        if let Some(inventory) = world.get_mut::<SurvivalInventory>(player_entity) {
             let block_id = item.block_id();
+            let stack = crate::items::ItemStack::single(block_id);
 
-            // Prefer an empty slot; a matching occupied slot just means the
-            // item type is already carried (there are no counts yet), so
-            // dropping a duplicate on top would lose the item.
-            let mut added = false;
-            for i in 0..9 {
-                if matches!(hotbar.slot(i), Some(id) if id.is_air()) {
-                    hotbar.set_slot(i, block_id);
-                    added = true;
-                    break;
-                }
-            }
-
-            // If no empty slot, the item stays on the ground.
-            if !added {
+            // Merge into an existing stack or take the first empty slot;
+            // if nothing fits, the item stays on the ground.
+            let remainder = inventory.insert(stack);
+            if remainder.is_some() {
                 continue;
             }
         }

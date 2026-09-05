@@ -1,7 +1,7 @@
 //! `voxel-game` — gameplay logic: components, systems, player actions.
 //!
 //! The engine crate wires this into the main loop. The legacy per-struct
-//! modules (`block`, `chat`, `input`, `inv`, `player`, `undo`) coexist
+//! modules (`block`, `chat`, `input`, `player`, `undo`) coexist
 //! with the new ECS-based `components` and `systems`; the engine
 //! integration agent will retire the legacy ones once everything is
 //! ported.
@@ -12,7 +12,6 @@ pub mod components;
 pub mod console;
 pub mod editor_entities;
 pub mod input;
-pub mod inv;
 pub mod inventory;
 pub mod item_entity;
 pub mod items;
@@ -31,8 +30,7 @@ pub use components::{
 pub use console::DeveloperConsole;
 pub use editor_entities::{spawn_debug_entity, DebugEntityMarker};
 pub use input::InputState;
-pub use inv::Hotbar;
-pub use inventory::{InventorySlot, SurvivalInventory};
+pub use inventory::{InventorySlot, SurvivalInventory, HOTBAR_SLOTS};
 pub use item_entity::ItemEntity;
 pub use items::ItemStack;
 pub use player::PlayerConfig;
@@ -42,11 +40,10 @@ pub use systems::{
     lifecycle_system, movement_system, progressive_mining_system, property_animation_system,
     regeneration_system, xp_collection_system, AnimChannel, AnimInterpolation, AnimPath,
     AnimationClip, AnimationDataResource, CameraResource, ChildMap, ChildMapResource,
-    DifficultyResource, DrowningState, GameTimeResource, HotbarResource, InputResource,
-    InputSnapshot, ModelAnimationData, ModelSkinData, PhysicsWorldRes, SkinDataResource, SkinInfo,
-    EYE_HEIGHT, EYE_HEIGHT_SNEAK, FLY_SPEED, GRAVITY, JUMP_SPEED, MOUSE_SENSITIVITY, PLAYER_HALF,
-    SNEAK_SPEED, SPRINT_SPEED, SWIM_BASE_FRACTION, SWIM_UP_SPEED, TERMINAL_VELOCITY, WALK_SPEED,
-    WATER_DRAG,
+    DifficultyResource, DrowningState, GameTimeResource, InputResource, InputSnapshot,
+    ModelAnimationData, ModelSkinData, PhysicsWorldRes, SkinDataResource, SkinInfo, EYE_HEIGHT,
+    EYE_HEIGHT_SNEAK, FLY_SPEED, GRAVITY, JUMP_SPEED, MOUSE_SENSITIVITY, PLAYER_HALF, SNEAK_SPEED,
+    SPRINT_SPEED, SWIM_BASE_FRACTION, SWIM_UP_SPEED, TERMINAL_VELOCITY, WALK_SPEED, WATER_DRAG,
 };
 pub use undo::{BlockEdit, EditAction, UndoRedoState};
 

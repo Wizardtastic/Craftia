@@ -28,7 +28,7 @@ use crate::ui::SliderRange;
 use voxel_core::{Point, Rect};
 
 use voxel_game::input::Action;
-use voxel_game::{ChatState, CommandResult, DeveloperConsole, Hotbar, InputState, PlayerConfig};
+use voxel_game::{ChatState, CommandResult, DeveloperConsole, InputState, PlayerConfig};
 use voxel_render::{FileWatcher, FontAtlas, GpuTimings, Renderer, RendererConfig};
 use voxel_world::{ChunkStreamer, StreamConfig, World};
 
@@ -308,8 +308,6 @@ pub fn update_particles(renderer: &mut Option<Renderer>, dt: f32) {
 pub(crate) struct GamePlayState {
     /// Spawn position (used as fallback before ECS player is ready).
     pub spawn_pos: Vec3,
-    /// 9-slot hotbar.
-    pub hotbar: Hotbar,
     /// Current game state (playing vs pause menu).
     pub game_state: GameState,
     /// Game time in seconds (wraps at day_length).
@@ -395,10 +393,9 @@ pub(crate) struct SettingsWidgets {
 }
 
 impl GamePlayState {
-    fn new(spawn_pos: Vec3, hotbar: Hotbar, day_length: f64) -> Self {
+    fn new(spawn_pos: Vec3, day_length: f64) -> Self {
         Self {
             spawn_pos,
-            hotbar,
             game_state: GameState::TitleScreen,
             game_time: 300.0, // start at dawn
             day_length,
@@ -834,8 +831,6 @@ impl EngineApp {
         // also wants the block-picker cache populated before the Self literal).
         let spawn_pos = Vec3::from(spawn);
         let day_length = config.day_length;
-        let mut hotbar = Hotbar::new();
-        hotbar.populate_defaults(&world.registry());
         let keybinds = config.keybinds.resolve();
         let render = RenderState::new(&config);
 
@@ -843,7 +838,7 @@ impl EngineApp {
         // `draw_block_picker` / `handle_block_picker_click` can read from the
         // precomputed `(BlockId, name)` list instead of walking the registry
         // every frame (Phase 4 #10).
-        let mut gameplay = GamePlayState::new(spawn_pos, hotbar, day_length);
+        let mut gameplay = GamePlayState::new(spawn_pos, day_length);
         gameplay.populate_block_picker_cache(&world.registry());
         // Populate edit palette categories.
         {
@@ -1677,7 +1672,7 @@ impl ApplicationHandler for EngineApp {
                             }
                         }
                     }
-                    // Hotbar slot selection (Digit1-9) — always hardcoded.
+                    // Inventory hotbar slot selection (Digit1-9) — always hardcoded.
                     if pressed {
                         let slot = match code {
                             KeyCode::Digit1 => Some(0),
@@ -1692,8 +1687,10 @@ impl ApplicationHandler for EngineApp {
                             _ => None,
                         };
                         if let Some(idx) = slot {
-                            self.gameplay.hotbar.select(idx);
+                            if let Some(inv) = self.simulation.inventory_mut() {
+                                inv.select(idx);
                             }
+                        }
                     }
                     } // end Playing-only keybind guard
                     else if pressed {
