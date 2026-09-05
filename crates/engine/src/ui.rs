@@ -74,6 +74,115 @@ fn format_last_played(timestamp_secs: &str) -> String {
     }
 }
 
+/// Fixed layout for the survival inventory screen, shared by the draw
+/// and click handlers so hit-testing always matches what is rendered.
+struct InventoryLayout {
+    /// Panel top-left.
+    panel_x: f32,
+    panel_y: f32,
+    panel_w: f32,
+    panel_h: f32,
+    /// Top-left of each slot grid (armor / main / hotbar), logical px.
+    armor_xy: (f32, f32),
+    offhand_xy: (f32, f32),
+    main_xy: (f32, f32),
+    hotbar_xy: (f32, f32),
+    slot: f32,
+    gap: f32,
+}
+
+const INV_COLS: usize = 9;
+const INV_ROWS: usize = 3;
+
+impl InventoryLayout {
+    fn new(w: f32, h: f32) -> Self {
+        let slot = 44.0;
+        let gap = 4.0;
+        let grid_w = INV_COLS as f32 * slot + (INV_COLS - 1) as f32 * gap;
+        let panel_pad = 14.0;
+        // Side column (armor/offhand) + label gutter sits left of the grid.
+        let side_w = slot * 2.0 + gap + panel_pad;
+        let panel_w = side_w + grid_w + panel_pad * 2.0;
+        let panel_h = panel_pad * 2.0 + 20.0 + INV_ROWS as f32 * (slot + gap) + 8.0 + slot + 20.0;
+        let panel_x = (w - panel_w) * 0.5;
+        let panel_y = (h - panel_h) * 0.5;
+        let grid_x0 = panel_x + panel_pad + side_w;
+        let grid_y0 = panel_y + panel_pad + 20.0;
+        Self {
+            panel_x,
+            panel_y,
+            panel_w,
+            panel_h,
+            armor_xy: (panel_x + panel_pad, grid_y0),
+            offhand_xy: (panel_x + panel_pad, grid_y0 + 4.0 * (slot + gap)),
+            main_xy: (grid_x0, grid_y0),
+            hotbar_xy: (grid_x0, grid_y0 + INV_ROWS as f32 * (slot + gap) + 8.0),
+            slot,
+            gap,
+        }
+    }
+
+    /// Rect of a specific slot, or `None` if out of range.
+    fn slot_rect(&self, s: voxel_game::InventorySlot) -> Option<Rect> {
+        let gx = |x: f32, y: f32| Rect::from_xywh(x, y, self.slot, self.slot);
+        match s {
+            voxel_game::InventorySlot::Main(i) if i < 27 => {
+                let col = (i % INV_COLS) as f32;
+                let row = (i / INV_COLS) as f32;
+                Some(gx(
+                    self.main_xy.0 + col * (self.slot + self.gap),
+                    self.main_xy.1 + row * (self.slot + self.gap),
+                ))
+            }
+            voxel_game::InventorySlot::Hotbar(i) if i < 9 => Some(gx(
+                self.hotbar_xy.0 + i as f32 * (self.slot + self.gap),
+                self.hotbar_xy.1,
+            )),
+            voxel_game::InventorySlot::Armor(i) if i < 4 => Some(gx(
+                self.armor_xy.0,
+                self.armor_xy.1 + i as f32 * (self.slot + self.gap),
+            )),
+            voxel_game::InventorySlot::Offhand => Some(gx(self.offhand_xy.0, self.offhand_xy.1)),
+            _ => None,
+        }
+    }
+
+    /// Slot under the given logical-pixel position, if any.
+    fn slot_at(&self, mx: f32, my: f32) -> Option<voxel_game::InventorySlot> {
+        let inside =
+            |r: &Rect, px: f32, py: f32| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
+        let mut hit = None;
+        for i in 0..27 {
+            let r = self.slot_rect(voxel_game::InventorySlot::Main(i)).unwrap();
+            if inside(&r, mx, my) {
+                hit = Some(voxel_game::InventorySlot::Main(i));
+            }
+        }
+        for i in 0..9 {
+            let r = self
+                .slot_rect(voxel_game::InventorySlot::Hotbar(i))
+                .unwrap();
+            if inside(&r, mx, my) {
+                hit = Some(voxel_game::InventorySlot::Hotbar(i));
+            }
+        }
+        for i in 0..4 {
+            let r = self.slot_rect(voxel_game::InventorySlot::Armor(i)).unwrap();
+            if inside(&r, mx, my) {
+                hit = Some(voxel_game::InventorySlot::Armor(i));
+            }
+        }
+        if inside(
+            &self.slot_rect(voxel_game::InventorySlot::Offhand).unwrap(),
+            mx,
+            my,
+        ) {
+            hit = Some(voxel_game::InventorySlot::Offhand);
+        }
+        hit
+    }
+}
+
 impl crate::EngineApp {
     /// Build the UI overlay for this frame: crosshair + hotbar when playing,
     /// or the pause/exit menu when paused.
@@ -148,6 +257,9 @@ impl crate::EngineApp {
                 }
                 if self.gameplay.block_picker_open {
                     self.draw_block_picker(&mut ui, w, h);
+                }
+                if self.gameplay.inventory_open {
+                    self.draw_inventory_screen(&mut ui, w, h);
                 }
                 self.draw_chat(&mut ui, w, h);
                 if self.gameplay.console.open {
@@ -698,6 +810,191 @@ impl crate::EngineApp {
                     3.0,
                     [255, 255, 255, 255],
                 );
+            }
+        }
+    }
+
+    /// Draw one inventory slot: frame + block icon for non-empty stacks.
+    fn draw_inv_slot(
+        &self,
+        ui: &mut UiDrawData,
+        rect: Rect,
+        stack: &voxel_game::ItemStack,
+        selected: bool,
+        reg: &voxel_world::BlockRegistry,
+    ) {
+        ui.quad(rect.x, rect.y, rect.w, rect.h, [36, 36, 40, 220]);
+        ui.rect_border(
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            2.0,
+            if selected {
+                [224, 168, 62, 255]
+            } else {
+                [90, 90, 96, 220]
+            },
+        );
+        if !stack.is_empty() {
+            let def = reg.get(stack.id());
+            let tile = def.textures.tile(voxel_world::registry::Face::PosX);
+            let pad = 4.0;
+            ui.block_icon(
+                rect.x + pad,
+                rect.y + pad,
+                rect.w - pad * 2.0,
+                rect.h - pad * 2.0,
+                tile,
+                [255, 255, 255, 255],
+            );
+            // Stack count (bottom-right), only when > 1.
+            if stack.count > 1 {
+                let label = stack.count.to_string();
+                let tw = self.render.font.text_width(&label, 1.0);
+                ui.text(
+                    &label,
+                    rect.x + rect.w - tw - 3.0,
+                    rect.y + rect.h - 12.0,
+                    1.0,
+                    [240, 240, 240, 255],
+                    &self.render.font,
+                );
+            }
+        }
+    }
+
+    /// Draw the survival inventory screen: main 9×3 grid, hotbar row, armor
+    /// column, and offhand slot. Interactions are handled by
+    /// [`Self::handle_inventory_click`], which recomputes this layout.
+    fn draw_inventory_screen(&self, ui: &mut UiDrawData, w: f32, h: f32) {
+        let l = InventoryLayout::new(w, h);
+        let Some(inv) = self.simulation.inventory() else {
+            return;
+        };
+        let reg = self.world_state.world.registry();
+
+        // Dim the world behind the panel.
+        ui.quad(0.0, 0.0, w, h, [0, 0, 0, 140]);
+
+        // Panel + title.
+        ui.quad(
+            l.panel_x,
+            l.panel_y,
+            l.panel_w,
+            l.panel_h,
+            [28, 28, 32, 242],
+        );
+        ui.rect_border(
+            l.panel_x,
+            l.panel_y,
+            l.panel_w,
+            l.panel_h,
+            2.0,
+            [90, 90, 96, 255],
+        );
+        ui.text(
+            "Inventory",
+            l.panel_x + 14.0,
+            l.panel_y + 10.0,
+            1.2,
+            [235, 235, 235, 255],
+            &self.render.font,
+        );
+
+        // Armor column.
+        for (i, name) in ["Helm", "Chest", "Legs", "Boots"].iter().enumerate() {
+            let slot = voxel_game::InventorySlot::Armor(i);
+            let rect = l.slot_rect(slot).unwrap();
+            self.draw_inv_slot(ui, rect, inv.get_slot(slot), false, &reg);
+            ui.text(
+                name,
+                rect.x,
+                rect.y - 13.0,
+                1.0,
+                [170, 170, 175, 255],
+                &self.render.font,
+            );
+        }
+        // Offhand slot.
+        let off = voxel_game::InventorySlot::Offhand;
+        let off_rect = l.slot_rect(off).unwrap();
+        self.draw_inv_slot(ui, off_rect, inv.get_slot(off), false, &reg);
+        ui.text(
+            "Offhand",
+            off_rect.x,
+            off_rect.y - 13.0,
+            1.0,
+            [170, 170, 175, 255],
+            &self.render.font,
+        );
+
+        // Main 9×3 grid.
+        for i in 0..27 {
+            let slot = voxel_game::InventorySlot::Main(i);
+            let rect = l.slot_rect(slot).unwrap();
+            self.draw_inv_slot(ui, rect, inv.get_slot(slot), false, &reg);
+        }
+
+        // Hotbar row (highlight the selected slot).
+        for i in 0..9 {
+            let slot = voxel_game::InventorySlot::Hotbar(i);
+            let rect = l.slot_rect(slot).unwrap();
+            self.draw_inv_slot(ui, rect, inv.get_slot(slot), inv.selected == i, &reg);
+        }
+
+        // Hint line.
+        ui.text(
+            "Left-click: move stack - Right-click: half/one - Shift-click: quick-move - I/Esc: close",
+            l.panel_x + 14.0,
+            l.panel_y + l.panel_h - 18.0,
+            1.0,
+            [150, 150, 155, 255],
+            &self.render.font,
+        );
+    }
+
+    /// Handle a click on the survival inventory screen. `left`/`right` mirror
+    /// the mouse buttons; `shift` enables quick-move. Currently supports
+    /// shift-click quick-move (main <-> hotbar) and plain left-click swaps
+    /// between two slots; armor/offhand accept swaps so players can equip.
+    pub(crate) fn handle_inventory_click(&mut self, left: bool, _right: bool, shift: bool) {
+        let (w, h) = self.render.logical_size();
+        let l = InventoryLayout::new(w, h);
+        let (mx, my) = (self.gameplay.mouse_pos.x, self.gameplay.mouse_pos.y);
+        let Some(slot) = l.slot_at(mx, my) else {
+            return;
+        };
+        let Some(inv) = self.simulation.inventory_mut() else {
+            return;
+        };
+
+        if shift && left {
+            inv.shift_click_merge(slot);
+            return;
+        }
+        if !left {
+            // Right-click: not wired up yet — treat as a no-op rather than a
+            // silent stack swap.
+            return;
+        }
+
+        // Left-click swap: clicking armor/offhand equips from the storage
+        // zones and unequips back; storage↔storage swaps move whole stacks.
+        match (self.gameplay.inv_cursor.take(), slot) {
+            (None, from) => {
+                // First click picks the stack up (only for non-empty slots).
+                if !inv.get_slot(from).is_empty() {
+                    self.gameplay.inv_cursor = Some(from);
+                }
+            }
+            (Some(from), to) if from == to => {
+                // Clicked the same slot again: put it back.
+                self.gameplay.inv_cursor = None;
+            }
+            (Some(from), to) => {
+                inv.swap(from, to);
+                self.gameplay.inv_cursor = None;
             }
         }
     }
@@ -3223,6 +3520,7 @@ impl crate::EngineApp {
             ("Fly", &self.config.keybinds.fly),
             ("Pause", &self.config.keybinds.pause),
             ("Block Picker", &self.config.keybinds.block_picker),
+            ("Inventory", &self.config.keybinds.inventory),
             ("Edit Mode", &self.config.keybinds.edit_mode),
         ];
         for (label, key) in keybinds.iter() {

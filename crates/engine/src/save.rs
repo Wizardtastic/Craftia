@@ -14,6 +14,7 @@ use voxel_game::Hunger;
 use voxel_game::PlayerEntity;
 use voxel_game::PlayerInput;
 use voxel_game::PlayerState;
+use voxel_game::SurvivalInventory;
 use voxel_game::Transform;
 use voxel_game::Velocity;
 
@@ -154,6 +155,11 @@ struct EntitySave {
     experience: Option<Experience>,
     #[serde(default)]
     game_mode: Option<GameMode>,
+    /// Player inventory (contents + hotbar selection). `None` in older saves
+    /// without an entities.json inventory field; the player then starts with
+    /// the default palette.
+    #[serde(default)]
+    inventory: Option<SurvivalInventory>,
 }
 
 impl crate::EngineApp {
@@ -183,6 +189,7 @@ impl crate::EngineApp {
                 hunger: ecs.get::<Hunger>(player).copied(),
                 experience: ecs.get::<Experience>(player).copied(),
                 game_mode: ecs.get::<GameMode>(player).copied(),
+                inventory: ecs.get::<SurvivalInventory>(player).cloned(),
             });
             break;
         }
@@ -244,6 +251,9 @@ impl crate::EngineApp {
             }
             if let Some(gm) = entry.game_mode {
                 ecs.set(player, gm);
+            }
+            if let Some(inv) = entry.inventory {
+                ecs.set(player, inv);
             }
             break;
         }

@@ -428,6 +428,15 @@ impl crate::EngineApp {
             clicks.right = false;
         }
 
+        // Handle survival inventory screen clicks (both buttons; right-click
+        // picks up half / places one). Shift state decides quick-move.
+        if self.gameplay.inventory_open && (clicks.left || clicks.right) {
+            let shift = self.input.input.shift_held;
+            self.handle_inventory_click(clicks.left, clicks.right, shift);
+            clicks.left = false;
+            clicks.right = false;
+        }
+
         // Handle ECS inspector clicks (left = pin the row under cursor).
         if self.gameplay.ecs_inspector && clicks.left {
             self.handle_ecs_inspector_click();
@@ -512,8 +521,8 @@ impl crate::EngineApp {
                     // Still tick so systems like regen can run (but movement is zeroed).
 
                     self.simulation.tick_fixed(frame_dt)
-                } else if self.gameplay.block_picker_open {
-                    // Block picker (creative inventory) is open — no movement, no mouse look.
+                } else if self.gameplay.block_picker_open || self.gameplay.inventory_open {
+                    // An inventory overlay is open — no movement, no mouse look.
                     if self.input.cursor_locked {
                         self.unlock_cursor();
                     }
@@ -708,6 +717,7 @@ impl crate::EngineApp {
             && self.gameplay.game_state == crate::GameState::Playing
             && !self.gameplay.chat.open
             && !self.gameplay.block_picker_open
+            && !self.gameplay.inventory_open
             && !self.gameplay.edit.mode.is_active()
         {
             if let Some(streamer) = &self.world_state.streamer {

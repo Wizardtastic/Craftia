@@ -166,6 +166,8 @@ pub struct KeybindSettings {
 
     pub block_picker: String,
 
+    pub inventory: String,
+
     pub profiler: String,
 
     pub chunk_debug: String,
@@ -294,6 +296,17 @@ impl KeybindSettings {
             }
 
             map.insert(k, Action::BlockPicker);
+        }
+
+        if let Some(k) = parse_key(&self.inventory) {
+            if map.contains_key(&k) {
+                log::warn!(
+                    "duplicate keybind: key {:?} bound to multiple actions, last one wins",
+                    k
+                );
+            }
+
+            map.insert(k, Action::Inventory);
         }
 
         if let Some(k) = parse_key(&self.profiler) {
@@ -674,6 +687,8 @@ impl Default for KeybindSettings {
             pause: "Escape".into(),
 
             block_picker: "E".into(),
+
+            inventory: "I".into(),
 
             profiler: "F6".into(),
 

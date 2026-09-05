@@ -39,6 +39,8 @@ pub enum Action {
     Redo,
     // Inventory
     BlockPicker,
+    /// Open/close the survival inventory screen (I).
+    Inventory,
     // Profiling / Debug
     Profiler,
     ChunkDebug,
@@ -88,6 +90,8 @@ pub struct InputState {
     pub mouse_delta: (f32, f32),
     /// Hotbar slot change requested this frame (1..=9 -> index 0..=8), if any.
     pub hotbar_select: Option<usize>,
+    /// Whether a Shift modifier is currently held (inventory shift-click).
+    pub shift_held: bool,
 }
 
 impl InputState {

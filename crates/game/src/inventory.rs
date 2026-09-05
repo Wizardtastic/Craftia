@@ -394,6 +394,39 @@ impl SurvivalInventory {
         }
     }
 
+    /// Shift-click move for the inventory screen: merges `from`'s stack into
+    /// a matching/empty slot in the opposite storage zone (main ↔ hotbar) and
+    /// leaves the leftover (if any) in `from`. No-op for armor/offhand/crafting
+    /// slots — the UI can special-case those if needed later.
+    pub fn shift_click_merge(&mut self, from: InventorySlot) {
+        let (stack, zone) = match from {
+            InventorySlot::Main(i) => (self.main[i], Zone::Hotbar),
+            InventorySlot::Hotbar(i) => (self.hotbar[i], Zone::Main),
+            _ => return,
+        };
+        if stack.is_empty() {
+            return;
+        }
+
+        // Split into (merge-first, then empty-slot) passes over the target
+        // zone, then write whatever didn't fit back to the source slot.
+        let leftover = match zone {
+            Zone::Hotbar => self.insert_into_hotbar(stack),
+            Zone::Main => self.insert_into_main(stack),
+        };
+        let leftover = leftover.unwrap_or_else(|| {
+            // Fully moved — source becomes empty. `insert_into_*` return `None`
+            // both for "nothing to move" and "everything merged", but we early
+            // returned on empty above, so `None` here means fully moved.
+            ItemStack::empty()
+        });
+        match from {
+            InventorySlot::Main(i) => self.main[i] = leftover,
+            InventorySlot::Hotbar(i) => self.hotbar[i] = leftover,
+            _ => {}
+        }
+    }
+
     /// Check if the player has a specific item in their inventory.
     pub fn has_item(&self, id: BlockId) -> bool {
         self.all_slots()
@@ -661,6 +694,64 @@ mod tests {
         assert_eq!(inv.selected_tool_tier(), 3);
         inv.select(0);
         assert_eq!(inv.selected_tool_tier(), 0);
+    }
+
+    #[test]
+    fn shift_click_merge_moves_main_to_hotbar() {
+        let mut inv = SurvivalInventory::new();
+        inv.main[0] = ItemStack::new(BlockId(1), 10);
+        inv.hotbar[0] = ItemStack::new(BlockId(1), 5);
+        inv.shift_click_merge(InventorySlot::Main(0));
+        // Merged into the matching hotbar stack; source emptied.
+        assert_eq!(inv.hotbar[0].count, 15);
+        assert!(inv.main[0].is_empty());
+    }
+
+    #[test]
+    fn shift_click_merge_spills_remainder_into_free_slots() {
+        let mut inv = SurvivalInventory::new();
+        inv.main[0] = ItemStack::new(BlockId(1), 10);
+        inv.hotbar[0] = ItemStack::new(BlockId(1), 60); // room for 4
+        inv.shift_click_merge(InventorySlot::Main(0));
+        // Merge fills hotbar[0] to 64, the remaining 6 spill into hotbar[1].
+        assert_eq!(inv.hotbar[0].count, 64);
+        assert_eq!(inv.hotbar[1].count, 6);
+        assert!(inv.main[0].is_empty());
+    }
+
+    #[test]
+    fn shift_click_merge_nothing_fits_keeps_source() {
+        let mut inv = SurvivalInventory::new();
+        // Fill every hotbar slot to max with distinct ids (no merging).
+        for i in 0..HOTBAR_SLOTS {
+            inv.hotbar[i] = ItemStack::new(BlockId(i as u16 + 1), MAX_STACK_SIZE);
+        }
+        inv.main[0] = ItemStack::new(BlockId(1), 10);
+        inv.shift_click_merge(InventorySlot::Main(0));
+        // Inventory is completely full: the stack stays in main.
+        assert_eq!(inv.main[0].count, 10);
+        assert_eq!(inv.hotbar[0].count, MAX_STACK_SIZE);
+    }
+
+    #[test]
+    fn shift_click_merge_hotbar_to_main_fills_empty() {
+        let mut inv = SurvivalInventory::new();
+        inv.hotbar[0] = ItemStack::new(BlockId(2), 100);
+        inv.shift_click_merge(InventorySlot::Hotbar(0));
+        // 100 splits across empty main slots: 64 + 36.
+        assert_eq!(inv.main[0].count, 64);
+        assert_eq!(inv.main[1].count, 36);
+        assert!(inv.hotbar[0].is_empty());
+    }
+
+    #[test]
+    fn shift_click_merge_ignores_empty_and_special_slots() {
+        let mut inv = SurvivalInventory::new();
+        inv.shift_click_merge(InventorySlot::Main(0)); // empty: no-op
+        assert_eq!(inv.count_item(BlockId(1)), 0);
+        inv.armor[0] = ItemStack::new(BlockId(3), 1);
+        inv.shift_click_merge(InventorySlot::Armor(0)); // armor: no-op
+        assert_eq!(inv.armor[0].count, 1);
     }
 
     #[test]

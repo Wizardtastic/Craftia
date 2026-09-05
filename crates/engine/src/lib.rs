@@ -325,6 +325,11 @@ pub(crate) struct GamePlayState {
     pub undo_redo: voxel_game::UndoRedoState,
     /// Block picker (inventory) open.
     pub block_picker_open: bool,
+    /// Survival inventory screen open (renders main/armor/offhand slots).
+    pub inventory_open: bool,
+    /// Slot currently "held" by a first click in the inventory screen
+    /// (two-click swap interaction).
+    pub inv_cursor: Option<voxel_game::InventorySlot>,
     /// Schematic clipboard: ((x1,y1,z1), (x2,y2,z2), blocks)
     pub clipboard: Option<Clipboard>,
     /// Debug overlay enabled (F3 toggle).
@@ -404,6 +409,8 @@ impl GamePlayState {
             chat: ChatState::default(),
             undo_redo: voxel_game::UndoRedoState::default(),
             block_picker_open: false,
+            inventory_open: false,
+            inv_cursor: None,
             clipboard: None,
             debug_overlay: false,
             chunk_debug_enabled: false,
@@ -1028,6 +1035,7 @@ impl EngineApp {
         self.unlock_cursor();
         self.input.input.held.clear();
         self.gameplay.block_picker_open = false;
+        self.gameplay.inventory_open = false;
         self.gameplay.chat.open = false;
         self.gameplay.console.open = false;
         self.gameplay.edit.mode = edit::EditModeState::Inactive;
@@ -1069,6 +1077,7 @@ impl EngineApp {
     /// Transition to Playing state (lock cursor, resume sim).
     fn enter_playing(&mut self) {
         self.gameplay.game_state = GameState::Playing;
+        self.gameplay.inventory_open = false;
         self.lock_cursor();
         self.input.running = true;
         self.input.last_time = Instant::now();
@@ -1083,6 +1092,7 @@ impl EngineApp {
         self.unlock_cursor();
         self.input.input.held.clear();
         self.gameplay.block_picker_open = false;
+        self.gameplay.inventory_open = false;
         self.gameplay.chat.open = false;
         self.gameplay.edit.mode = edit::EditModeState::Inactive;
         self.gameplay.map.fullscreen_open = false;
@@ -1581,6 +1591,19 @@ impl ApplicationHandler for EngineApp {
                                         }
                                     }
                                 }
+                                Action::Inventory => {
+                                    if self.gameplay.game_state == GameState::Playing {
+                                        // Mutual exclusion with the creative picker.
+                                        self.gameplay.block_picker_open = false;
+                                        self.gameplay.inventory_open = !self.gameplay.inventory_open;
+                                        if self.gameplay.inventory_open {
+                                            self.unlock_cursor();
+                                            self.input.input.held.clear();
+                                        } else {
+                                            self.lock_cursor();
+                                        }
+                                    }
+                                }
                                 Action::Profiler => {
                                     self.profiler.enabled = !self.profiler.enabled;
                                 }
@@ -1709,8 +1732,9 @@ impl ApplicationHandler for EngineApp {
                                     }
                                 }
                                 GameState::Playing => {
-                                    if self.gameplay.block_picker_open {
+                                    if self.gameplay.block_picker_open || self.gameplay.inventory_open {
                                         self.gameplay.block_picker_open = false;
+                                        self.gameplay.inventory_open = false;
                                         self.lock_cursor();
                                     } else {
                                         self.enter_pause();
@@ -1823,6 +1847,15 @@ impl ApplicationHandler for EngineApp {
                                 }
                                 return;
                             }
+                            // Same for the survival inventory screen.
+                            if self.gameplay.inventory_open {
+                                match button {
+                                    MouseButton::Left => self.input.input.clicks.left = true,
+                                    MouseButton::Right => self.input.input.clicks.right = true,
+                                    _ => {}
+                                }
+                                return;
+                            }
                             // If the player is dead, register the click for the
                             // death screen buttons instead of re-locking the cursor.
                             let is_dead = self.simulation.ecs_world()
@@ -1897,6 +1930,10 @@ impl ApplicationHandler for EngineApp {
                 // (divided by the DPI scale) to match UI layout coordinates.
                 let s = self.render.ui_scale.max(0.25);
                 self.gameplay.mouse_pos = Point::new(position.x as f32 / s, position.y as f32 / s);
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                // Track Shift for inventory-screen shift-click moves.
+                self.input.input.shift_held = modifiers.state().shift_key();
             }
             WindowEvent::RedrawRequested => {
                 if self.input.running {
