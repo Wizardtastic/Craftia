@@ -36,13 +36,31 @@ procedural atlas (voxel-render/src/ui_atlas.rs)
   than the visible rows: `Scroll::new(row, total, visible)` clamps the
   offset, `scroll_by` applies wheel deltas, `scrolled_to_show` keeps a
   selection visible (keyboard nav), and `thumb()`/`visible_fraction()` feed
-  `UiKit::scrollbar`. World select uses it; reuse it for any new list.
+  `UiKit::scrollbar`. World select and the block-picker grid use it; reuse
+  it for any new list. When draw, click, and wheel handlers all need the
+  same bounds (e.g. `creative_scroll_bounds`), extract one shared
+  function so the three paths cannot disagree — that drift once mapped
+  clicks to the wrong block after scrolling.
+- **Tooltips**: draw passes that hit-test slots/items queue text with
+  `kit.tooltip(text, x, y)` (or `tooltip2(title, Some(sub), …)` for a
+  two-line name + category tooltip) and call `kit.finish()` last (only one
+  queued tooltip per frame, last writer wins). The survival inventory
+  reports hovered stacks from `draw_inv_slot` (`Name ×count`); the picker
+  shows the item name with its category sub-text.
 - **`screen_layout.rs`** holds pure per-screen layout structs
   (`TitleLayout`, `PauseLayout`, `SettingsLayout`, `WorldSelectLayout`,
-  `CreateWorldLayout`, `DeleteConfirmLayout`) built from the window size
-  (+ small flags). The draw pass renders *from* the layout; the click /
-  drag / key handlers rebuild it and hit-test *against* the same rects.
-  No widget rects are stored between frames.
+  `CreateWorldLayout`, `DeleteConfirmLayout`, `PickerLayout`,
+  `InventoryLayout`) built from the window size (+ small flags). The draw
+  pass renders *from* the layout; the click / drag / key handlers rebuild
+  it and hit-test *against* the same rects. No widget rects are stored
+  between frames.
+- **Creative filtering** is centralised: `filter_creative_items` applies
+  the tab/search filter, `PICKER_TABS` is the single tab list (the label IS
+  the category name), and `creative_scroll_bounds` derives the grid window.
+- **Inventory routing is mode-aware**: both E and I go through
+  `player_game_mode().inventory_behavior()` — `CreativeTabs` opens the
+  creative picker, `SurvivalSlots` opens the survival inventory. New
+  overlays must route through the mode, never hard-code one screen.
 - **Contrast policy** (the Minecraft look): chrome tiles are bright gray
   (button fill ≈ 0.8, panel ≈ 0.78), so text on buttons and panels uses the
   dark `palette::INK` family (`INK`, `INK_MUTED`, `INK_DISABLED`,

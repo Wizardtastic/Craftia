@@ -6,6 +6,50 @@
 //! (+ a couple of flags), so hit-testing can never drift from rendering.
 
 use voxel_core::Rect;
+use voxel_game::InventorySlot;
+
+// ── Creative picker filtering ────────────────────────────────────────────
+
+/// A creative item as seen by the picker: master-list position plus display
+/// data. Shared by draw, click, and wheel so all three agree.
+pub(crate) struct CreativeItemRef {
+    pub block: voxel_core::BlockId,
+    pub name: String,
+    pub category: String,
+    pub tile: u16,
+}
+
+/// Filter the creative item list by the active tab (or search query).
+/// Mirrors the tab labels in [`PICKER_TABS`]: last two are "All"/"Search".
+pub(crate) fn filter_creative_items(
+    items: &[crate::CreativeItem],
+    active_tab: usize,
+    search: &str,
+) -> Vec<CreativeItemRef> {
+    let tab_count = PICKER_TABS.len();
+    let is_search = active_tab == tab_count - 1;
+    let is_all = active_tab == tab_count - 2;
+    let q = search.to_ascii_lowercase();
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| {
+            if is_search {
+                q.is_empty() || it.name.to_ascii_lowercase().contains(&q)
+            } else if is_all {
+                true
+            } else {
+                active_tab < tab_count && it.category == PICKER_TABS[active_tab]
+            }
+        })
+        .map(|(_, it)| CreativeItemRef {
+            block: it.id,
+            name: it.name.clone(),
+            category: it.category.clone(),
+            tile: it.tile,
+        })
+        .collect()
+}
 
 // ── Title screen ─────────────────────────────────────────────────────────
 
@@ -317,6 +361,181 @@ impl WorldSelectLayout {
     }
 }
 
+// ── Creative block picker ─────────────────────────────────────────────────
+
+/// Tab labels for the creative picker. Index = `creative_tab`; the label IS
+/// the category name used for filtering (the last two are the "All" and
+/// "Search" pseudo-tabs).
+pub(crate) const PICKER_TABS: [&str; 8] = [
+    "Blocks",
+    "Nature",
+    "Building",
+    "Ores",
+    "Decoration",
+    "Liquids",
+    "All",
+    "Search",
+];
+
+const PICKER_SLOT: f32 = 40.0;
+const PICKER_GAP: f32 = 3.0;
+pub(crate) const PICKER_COLS: usize = 9;
+/// Rows visible in the picker grid before it scrolls.
+pub(crate) const PICKER_VISIBLE_ROWS: usize = 5;
+const PICKER_TAB_W: f32 = 46.0;
+const PICKER_TAB_H: f32 = 20.0;
+
+/// Grid metrics for the block picker under the active tab filter:
+/// `(total_rows, visible_rows)`. Shared by the draw pass, the click
+/// handler, and the wheel handler so all three clamp identically.
+pub(crate) fn creative_scroll_bounds(
+    items: &[crate::CreativeItem],
+    active_tab: usize,
+    search: &str,
+) -> (usize, usize) {
+    let rows = filter_creative_items(items, active_tab, search)
+        .len()
+        .div_ceil(PICKER_COLS);
+    (rows, rows.min(PICKER_VISIBLE_ROWS))
+}
+
+/// Creative picker layout (Minecraft-style: tab strip above a light panel,
+/// item grid with scrollbar, player hotbar row at the bottom). Shared by the
+/// draw pass and the click handler.
+#[derive(Clone, Debug)]
+pub(crate) struct PickerLayout {
+    pub panel: Rect,
+    pub close_btn: Rect,
+    /// Tab strip above the panel, in `PICKER_TABS` order.
+    pub tabs: Vec<(Rect, &'static str)>,
+    /// Search text field (only when the Search tab is active).
+    pub search_field: Option<Rect>,
+    /// Visible grid window (all visible slot cells fit inside).
+    pub grid: Rect,
+    pub slot: f32,
+    pub gap: f32,
+    pub cols: usize,
+    pub visible_rows: usize,
+    /// Scroll offset in rows: display row `k` is content row
+    /// `first_index + k`.
+    pub first_index: usize,
+    /// Scrollbar track rect when the content overflows the window.
+    pub scrollbar: Option<Rect>,
+    /// Player hotbar row at the bottom (width = grid width).
+    pub hotbar: Rect,
+}
+
+impl PickerLayout {
+    /// Whether the Search tab is active.
+    pub fn is_search(tab: usize) -> bool {
+        tab == PICKER_TABS.len() - 1
+    }
+
+    pub fn new(w: f32, h: f32, active_tab: usize, visible_rows: usize, first_index: usize) -> Self {
+        let is_search = Self::is_search(active_tab);
+        let pad = 10.0;
+        let grid_w = PICKER_COLS as f32 * (PICKER_SLOT + PICKER_GAP) - PICKER_GAP;
+        let panel_w = grid_w + pad * 2.0;
+        let title_h = 18.0;
+        let search_h = 22.0;
+        let grid_h = visible_rows as f32 * (PICKER_SLOT + PICKER_GAP) - PICKER_GAP;
+        let panel_h = pad
+            + title_h
+            + if is_search { search_h + 6.0 } else { 0.0 }
+            + grid_h
+            + 10.0
+            + PICKER_SLOT
+            + pad;
+        let px = (w - panel_w) * 0.5;
+        let py = ((h - panel_h) * 0.5).max(36.0); // leave room for the tab strip
+
+        // Tab strip, centered above the panel.
+        let tab_row_w = PICKER_TABS.len() as f32 * PICKER_TAB_W + 2.0;
+        let tab_x0 = px + (panel_w - tab_row_w) * 0.5;
+        let tab_y = py - PICKER_TAB_H - 4.0;
+        let tabs = PICKER_TABS
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                (
+                    Rect::from_xywh(
+                        tab_x0 + i as f32 * (PICKER_TAB_W + 2.0),
+                        if i == active_tab { tab_y - 3.0 } else { tab_y },
+                        PICKER_TAB_W,
+                        if i == active_tab {
+                            PICKER_TAB_H + 3.0
+                        } else {
+                            PICKER_TAB_H
+                        },
+                    ),
+                    *label,
+                )
+            })
+            .collect();
+
+        let mut cy = py + pad + title_h;
+        let search_field = is_search.then(|| {
+            let r = Rect::from_xywh(px + pad, cy, grid_w, search_h);
+            cy += search_h + 6.0;
+            r
+        });
+        let grid = Rect::from_xywh(px + pad, cy, grid_w, grid_h);
+        let hotbar = Rect::from_xywh(px + pad, grid.y + grid_h + 10.0, grid_w, PICKER_SLOT);
+
+        let scrollable = true; // caller passes first_index; thumb drawn when total > visible
+        let bar_w = 6.0;
+        let scrollbar = scrollable
+            .then(|| Rect::from_xywh(grid.x + grid.w - bar_w - 2.0, grid.y, bar_w, grid.h));
+
+        Self {
+            panel: Rect::from_xywh(px, py, panel_w, panel_h),
+            close_btn: Rect::from_xywh(px + panel_w - pad - 18.0, py + pad, 18.0, 18.0),
+            tabs,
+            search_field,
+            grid,
+            slot: PICKER_SLOT,
+            gap: PICKER_GAP,
+            cols: PICKER_COLS,
+            visible_rows,
+            first_index,
+            scrollbar,
+            hotbar,
+        }
+    }
+
+    /// Top-left of the visible slot cell for content item `idx`, if that
+    /// item is inside the scrolled window.
+    pub fn slot_pos(&self, idx: usize) -> Option<(f32, f32)> {
+        let col = idx % self.cols;
+        let row = idx / self.cols;
+        if row < self.first_index {
+            return None;
+        }
+        let display_row = row - self.first_index;
+        if display_row >= self.visible_rows {
+            return None;
+        }
+        Some((
+            self.grid.x + col as f32 * (self.slot + self.gap),
+            self.grid.y + display_row as f32 * (self.slot + self.gap),
+        ))
+    }
+
+    /// Content item index under a point, if any.
+    pub fn item_at(&self, x: f32, y: f32, item_count: usize) -> Option<usize> {
+        if !self.grid.contains(voxel_core::Point::new(x, y)) {
+            return None;
+        }
+        let col = ((x - self.grid.x) / (self.slot + self.gap)) as usize;
+        let row = ((y - self.grid.y) / (self.slot + self.gap)) as usize;
+        if col >= self.cols || row >= self.visible_rows {
+            return None;
+        }
+        let idx = (self.first_index + row) * self.cols + col;
+        (idx < item_count).then_some(idx)
+    }
+}
+
 // ── Create-world dialog ──────────────────────────────────────────────────
 
 /// Create-world dialog layout (drawn over world select).
@@ -394,9 +613,257 @@ impl DeleteConfirmLayout {
     }
 }
 
+// ── Survival inventory (Minecraft-style) ─────────────────────────────────
+
+/// Survival inventory layout, matching Minecraft's player-inventory
+/// proportions: a top band with the armor rail, player preview, offhand
+/// slot, and the 2×2 crafting grid (arrow + output), then the 3×9 main
+/// grid and the 9 hotbar slots separated below. The whole panel sits
+/// slightly below centre, like Minecraft's. Shared by the draw pass and
+/// the click handler.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InventoryLayout {
+    pub panel: Rect,
+    /// Left rail of the top band: helmet, chestplate, leggings, boots.
+    pub armor: [Rect; 4],
+    /// Player preview area (paper doll) beside the armor rail.
+    pub player: Rect,
+    /// Offhand slot, vertically centred in the band right of the preview.
+    pub offhand: Rect,
+    /// 2×2 crafting input grid.
+    pub crafting: [Rect; 4],
+    /// Arrow between the crafting grid and its output (draw only).
+    pub craft_arrow: Rect,
+    /// Crafting result slot.
+    pub craft_output: Rect,
+    /// 3×9 main storage grid.
+    pub main: [Rect; 27],
+    /// Hotbar row (separated, like MC's bottom row).
+    pub hotbar: [Rect; 9],
+}
+
+impl InventoryLayout {
+    const SLOT: f32 = 36.0;
+    const GAP: f32 = 4.0;
+    /// Downward bias from centre (Minecraft sits the inventory a touch low).
+    const Y_BIAS: f32 = 16.0;
+
+    pub fn new(w: f32, h: f32) -> Self {
+        let slot = Self::SLOT;
+        let gap = Self::GAP;
+        let grid_w = 9.0f32 * slot + 8.0 * gap; // 356
+        let pad = 8.0;
+        let title_h = 20.0;
+        // Top band: armor rail | preview | offhand | 2×2 | arrow | output.
+        let band_h = 4.0f32 * slot + 3.0 * gap; // 156
+        let craft_w = 2.0f32 * slot + gap; // 76
+        let arrow_w = 20.0;
+        // armor + gap + preview + gap + offhand + gap + craft + arrow + out
+        // (the arrow's padding absorbs the gaps around itself), so the output
+        // slot ends flush with the main grid's right edge.
+        let player_w = grid_w - slot - gap - slot - gap - craft_w - arrow_w - slot - gap;
+        let panel_w = pad * 2.0 + grid_w;
+        let main_h = 3.0f32 * slot + 2.0 * gap; // 116
+        let hotbar_sep = 8.0;
+        let band_sep = 10.0;
+        let panel_h = pad + title_h + band_h + band_sep + main_h + hotbar_sep + slot + pad;
+        let px = (w - panel_w) * 0.5;
+        let py = (h - panel_h) * 0.5 + Self::Y_BIAS;
+
+        let x0 = px + pad;
+        let band_y = py + pad + title_h;
+        let armor: [Rect; 4] = core::array::from_fn(|i| {
+            Rect::from_xywh(x0, band_y + i as f32 * (slot + gap), slot, slot)
+        });
+        let player_x = x0 + slot + gap;
+        let player = Rect::from_xywh(player_x, band_y, player_w, band_h);
+        let offhand = Rect::from_xywh(
+            player_x + player_w + gap,
+            band_y + (band_h - slot) * 0.5,
+            slot,
+            slot,
+        );
+        let craft_x = offhand.x + slot + gap;
+        let craft_y = band_y + (band_h - craft_w) * 0.5;
+        let crafting: [Rect; 4] = core::array::from_fn(|i| {
+            let col = (i % 2) as f32;
+            let row = (i / 2) as f32;
+            Rect::from_xywh(
+                craft_x + col * (slot + gap),
+                craft_y + row * (slot + gap),
+                slot,
+                slot,
+            )
+        });
+        let arrow = Rect::from_xywh(
+            craft_x + craft_w + (arrow_w - 14.0) * 0.5,
+            band_y + band_h * 0.5 - 6.0,
+            14.0,
+            12.0,
+        );
+        let craft_output = Rect::from_xywh(
+            craft_x + craft_w + arrow_w,
+            band_y + (band_h - slot) * 0.5,
+            slot,
+            slot,
+        );
+
+        let main_y = band_y + band_h + band_sep;
+        let main: [Rect; 27] = core::array::from_fn(|i| {
+            let col = (i % 9) as f32;
+            let row = (i / 9) as f32;
+            Rect::from_xywh(
+                x0 + col * (slot + gap),
+                main_y + row * (slot + gap),
+                slot,
+                slot,
+            )
+        });
+        let hotbar_y = main_y + main_h + hotbar_sep;
+        let hotbar: [Rect; 9] = core::array::from_fn(|i| {
+            Rect::from_xywh(x0 + i as f32 * (slot + gap), hotbar_y, slot, slot)
+        });
+        Self {
+            panel: Rect::from_xywh(px, py, panel_w, panel_h),
+            armor,
+            player,
+            offhand,
+            crafting,
+            craft_arrow: arrow,
+            craft_output,
+            main,
+            hotbar,
+        }
+    }
+
+    /// Slot under a logical-pixel point, if any.
+    pub fn slot_at(&self, x: f32, y: f32) -> Option<InventorySlot> {
+        let pt = voxel_core::Point::new(x, y);
+        (0..4)
+            .find(|&i| self.armor[i].contains(pt))
+            .map(InventorySlot::Armor)
+            .or_else(|| self.offhand.contains(pt).then_some(InventorySlot::Offhand))
+            .or_else(|| {
+                (0..4)
+                    .find(|&i| self.crafting[i].contains(pt))
+                    .map(InventorySlot::CraftingInput)
+            })
+            .or_else(|| {
+                self.craft_output
+                    .contains(pt)
+                    .then_some(InventorySlot::CraftingOutput)
+            })
+            .or_else(|| {
+                (0..27)
+                    .find(|&i| self.main[i].contains(pt))
+                    .map(InventorySlot::Main)
+            })
+            .or_else(|| {
+                (0..9)
+                    .find(|&i| self.hotbar[i].contains(pt))
+                    .map(InventorySlot::Hotbar)
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_hit_testing_matches_drawn_geometry() {
+        let lay = InventoryLayout::new(1920.0, 1080.0);
+        // Every slot's rect, probed at its center, must resolve back to that
+        // same slot — draw and click can never disagree.
+        for i in 0..27 {
+            let r = lay.main[i];
+            assert_eq!(
+                lay.slot_at(r.x + r.w * 0.5, r.y + r.h * 0.5),
+                Some(InventorySlot::Main(i))
+            );
+        }
+        for i in 0..9 {
+            let r = lay.hotbar[i];
+            assert_eq!(
+                lay.slot_at(r.x + r.w * 0.5, r.y + r.h * 0.5),
+                Some(InventorySlot::Hotbar(i))
+            );
+        }
+        for i in 0..4 {
+            let r = lay.armor[i];
+            assert_eq!(
+                lay.slot_at(r.x + r.w * 0.5, r.y + r.h * 0.5),
+                Some(InventorySlot::Armor(i))
+            );
+        }
+        assert_eq!(
+            lay.slot_at(lay.offhand.x + 10.0, lay.offhand.y + 10.0),
+            Some(InventorySlot::Offhand)
+        );
+        // 2×2 crafting grid + output hit-test back too.
+        for i in 0..4 {
+            let r = lay.crafting[i];
+            assert_eq!(
+                lay.slot_at(r.x + r.w * 0.5, r.y + r.h * 0.5),
+                Some(InventorySlot::CraftingInput(i))
+            );
+        }
+        assert_eq!(
+            lay.slot_at(lay.craft_output.x + 10.0, lay.craft_output.y + 10.0),
+            Some(InventorySlot::CraftingOutput)
+        );
+        // Grid rows must not overlap the hotbar row or each other.
+        for pair in lay.main.windows(2) {
+            assert!(!pair[0].intersects(pair[1]));
+        }
+        assert!(!lay.main[26].intersects(lay.hotbar[0]));
+        // The top band sits fully above the main grid (nothing overlaps the
+        // title row — the bug from the first cut of this screen).
+        let band_bottom = lay.armor[3].y + lay.armor[3].h;
+        assert!(band_bottom <= lay.main[0].y);
+        assert!(lay.craft_output.y + lay.craft_output.h <= lay.main[0].y);
+        // Everything lives inside the panel.
+        for r in lay
+            .main
+            .iter()
+            .chain(lay.hotbar.iter())
+            .chain(lay.armor.iter())
+            .chain(lay.crafting.iter())
+        {
+            assert!(lay.panel.contains(voxel_core::Point::new(r.x, r.y)));
+        }
+        // Every band element (including the crafting output, which ends the
+        // row) must fit inside the panel's right edge.
+        let band_right = lay.craft_output.x + lay.craft_output.w;
+        assert!(band_right <= lay.panel.x + lay.panel.w);
+        // The output slot is flush with the main grid's right column.
+        let grid_right = lay.main[8].x + lay.main[8].w;
+        assert!((band_right - grid_right).abs() < 0.01);
+        // The band's rows must all start inside the panel too.
+        assert!(lay.player.x >= lay.panel.x);
+        assert!(lay.crafting[0].x >= lay.panel.x);
+    }
+
+    #[test]
+    fn picker_slot_pos_windows_through_scroll() {
+        let lay = PickerLayout::new(1920.0, 1080.0, 6, 5, 2);
+        // Content rows 0-1 are scrolled above the window.
+        assert_eq!(lay.slot_pos(0), None);
+        assert_eq!(lay.slot_pos(17), None);
+        // Row 2 (first visible) sits at the grid origin.
+        let (x, y) = lay.slot_pos(18).unwrap();
+        assert_eq!((x, y), (lay.grid.x, lay.grid.y));
+        // Row 6 (last visible row, 5 rows window) is inside; row 7 is not.
+        assert!(lay.slot_pos(54).is_some());
+        assert_eq!(lay.slot_pos(63), None);
+        // item_at maps display position back to content index through the
+        // same window (row 1 of the window = content row 3 = index 27+4).
+        let col_w = lay.slot + lay.gap;
+        assert_eq!(
+            lay.item_at(lay.grid.x + 4.0 * col_w, lay.grid.y + 1.0 * col_w, 100),
+            Some(31)
+        );
+    }
 
     #[test]
     fn settings_sliders_and_toggles_match_row_list() {

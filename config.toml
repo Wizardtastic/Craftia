@@ -1,14 +1,13 @@
 [graphics]
-width = 2560
-height = 1369
+width = 1280
+height = 720
 vsync = true
-fog_distance = 800.0
+fog_distance = 320.0
 shadow_enabled = true
-shadow_resolution = 1024
+shadow_resolution = 2048
 exposure = 0.6000000238418579
 vignette_strength = 0.15000000596046448
-textures_dir = "assets/textures"
-msaa_samples = 2
+msaa_samples = 4
 occlusion_culling = true
 ssao_enabled = true
 gpu_driven = false
@@ -24,11 +23,10 @@ reflection_strength = 0.8500000238418579
 
 [world]
 seed = 1337
-load_radius = 4
-unload_radius = 6
+load_radius = 6
+unload_radius = 8
 gpu_mesh_distance = 0
 day_length = 1200.0
-assets_path = "assets"
 
 [player]
 walk_speed = 4.316999912261963
@@ -59,7 +57,7 @@ pin_cycle_next = "BracketRight"
 pin_cycle_prev = "BracketLeft"
 pin_clear = "Backslash"
 developer_console = "Backquote"
-telemetry_dashboard = "F1"
+telemetry_dashboard = "ScrollLock"
 edit_mode = "X"
 fullscreen_map = "M"
 

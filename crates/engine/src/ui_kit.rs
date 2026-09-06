@@ -31,7 +31,7 @@ pub mod palette {
     pub const PANEL: [u8; 4] = [70, 70, 80, 255];
     /// Hover highlight (white flash over grayscale chrome).
     pub const HOVER: [u8; 4] = [255, 255, 255, 255];
-    /// Disabled text.
+    /// Disabled text on dark chrome (the disabled button tile is near-black).
     pub const DISABLED: [u8; 4] = [160, 160, 160, 255];
     /// Primary text ON LIGHT CHROME (buttons, panels). The chrome tiles are
     /// bright gray (fill ≈ 0.8), so light text washes out — menus use dark
@@ -39,7 +39,7 @@ pub mod palette {
     pub const INK: [u8; 4] = [56, 52, 64, 255];
     /// Secondary / label text on light chrome.
     pub const INK_MUTED: [u8; 4] = [96, 92, 104, 255];
-    /// Disabled text on light chrome.
+    /// Disabled label on light chrome (panel surfaces).
     pub const INK_DISABLED: [u8; 4] = [126, 122, 134, 255];
     /// Danger text on light chrome (delete buttons, error lines).
     pub const INK_DANGER: [u8; 4] = [150, 48, 42, 255];
@@ -78,7 +78,7 @@ pub struct UiKit<'a> {
     pub font: &'a FontAtlas,
     pub mouse: (f32, f32),
     /// Tooltips are queued (last one wins) and flushed by `finish()`.
-    tooltip: Option<(String, f32, f32)>,
+    tooltip: Option<(String, Option<String>, f32, f32)>,
 }
 
 impl<'a> UiKit<'a> {
@@ -96,20 +96,32 @@ impl<'a> UiKit<'a> {
         r.contains(voxel_core::Point::new(self.mouse.0, self.mouse.1))
     }
 
-    /// Push a tooltip to be drawn on top of everything at `finish()`.
+    /// Push a single-line tooltip to be drawn on top of everything at
+    /// `finish()`.
     pub fn tooltip(&mut self, text: &str, x: f32, y: f32) {
-        self.tooltip = Some((text.to_string(), x, y));
+        self.tooltip2(text, None, x, y);
+    }
+
+    /// Push a two-line tooltip: a bold title and an optional muted
+    /// sub-text (e.g. an item's category). Height auto-sizes.
+    pub fn tooltip2(&mut self, title: &str, sub: Option<&str>, x: f32, y: f32) {
+        self.tooltip = Some((title.to_string(), sub.map(str::to_string), x, y));
     }
 
     /// Flush queued tooltips. Call once at the end of the frame's UI build.
     pub fn finish(&mut self) {
-        if let Some((text, x, y)) = self.tooltip.take() {
-            let tw = self.font.text_width(&text, 1.0) + 16.0;
-            let th = 22.0;
+        if let Some((title, sub, x, y)) = self.tooltip.take() {
+            let width = |t: &str| self.font.text_width(t, 1.0);
+            let tw = width(&title).max(sub.as_deref().map_or(0.0, width)) + 16.0;
+            let th = if sub.is_some() { 34.0 } else { 22.0 };
             self.ui
                 .nine_slice(TILE_TOOLTIP, x, y, tw, th, 3.0, [255, 255, 255, 255]);
             self.ui
-                .text(&text, x + 8.0, y + 6.0, 1.0, palette::TEXT, self.font);
+                .text(&title, x + 8.0, y + 6.0, 1.0, palette::TEXT, self.font);
+            if let Some(sub) = &sub {
+                self.ui
+                    .text(sub, x + 8.0, y + 20.0, 1.0, palette::MUTED, self.font);
+            }
         }
     }
 
@@ -150,14 +162,14 @@ impl<'a> UiKit<'a> {
         let r = Rect::from_xywh(x, y, w, h);
         let hovered = self.hovered(r);
         let (tile, tint) = match state {
-            WidgetState::Disabled => (TILE_BTN_DISABLED, palette::WIDGET),
+            WidgetState::Disabled => (TILE_BTN_DISABLED, [255, 255, 255, 255]),
             _ if hovered => (TILE_BTN_HOVER, [255, 255, 255, 255]),
             _ => (TILE_BTN, palette::WIDGET),
         };
-        // Text tint: dark ink on the bright beveled chrome; the hover
-        // state comes from the chrome, not the text.
+        // Text tint: dark ink on the bright beveled chrome, light gray on
+        // the dark disabled tile; hover comes from the chrome, not text.
         let text_color = match state {
-            WidgetState::Disabled => palette::INK_DISABLED,
+            WidgetState::Disabled => palette::DISABLED,
             _ => palette::INK,
         };
         self.ui.nine_slice(tile, x, y, w, h, 6.0, tint);
@@ -269,6 +281,39 @@ impl<'a> UiKit<'a> {
             r.h + 4.0,
             3.0,
             [255, 255, 255, 255],
+        );
+    }
+
+    /// Inventory/creative tab button above a panel: raised when active so
+    /// it visually connects to the panel edge below it. Returns its rect.
+    pub fn tab(&mut self, r: Rect, label: &str, active: bool) {
+        let y = if active { r.y - 3.0 } else { r.y };
+        let h = if active { r.h + 3.0 } else { r.h };
+        self.ui.nine_slice(
+            if active { TILE_BTN } else { TILE_PANEL_INSET },
+            r.x,
+            y,
+            r.w,
+            h,
+            4.0,
+            if active {
+                palette::WIDGET
+            } else {
+                palette::NEUTRAL
+            },
+        );
+        let lw = self.font.text_width(label, 1.0);
+        self.ui.text_shadow(
+            label,
+            r.x + (r.w - lw) * 0.5,
+            y + (h - 12.0) * 0.5,
+            1.0,
+            if active {
+                palette::INK
+            } else {
+                palette::INK_MUTED
+            },
+            self.font,
         );
     }
 
@@ -615,6 +660,59 @@ mod tests {
             }
         }
         assert!(found_red, "heart icon should contain red pixels");
+    }
+
+    #[test]
+    fn disabled_button_tile_is_darker_than_normal() {
+        let atlas = voxel_render::ui_atlas();
+        let tile_px = (atlas.width / voxel_render::UI_ATLAS_COLS) as usize;
+        let get = |tile: u32, x: usize, y: usize| -> u32 {
+            let tx = (tile % voxel_render::UI_ATLAS_COLS) as usize * tile_px + x;
+            let ty = (tile / voxel_render::UI_ATLAS_COLS) as usize * tile_px + y;
+            let i = (ty * atlas.width as usize + tx) * 4;
+            atlas.rgba[i] as u32
+                + ((atlas.rgba[i + 1] as u32) << 8)
+                + ((atlas.rgba[i + 2] as u32) << 16)
+        };
+        // Centre fill: disabled must be clearly darker than the normal
+        // button (Minecraft-style dark stone), not a slightly grayer beige.
+        let normal = get(voxel_render::TILE_BTN, 8, 8);
+        let disabled = get(voxel_render::TILE_BTN_DISABLED, 8, 8);
+        assert!(
+            disabled * 2 < normal,
+            "disabled fill {disabled} should be well under half of normal {normal}"
+        );
+        // ...and not pure black, so the bevel still reads.
+        assert!(disabled > 0x10_10_10, "disabled fill {disabled} too dark");
+    }
+
+    #[test]
+    fn block_picker_scroll_bounds_match_tab_filters() {
+        use crate::CreativeItem;
+        let items = vec![
+            CreativeItem {
+                id: voxel_core::BlockId(1),
+                name: "Stone".into(),
+                category: "Blocks".into(),
+                tile: 0,
+            },
+            CreativeItem {
+                id: voxel_core::BlockId(2),
+                name: "Oak Log".into(),
+                category: "Nature".into(),
+                tile: 1,
+            },
+        ];
+        // 1 row in "Blocks", none in an empty category.
+        let (total, visible) = crate::screen_layout::creative_scroll_bounds(&items, 0, "");
+        assert_eq!((total, visible), (1, 1));
+        let (total, visible) = crate::screen_layout::creative_scroll_bounds(&items, 3, "");
+        assert_eq!((total, visible), (0, 0));
+        // Search filters by name; "All" tab (index 6) sees everything.
+        let (total, _) = crate::screen_layout::creative_scroll_bounds(&items, 7, "OAK");
+        assert_eq!(total, 1);
+        let (total, _) = crate::screen_layout::creative_scroll_bounds(&items, 6, "");
+        assert_eq!(total, 1);
     }
 
     // ── Scroll ─────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ use voxel_render::{
 
 use crate::edit;
 use crate::edit::terrain::TerrainOp;
+use crate::screen_layout::InventoryLayout;
 use crate::GameState;
 
 /// Inclusive min/max range for a slider. Shared by the settings sliders and
@@ -76,115 +77,6 @@ fn format_last_played(timestamp_secs: &str) -> String {
         format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
     } else {
         "a long time ago".to_string()
-    }
-}
-
-/// Fixed layout for the survival inventory screen, shared by the draw
-/// and click handlers so hit-testing always matches what is rendered.
-struct InventoryLayout {
-    /// Panel top-left.
-    panel_x: f32,
-    panel_y: f32,
-    panel_w: f32,
-    panel_h: f32,
-    /// Top-left of each slot grid (armor / main / hotbar), logical px.
-    armor_xy: (f32, f32),
-    offhand_xy: (f32, f32),
-    main_xy: (f32, f32),
-    hotbar_xy: (f32, f32),
-    slot: f32,
-    gap: f32,
-}
-
-const INV_COLS: usize = 9;
-const INV_ROWS: usize = 3;
-
-impl InventoryLayout {
-    fn new(w: f32, h: f32) -> Self {
-        let slot = 44.0;
-        let gap = 4.0;
-        let grid_w = INV_COLS as f32 * slot + (INV_COLS - 1) as f32 * gap;
-        let panel_pad = 14.0;
-        // Side column (armor/offhand) + label gutter sits left of the grid.
-        let side_w = slot * 2.0 + gap + panel_pad;
-        let panel_w = side_w + grid_w + panel_pad * 2.0;
-        let panel_h = panel_pad * 2.0 + 20.0 + INV_ROWS as f32 * (slot + gap) + 8.0 + slot + 20.0;
-        let panel_x = (w - panel_w) * 0.5;
-        let panel_y = (h - panel_h) * 0.5;
-        let grid_x0 = panel_x + panel_pad + side_w;
-        let grid_y0 = panel_y + panel_pad + 20.0;
-        Self {
-            panel_x,
-            panel_y,
-            panel_w,
-            panel_h,
-            armor_xy: (panel_x + panel_pad, grid_y0),
-            offhand_xy: (panel_x + panel_pad, grid_y0 + 4.0 * (slot + gap)),
-            main_xy: (grid_x0, grid_y0),
-            hotbar_xy: (grid_x0, grid_y0 + INV_ROWS as f32 * (slot + gap) + 8.0),
-            slot,
-            gap,
-        }
-    }
-
-    /// Rect of a specific slot, or `None` if out of range.
-    fn slot_rect(&self, s: voxel_game::InventorySlot) -> Option<Rect> {
-        let gx = |x: f32, y: f32| Rect::from_xywh(x, y, self.slot, self.slot);
-        match s {
-            voxel_game::InventorySlot::Main(i) if i < 27 => {
-                let col = (i % INV_COLS) as f32;
-                let row = (i / INV_COLS) as f32;
-                Some(gx(
-                    self.main_xy.0 + col * (self.slot + self.gap),
-                    self.main_xy.1 + row * (self.slot + self.gap),
-                ))
-            }
-            voxel_game::InventorySlot::Hotbar(i) if i < 9 => Some(gx(
-                self.hotbar_xy.0 + i as f32 * (self.slot + self.gap),
-                self.hotbar_xy.1,
-            )),
-            voxel_game::InventorySlot::Armor(i) if i < 4 => Some(gx(
-                self.armor_xy.0,
-                self.armor_xy.1 + i as f32 * (self.slot + self.gap),
-            )),
-            voxel_game::InventorySlot::Offhand => Some(gx(self.offhand_xy.0, self.offhand_xy.1)),
-            _ => None,
-        }
-    }
-
-    /// Slot under the given logical-pixel position, if any.
-    fn slot_at(&self, mx: f32, my: f32) -> Option<voxel_game::InventorySlot> {
-        let inside =
-            |r: &Rect, px: f32, py: f32| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
-        let mut hit = None;
-        for i in 0..27 {
-            let r = self.slot_rect(voxel_game::InventorySlot::Main(i)).unwrap();
-            if inside(&r, mx, my) {
-                hit = Some(voxel_game::InventorySlot::Main(i));
-            }
-        }
-        for i in 0..9 {
-            let r = self
-                .slot_rect(voxel_game::InventorySlot::Hotbar(i))
-                .unwrap();
-            if inside(&r, mx, my) {
-                hit = Some(voxel_game::InventorySlot::Hotbar(i));
-            }
-        }
-        for i in 0..4 {
-            let r = self.slot_rect(voxel_game::InventorySlot::Armor(i)).unwrap();
-            if inside(&r, mx, my) {
-                hit = Some(voxel_game::InventorySlot::Armor(i));
-            }
-        }
-        if inside(
-            &self.slot_rect(voxel_game::InventorySlot::Offhand).unwrap(),
-            mx,
-            my,
-        ) {
-            hit = Some(voxel_game::InventorySlot::Offhand);
-        }
-        hit
     }
 }
 
@@ -785,140 +677,173 @@ impl crate::EngineApp {
         }
     }
 
-    /// Draw one inventory slot: frame + block icon for non-empty stacks.
+    /// Draw one inventory slot through the kit: inset frame + block icon +
+    /// stack count. Returns `(rect, name, count)` when the mouse hovers a
+    /// non-empty stack, for the tooltip queue.
     fn draw_inv_slot(
         &self,
-        ui: &mut UiDrawData,
+        kit: &mut crate::ui_kit::UiKit,
         rect: Rect,
         stack: &voxel_game::ItemStack,
         selected: bool,
         reg: &voxel_world::BlockRegistry,
-    ) {
-        let _ = selected;
-        ui.sprite_wh(
-            TILE_SLOT,
+    ) -> Option<(Rect, String, u32)> {
+        let empty = stack.is_empty();
+        let icon = (!empty).then(|| {
+            reg.get(stack.id())
+                .textures
+                .tile(voxel_world::registry::Face::PosX)
+        });
+        let r = kit.slot(
             rect.x,
             rect.y,
             rect.w,
-            rect.h,
-            [235, 235, 240, 240],
+            icon,
+            (!empty).then_some(stack.count as u32),
+            selected,
         );
-        if !stack.is_empty() {
+        if !empty && kit.hovered(r) {
             let def = reg.get(stack.id());
-            let tile = def.textures.tile(voxel_world::registry::Face::PosX);
-            let pad = 4.0;
-            ui.block_icon(
-                rect.x + pad,
-                rect.y + pad,
-                rect.w - pad * 2.0,
-                rect.h - pad * 2.0,
-                tile,
-                [255, 255, 255, 255],
-            );
-            // Stack count (bottom-right), only when > 1.
-            if stack.count > 1 {
-                let label = stack.count.to_string();
-                let tw = self.render.font.text_width(&label, 1.0);
-                ui.text_shadow(
-                    &label,
-                    rect.x + rect.w - tw - 3.0,
-                    rect.y + rect.h - 12.0,
-                    1.0,
-                    [240, 240, 240, 255],
-                    &self.render.font,
-                );
-            }
+            Some((r, def.name.as_ref().to_string(), stack.count as u32))
+        } else {
+            None
         }
     }
 
-    /// Draw the survival inventory screen: main 9×3 grid, hotbar row, armor
-    /// column, and offhand slot. Interactions are handled by
-    /// [`Self::handle_inventory_click`], which recomputes this layout.
+    /// Draw the survival inventory screen (Minecraft-style): a light panel
+    /// with the armor rails and player preview in a top band, the 3×9 main
+    /// grid, the hotbar row, and a hint line. Interactions are handled by
+    /// [`Self::handle_inventory_click`], which shares the same layout.
     fn draw_inventory_screen(&self, ui: &mut UiDrawData, w: f32, h: f32) {
         let l = InventoryLayout::new(w, h);
         let Some(inv) = self.simulation.inventory() else {
             return;
         };
         let reg = self.world_state.world.registry();
+        use crate::ui_kit::palette;
 
-        // Dim the world behind the panel.
-        ui.quad(0.0, 0.0, w, h, [0, 0, 0, 140]);
-
-        // Panel + title (atlas chrome).
-        ui.nine_slice(
-            TILE_PANEL,
-            l.panel_x,
-            l.panel_y,
-            l.panel_w,
-            l.panel_h,
-            6.0,
-            [205, 205, 215, 255],
+        let mut kit = crate::ui_kit::UiKit::new(
+            ui,
+            &self.render.font,
+            (self.gameplay.mouse_pos.x, self.gameplay.mouse_pos.y),
         );
-        ui.text_shadow(
+        kit.dim(0.0, 0.0, w, h, 140);
+        kit.panel(l.panel.x, l.panel.y, l.panel.w, l.panel.h, palette::NEUTRAL);
+        kit.label(
             "Inventory",
-            l.panel_x + 14.0,
-            l.panel_y + 10.0,
+            l.panel.x + 8.0,
+            l.panel.y + 6.0,
             1.2,
-            crate::ui_kit::palette::INK,
-            &self.render.font,
+            palette::INK,
         );
 
-        // Armor column.
-        for (i, name) in ["Helm", "Chest", "Legs", "Boots"].iter().enumerate() {
-            let slot = voxel_game::InventorySlot::Armor(i);
-            let rect = l.slot_rect(slot).unwrap();
-            self.draw_inv_slot(ui, rect, inv.get_slot(slot), false, &reg);
-            ui.text(
-                name,
-                rect.x,
-                rect.y - 13.0,
-                1.0,
-                crate::ui_kit::palette::INK_MUTED,
-                &self.render.font,
-            );
-        }
-        // Offhand slot.
-        let off = voxel_game::InventorySlot::Offhand;
-        let off_rect = l.slot_rect(off).unwrap();
-        self.draw_inv_slot(ui, off_rect, inv.get_slot(off), false, &reg);
-        ui.text(
-            "Offhand",
-            off_rect.x,
-            off_rect.y - 13.0,
-            1.0,
-            crate::ui_kit::palette::INK_MUTED,
-            &self.render.font,
+        // Player preview: inset well with a paper-doll silhouette (head,
+        // torso, arms, legs) like MC's player model.
+        kit.panel_inset(
+            l.player.x,
+            l.player.y,
+            l.player.w,
+            l.player.h,
+            palette::NEUTRAL,
         );
+        let cx = l.player.x + l.player.w * 0.5;
+        let top = l.player.y + 8.0;
+        let doll = palette::INK_MUTED;
+        kit.ui.quad(cx - 10.0, top, 20.0, 20.0, doll); // head
+        kit.ui.quad(cx - 12.0, top + 24.0, 24.0, 36.0, doll); // torso
+        kit.ui.quad(cx - 20.0, top + 24.0, 8.0, 34.0, doll); // left arm
+        kit.ui.quad(cx + 12.0, top + 24.0, 8.0, 34.0, doll); // right arm
+        kit.ui.quad(cx - 11.0, top + 64.0, 10.0, 34.0, doll); // left leg
+        kit.ui.quad(cx + 1.0, top + 64.0, 10.0, 34.0, doll); // right leg
 
-        // Main 9×3 grid.
-        for i in 0..27 {
-            let slot = voxel_game::InventorySlot::Main(i);
-            let rect = l.slot_rect(slot).unwrap();
-            self.draw_inv_slot(ui, rect, inv.get_slot(slot), false, &reg);
+        // Hovered non-empty stack (name, count) for the tooltip queue —
+        // flushed last via `kit.finish()` so it draws over the chrome.
+        let mut hovered_stack: Option<(Rect, String, u32)> = None;
+
+        // 2×2 crafting: input grid, arrow, output slot.
+        for (i, slot) in l.crafting.iter().enumerate() {
+            let s = voxel_game::InventorySlot::CraftingInput(i);
+            if let Some((r, n, c)) =
+                self.draw_inv_slot(&mut kit, *slot, inv.get_slot(s), false, &reg)
+            {
+                hovered_stack = Some((r, n, c));
+            }
+        }
+        let ar = l.craft_arrow;
+        // Arrow: shaft + solid triangular head.
+        kit.ui
+            .quad(ar.x, ar.y + 5.0, ar.w - 4.0, 2.0, palette::INK_MUTED);
+        kit.ui
+            .quad(ar.x + 4.0, ar.y + 3.0, 2.0, 6.0, palette::INK_MUTED);
+        kit.ui
+            .quad(ar.x + 6.0, ar.y + 4.0, 2.0, 4.0, palette::INK_MUTED);
+        kit.ui
+            .quad(ar.x + 8.0, ar.y + 5.0, 2.0, 2.0, palette::INK_MUTED);
+        if let Some((r, n, c)) = self.draw_inv_slot(
+            &mut kit,
+            l.craft_output,
+            inv.get_slot(voxel_game::InventorySlot::CraftingOutput),
+            false,
+            &reg,
+        ) {
+            hovered_stack = Some((r, n, c));
         }
 
-        // Hotbar row (highlight the selected slot).
-        for i in 0..9 {
-            let slot = voxel_game::InventorySlot::Hotbar(i);
-            let rect = l.slot_rect(slot).unwrap();
-            self.draw_inv_slot(ui, rect, inv.get_slot(slot), inv.selected == i, &reg);
+        // Armor rail (left of the player preview).
+        for (i, slot) in l.armor.iter().enumerate() {
+            let s = voxel_game::InventorySlot::Armor(i);
+            if let Some((r, n, c)) =
+                self.draw_inv_slot(&mut kit, *slot, inv.get_slot(s), false, &reg)
+            {
+                hovered_stack = Some((r, n, c));
+            }
+        }
+        // Offhand slot (right of the preview, vertically centred).
+        if let Some((r, n, c)) = self.draw_inv_slot(
+            &mut kit,
+            l.offhand,
+            inv.get_slot(voxel_game::InventorySlot::Offhand),
+            false,
+            &reg,
+        ) {
+            hovered_stack = Some((r, n, c));
         }
 
-        // Hint line.
-        ui.text_shadow(
-            "Left-click: move stack - Right-click: half/one - Shift-click: quick-move - I/Esc: close",
-            l.panel_x + 14.0,
-            l.panel_y + l.panel_h - 18.0,
-            1.0,
-            crate::ui_kit::palette::INK_MUTED,
-            &self.render.font,
-        );
+        // Main 3×9 grid.
+        for (i, slot) in l.main.iter().enumerate() {
+            let s = voxel_game::InventorySlot::Main(i);
+            if let Some((r, n, c)) =
+                self.draw_inv_slot(&mut kit, *slot, inv.get_slot(s), false, &reg)
+            {
+                hovered_stack = Some((r, n, c));
+            }
+        } // Hotbar row (selected slot gets the gold frame).
+        for (i, slot) in l.hotbar.iter().enumerate() {
+            let s = voxel_game::InventorySlot::Hotbar(i);
+            if let Some((r, n, c)) =
+                self.draw_inv_slot(&mut kit, *slot, inv.get_slot(s), inv.selected == i, &reg)
+            {
+                hovered_stack = Some((r, n, c));
+            }
+        }
+
+        // Tooltip: item name + count, anchored to the hovered slot.
+        if let Some((rect, name, count)) = hovered_stack {
+            let label = if count > 1 {
+                format!("{name} ×{count}")
+            } else {
+                name
+            };
+            kit.tooltip(&label, rect.x + rect.w + 6.0, rect.y + rect.h * 0.5 - 11.0);
+        }
+        kit.finish();
     }
 
     /// Handle a click on the survival inventory screen. `left`/`right` mirror
-    /// the mouse buttons; `shift` enables quick-move. Currently supports
-    /// shift-click quick-move (main <-> hotbar) and plain left-click swaps
-    /// between two slots; armor/offhand accept swaps so players can equip.
+    /// the mouse buttons; `shift` enables quick-move. Supports shift-click
+    /// quick-move (main <-> hotbar) and plain left-click swaps between two
+    /// slots; armor/offhand/crafting accept swaps so players can equip and
+    /// stage ingredients. The crafting output is take-only.
     pub(crate) fn handle_inventory_click(&mut self, left: bool, _right: bool, shift: bool) {
         let (w, h) = self.render.logical_size();
         let l = InventoryLayout::new(w, h);
@@ -929,6 +854,13 @@ impl crate::EngineApp {
         let Some(inv) = self.simulation.inventory_mut() else {
             return;
         };
+
+        // The crafting result slot is take-only: clicking it with an empty
+        // result (or trying to place a held stack into it) does nothing,
+        // so items can never get stranded in the output.
+        if slot == voxel_game::InventorySlot::CraftingOutput && inv.get_slot(slot).is_empty() {
+            return;
+        }
 
         if shift && left {
             inv.shift_click_merge(slot);
@@ -1430,99 +1362,29 @@ impl crate::EngineApp {
         kit.finish();
     }
 
-    /// Handle a click in the creative inventory overlay.
+    /// Handle a click in the creative inventory overlay. Hit-testing mirrors
+    /// [`Self::draw_block_picker`] via the shared [`PickerLayout`].
     pub(crate) fn handle_block_picker_click(&mut self) {
+        use crate::screen_layout::{filter_creative_items, PickerLayout};
+
         let (w, h) = self.render.logical_size();
-
-        // ── Recompute layout (must match draw_block_picker) ──
-        let slot_size = 40.0f32;
-        let slot_gap = 3.0f32;
-        let cols = 9usize;
-        let panel_pad = 12.0f32;
-        let tabs = [
-            "Blocks",
-            "Nature",
-            "Building",
-            "Ores",
-            "Decoration",
-            "Liquids",
-            "All",
-            "Search",
-        ];
-        let tab_count = tabs.len();
         let active_tab = self.gameplay.creative_tab;
-        let is_search = active_tab == tab_count - 1;
+        let (total_rows, visible_rows) = crate::screen_layout::creative_scroll_bounds(
+            &self.gameplay.creative_items,
+            active_tab,
+            &self.gameplay.creative_search,
+        );
+        let scroll = crate::ui_kit::Scroll::new(
+            self.gameplay.creative_scroll as f32,
+            total_rows,
+            visible_rows,
+        );
+        let lay = PickerLayout::new(w, h, active_tab, visible_rows, scroll.first());
+        let mouse = self.gameplay.mouse_pos;
 
-        let filtered_items: Vec<&crate::CreativeItem> = if is_search {
-            let q = self.gameplay.creative_search.to_ascii_lowercase();
-            if q.is_empty() {
-                self.gameplay.creative_items.iter().collect()
-            } else {
-                self.gameplay
-                    .creative_items
-                    .iter()
-                    .filter(|it| it.name.to_ascii_lowercase().contains(&q))
-                    .collect()
-            }
-        } else if active_tab == tab_count - 2 {
-            self.gameplay.creative_items.iter().collect()
-        } else {
-            let cat = tabs[active_tab];
-            self.gameplay
-                .creative_items
-                .iter()
-                .filter(|it| it.category == cat)
-                .collect()
-        };
-
-        let item_count = filtered_items.len();
-        let rows = item_count.div_ceil(cols);
-        let visible_rows = rows.min(5);
-
-        let grid_w = cols as f32 * (slot_size + slot_gap) - slot_gap;
-        let panel_w = grid_w + panel_pad * 2.0;
-        let tab_height = 32.0f32;
-        let titlebar_h = 28.0f32;
-        let search_h = 28.0f32;
-        let grid_h = visible_rows as f32 * (slot_size + slot_gap) - slot_gap;
-        let hotbar_h = slot_size;
-        let divider_h = 2.0f32;
-
-        let panel_h = panel_pad
-            + titlebar_h
-            + 6.0
-            + if is_search { search_h + 6.0 } else { 0.0 }
-            + grid_h
-            + panel_pad
-            + divider_h
-            + 6.0
-            + hotbar_h
-            + panel_pad;
-
-        let panel_x = (w - panel_w) * 0.5;
-        let panel_y = (h - panel_h) * 0.5 - 10.0;
-
-        let mx = self.gameplay.mouse_pos.x;
-        let my = self.gameplay.mouse_pos.y;
-
-        // ── Check tab clicks ──
-        let tab_w = 40.0f32;
-        let tab_gap = 2.0f32;
-        let tab_row_w = tab_count as f32 * tab_w + (tab_count - 1) as f32 * tab_gap;
-        let tab_x0 = panel_x + (panel_w - tab_row_w) * 0.5;
-        let tab_y = panel_y - tab_height;
-
-        for i in 0..tab_count {
-            let tx = tab_x0 + i as f32 * (tab_w + tab_gap);
-            let is_active = i == active_tab;
-            let t_h = if is_active {
-                tab_height + 6.0
-            } else {
-                tab_height
-            };
-            let ty = if is_active { tab_y - 6.0 } else { tab_y };
-
-            if mx >= tx && mx < tx + tab_w && my >= ty && my < ty + t_h {
+        // Tab strip (switching a tab resets search + scroll).
+        for (i, (r, _)) in lay.tabs.iter().enumerate() {
+            if r.contains(mouse) {
                 self.gameplay.creative_tab = i;
                 self.gameplay.creative_search.clear();
                 self.gameplay.creative_scroll = 0;
@@ -1530,46 +1392,36 @@ impl crate::EngineApp {
             }
         }
 
-        // ── Check close button ──
-        let close_x = panel_x + panel_w - panel_pad - 20.0;
-        let close_y = panel_y + panel_pad;
-        if mx >= close_x && mx < close_x + 20.0 && my >= close_y && my < close_y + 20.0 {
+        // Close button.
+        if lay.close_btn.contains(mouse) {
             self.gameplay.block_picker_open = false;
             self.lock_cursor();
             return;
         }
 
-        // ── Check item grid clicks ──
-        let mut cy = panel_y + panel_pad + titlebar_h + 6.0;
-        if is_search {
-            cy += search_h + 6.0;
-        }
-        let grid_x0 = panel_x + panel_pad;
-        let grid_y0 = cy;
-
-        if mx >= grid_x0 && mx < grid_x0 + grid_w && my >= grid_y0 && my < grid_y0 + grid_h {
-            let col = ((mx - grid_x0) / (slot_size + slot_gap)) as usize;
-            let row = ((my - grid_y0) / (slot_size + slot_gap)) as usize;
-            let idx = row * cols + col;
-            if col < cols && row < visible_rows && idx < filtered_items.len() {
-                let item = filtered_items[idx];
-                if let Some(inv) = self.simulation.inventory_mut() {
-                    inv.set_hotbar_block(inv.selected, item.id);
-                }
-                self.gameplay
-                    .chat
-                    .push_message(format!("Selected: {}", item.name));
-                self.gameplay.block_picker_open = false;
-                self.lock_cursor();
+        // Item grid: content index under the cursor, already mapped through
+        // the scroll window so clicks after scrolling pick the right item.
+        let filtered = filter_creative_items(
+            &self.gameplay.creative_items,
+            active_tab,
+            &self.gameplay.creative_search,
+        );
+        if let Some(idx) = lay.item_at(mouse.x, mouse.y, filtered.len()) {
+            let item = &filtered[idx];
+            if let Some(inv) = self.simulation.inventory_mut() {
+                inv.set_hotbar_block(inv.selected, item.block);
             }
+            self.gameplay
+                .chat
+                .push_message(format!("Selected: {}", item.name));
+            self.gameplay.block_picker_open = false;
+            self.lock_cursor();
             return;
         }
 
-        // ── Check hotbar clicks ──
-        cy += grid_h + panel_pad + divider_h + 6.0;
-        let hotbar_x0 = panel_x + panel_pad;
-        if mx >= hotbar_x0 && mx < hotbar_x0 + grid_w && my >= cy && my < cy + hotbar_h {
-            let slot_idx = ((mx - hotbar_x0) / (slot_size + slot_gap)) as usize;
+        // Hotbar row: clicking a slot selects it.
+        if lay.hotbar.contains(mouse) {
+            let slot_idx = ((mouse.x - lay.hotbar.x) / (lay.slot + lay.gap)) as usize;
             if slot_idx < 9 {
                 if let Some(inv) = self.simulation.inventory_mut() {
                     inv.select(slot_idx);
@@ -1813,7 +1665,7 @@ impl crate::EngineApp {
                 TILE_BTN
             };
             let text = if i == crate::screen_layout::TitleLayout::MULTIPLAYER {
-                crate::ui_kit::palette::INK_DISABLED
+                crate::ui_kit::palette::DISABLED
             } else {
                 crate::ui_kit::palette::INK
             };
@@ -2123,7 +1975,11 @@ impl crate::EngineApp {
             play.w,
             play.h,
             4.0,
-            [228, 240, 228, 255],
+            if play_enabled {
+                [228, 240, 228, 255]
+            } else {
+                [255, 255, 255, 255]
+            },
         );
         ui.text_shadow(
             "Play Selected World",
@@ -2133,7 +1989,7 @@ impl crate::EngineApp {
             if play_enabled {
                 crate::ui_kit::palette::INK
             } else {
-                crate::ui_kit::palette::INK_DISABLED
+                crate::ui_kit::palette::DISABLED
             },
             &self.render.font,
         );
@@ -2550,7 +2406,7 @@ impl crate::EngineApp {
                 crate::ui_kit::palette::INK,
             )
         } else {
-            (TILE_BTN_DISABLED, crate::ui_kit::palette::INK_DISABLED)
+            (TILE_BTN_DISABLED, crate::ui_kit::palette::DISABLED)
         };
         ui.nine_slice(
             create_tile,
@@ -3349,421 +3205,151 @@ impl crate::EngineApp {
 
         y + crate::screen_layout::KEYBIND_ROW_H
     }
+    /// Draw the creative block picker (Minecraft-style): a light panel with
+    /// a tab strip above, the item grid with a scrollbar, an optional search
+    /// field, and the player's hotbar row at the bottom for drop-in
+    /// feedback. Hit-testing lives in [`Self::handle_block_picker_click`] on
+    /// the same layout.
     fn draw_block_picker(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
-        // ── Design tokens (matching the HTML mockup) ──
-        let ink = [28, 27, 32, 255]; // #1c1b20
-        let slate = [74, 73, 82, 255]; // #4a4952
-        let slate_deep = [55, 54, 61, 255]; // #37363d
-        let slate_light = [87, 86, 95, 255]; // #57565f
-        let bone = [236, 233, 226, 255]; // #ece9e2
-        let dust = [165, 162, 173, 255]; // #a5a2ad
-        let ember = [224, 168, 62, 255]; // #e0a83e
-        let ember_soft = [224, 168, 62, 76]; // rgba(224,168,62,.30)
-        let slot_bg = [41, 40, 46, 255]; // #29282e
+        use crate::screen_layout::{creative_scroll_bounds, filter_creative_items, PickerLayout};
+        use crate::ui_kit::palette;
 
-        let slot_size = 40.0f32;
-        let slot_gap = 3.0f32;
-        let cols = 9usize;
-        let panel_pad = 12.0f32;
-
-        // ── Tab definitions ──
-        let tabs = [
-            "Blocks",
-            "Nature",
-            "Building",
-            "Ores",
-            "Decoration",
-            "Liquids",
-            "All",
-            "Search",
-        ];
-        let tab_count = tabs.len();
-
-        // ── Filter items by active tab ──
         let active_tab = self.gameplay.creative_tab;
-        let is_search = active_tab == tab_count - 1; // last tab is search
-        let filtered_items: Vec<&crate::CreativeItem> = if is_search {
-            let q = self.gameplay.creative_search.to_ascii_lowercase();
-            if q.is_empty() {
-                self.gameplay.creative_items.iter().collect()
-            } else {
-                self.gameplay
-                    .creative_items
-                    .iter()
-                    .filter(|it| it.name.to_ascii_lowercase().contains(&q))
-                    .collect()
-            }
-        } else if active_tab == tab_count - 2 {
-            // "All" tab
-            self.gameplay.creative_items.iter().collect()
+        let filtered = filter_creative_items(
+            &self.gameplay.creative_items,
+            active_tab,
+            &self.gameplay.creative_search,
+        );
+        let (total_rows, visible_rows) = creative_scroll_bounds(
+            &self.gameplay.creative_items,
+            active_tab,
+            &self.gameplay.creative_search,
+        );
+        let scroll = crate::ui_kit::Scroll::new(
+            self.gameplay.creative_scroll as f32,
+            total_rows,
+            visible_rows,
+        );
+        let lay = PickerLayout::new(w, h, active_tab, visible_rows, scroll.first());
+
+        let mut kit = crate::ui_kit::UiKit::new(
+            ui,
+            &self.render.font,
+            (self.gameplay.mouse_pos.x, self.gameplay.mouse_pos.y),
+        );
+        kit.dim(0.0, 0.0, w, h, 140);
+
+        // Tab strip above the panel; the active tab is raised into it.
+        for (i, (r, label)) in lay.tabs.iter().enumerate() {
+            kit.tab(*r, label, i == active_tab);
+        }
+
+        // Panel + title + close.
+        kit.panel(
+            lay.panel.x,
+            lay.panel.y,
+            lay.panel.w,
+            lay.panel.h,
+            palette::NEUTRAL,
+        );
+        let title = if PickerLayout::is_search(active_tab) {
+            "Search Items"
         } else {
-            let cat = tabs[active_tab];
-            self.gameplay
-                .creative_items
-                .iter()
-                .filter(|it| it.category == cat)
-                .collect()
+            lay.tabs[active_tab].1
         };
+        kit.label(
+            title,
+            lay.panel.x + 10.0,
+            lay.panel.y + 5.0,
+            1.2,
+            palette::INK,
+        );
+        kit.small_button(lay.close_btn.x, lay.close_btn.y, lay.close_btn.w, "X");
 
-        let item_count = filtered_items.len();
-        let rows = item_count.div_ceil(cols);
-        let visible_rows = rows.min(5); // Show max 5 rows, scroll for more
-
-        // ── Panel dimensions ──
-        let grid_w = cols as f32 * (slot_size + slot_gap) - slot_gap;
-        let panel_w = grid_w + panel_pad * 2.0;
-        let tab_height = 32.0f32;
-        let titlebar_h = 28.0f32;
-        let search_h = 28.0f32;
-        let grid_h = visible_rows as f32 * (slot_size + slot_gap) - slot_gap;
-        let hotbar_h = slot_size;
-        let divider_h = 2.0f32;
-
-        let panel_h = panel_pad
-            + titlebar_h
-            + 6.0
-            + if is_search { search_h + 6.0 } else { 0.0 }
-            + grid_h
-            + panel_pad
-            + divider_h
-            + 6.0
-            + hotbar_h
-            + panel_pad;
-
-        let panel_x = (w - panel_w) * 0.5;
-        let panel_y = (h - panel_h) * 0.5 - 10.0;
-
-        // ── Dim background ──
-        ui.quad(0.0, 0.0, w, h, [0, 0, 0, 160]);
-
-        // ── Tab row (above panel) ──
-        let tab_w = 40.0f32;
-        let tab_gap = 2.0f32;
-        let tab_row_w = tab_count as f32 * tab_w + (tab_count - 1) as f32 * tab_gap;
-        let tab_x0 = panel_x + (panel_w - tab_row_w) * 0.5;
-        let tab_y = panel_y - tab_height;
-
-        for (i, _label) in tabs.iter().enumerate() {
-            let tx = tab_x0 + i as f32 * (tab_w + tab_gap);
-            let is_active = i == active_tab;
-            let t_h = if is_active {
-                tab_height + 6.0
+        // Search field (Search tab only). Typing is handled in the key path.
+        if let Some(sf) = lay.search_field {
+            kit.panel_inset(sf.x, sf.y, sf.w, sf.h, palette::NEUTRAL);
+            let query = self.gameplay.creative_search.clone();
+            let (text, color) = if query.is_empty() {
+                ("Search items...".to_string(), palette::MUTED)
             } else {
-                tab_height
+                (query, palette::TEXT)
             };
-            let ty = if is_active { tab_y - 6.0 } else { tab_y };
-
-            // Tab background
-            let bg = if is_active { slate } else { slate_deep };
-            let alpha = if is_active { 255 } else { 170 };
-            ui.quad(tx, ty, tab_w, t_h, [bg[0], bg[1], bg[2], alpha]);
-
-            // Tab icon (simple shape)
-            let icon_size = 16.0f32;
-            let icon_x = tx + (tab_w - icon_size) * 0.5;
-            let icon_y = ty + (t_h - icon_size) * 0.5 + 2.0;
-            let icon_color = if is_active { bone } else { dust };
-            // Draw simple geometric icon based on tab
-            match i {
-                0 => {
-                    // Blocks - cube
-                    ui.quad(
-                        icon_x + 2.0,
-                        icon_y + 2.0,
-                        icon_size - 4.0,
-                        icon_size - 4.0,
-                        icon_color,
-                    );
-                }
-                1 => {
-                    // Nature - circle-ish
-                    ui.quad(
-                        icon_x + 3.0,
-                        icon_y + 1.0,
-                        icon_size - 6.0,
-                        icon_size - 2.0,
-                        icon_color,
-                    );
-                }
-                2 => {
-                    // Building - brick
-                    ui.quad(icon_x + 1.0, icon_y + 2.0, icon_size - 2.0, 5.0, icon_color);
-                    ui.quad(icon_x + 1.0, icon_y + 9.0, icon_size - 2.0, 5.0, icon_color);
-                }
-                3 => {
-                    // Ores - diamond
-                    ui.quad(icon_x + 4.0, icon_y + 1.0, 8.0, 14.0, icon_color);
-                }
-                4 => {
-                    // Decoration - lamp
-                    ui.quad(icon_x + 5.0, icon_y + 1.0, 6.0, 6.0, icon_color);
-                    ui.quad(icon_x + 4.0, icon_y + 8.0, 8.0, 6.0, icon_color);
-                }
-                5 => {
-                    // Liquids - wave
-                    ui.quad(icon_x + 1.0, icon_y + 5.0, 14.0, 3.0, icon_color);
-                    ui.quad(icon_x + 3.0, icon_y + 9.0, 10.0, 3.0, icon_color);
-                }
-                6 => {
-                    // All - grid
-                    ui.quad(icon_x + 1.0, icon_y + 1.0, 6.0, 6.0, icon_color);
-                    ui.quad(icon_x + 9.0, icon_y + 1.0, 6.0, 6.0, icon_color);
-                    ui.quad(icon_x + 1.0, icon_y + 9.0, 6.0, 6.0, icon_color);
-                    ui.quad(icon_x + 9.0, icon_y + 9.0, 6.0, 6.0, icon_color);
-                }
-                7 => {
-                    // Search - magnifier
-                    ui.rect_border(icon_x + 1.0, icon_y + 1.0, 10.0, 10.0, 2.0, icon_color);
-                    ui.quad(icon_x + 10.0, icon_y + 11.0, 5.0, 2.0, icon_color);
-                }
-                _ => {}
-            }
+            kit.label(&text, sf.x + 6.0, sf.y + 6.0, 1.0, color);
         }
 
-        // ── Panel background ──
-        // Gradient approximation: use the mid-slate color
-        ui.quad(panel_x, panel_y, panel_w, panel_h, slate);
-        // Border
-        ui.rect_border(panel_x, panel_y, panel_w, panel_h, 3.0, ink);
-        // Inner highlight
-        ui.rect_border(
-            panel_x + 1.0,
-            panel_y + 1.0,
-            panel_w - 2.0,
-            panel_h - 2.0,
-            1.0,
-            slate_light,
-        );
-
-        let mut cy = panel_y + panel_pad;
-
-        // ── Title bar ──
-        let category_label = if is_search {
-            "Search"
-        } else {
-            tabs[active_tab]
-        };
-        ui.text(
-            "Builder's Catalog",
-            panel_x + panel_pad,
-            cy,
-            0.65,
-            dust,
-            &self.render.font,
-        );
-        ui.text(
-            category_label,
-            panel_x + panel_pad + 100.0,
-            cy,
-            0.85,
-            bone,
-            &self.render.font,
-        );
-        // Close button
-        let close_x = panel_x + panel_w - panel_pad - 20.0;
-        let close_y = cy;
-        ui.quad(close_x, close_y, 20.0, 20.0, slot_bg);
-        ui.rect_border(close_x, close_y, 20.0, 20.0, 1.0, slate_light);
-        ui.text(
-            "X",
-            close_x + 5.0,
-            close_y + 2.0,
-            0.9,
-            dust,
-            &self.render.font,
-        );
-        cy += titlebar_h + 6.0;
-
-        // ── Search row (only when search tab active) ──
-        if is_search {
-            ui.quad(panel_x + panel_pad, cy, grid_w, search_h, slot_bg);
-            ui.rect_border(panel_x + panel_pad, cy, grid_w, search_h, 1.0, ink);
-            let search_label = if self.gameplay.creative_search.is_empty() {
-                "Search catalog...".to_string()
-            } else {
-                self.gameplay.creative_search.clone()
-            };
-            ui.text(
-                &search_label,
-                panel_x + panel_pad + 6.0,
-                cy + 6.0,
-                0.85,
-                dust,
-                &self.render.font,
-            );
-            cy += search_h + 6.0;
-        }
-
-        // ── Item grid ──
-        let grid_x0 = panel_x + panel_pad;
-        let grid_y0 = cy;
-        let mut hovered_item_name: Option<&str> = None;
-        let mut hovered_item_cat: Option<&str> = None;
-        let mut hovered_slot_index: Option<usize> = None;
-
-        // Calculate scroll bounds.
-        let total_rows = filtered_items.len().div_ceil(cols);
-        let max_scroll = total_rows.saturating_sub(visible_rows);
-        let scroll_offset = self.gameplay.creative_scroll.min(max_scroll);
-
-        // Map an item index to its on-screen slot position. Shared by the
-        // hover loop and the tooltip so the layout math can't drift.
-        let slot_screen_pos = |i: usize| {
-            let col = i % cols;
-            let row = i / cols;
-            let display_row = row - scroll_offset;
-            Point::new(
-                grid_x0 + col as f32 * (slot_size + slot_gap),
-                grid_y0 + display_row as f32 * (slot_size + slot_gap),
-            )
-        };
-
-        for (i, item) in filtered_items.iter().enumerate() {
-            let row = i / cols;
-            // Apply scroll offset.
-            if row < scroll_offset {
-                continue;
-            }
-            let display_row = row - scroll_offset;
-            if display_row >= visible_rows {
-                break;
-            }
-            let Point { x: sx, y: sy } = slot_screen_pos(i);
-
-            // Check if mouse is hovering over this slot.
-            let is_hovered = self.gameplay.mouse_pos.x >= sx
-                && self.gameplay.mouse_pos.x < sx + slot_size
-                && self.gameplay.mouse_pos.y >= sy
-                && self.gameplay.mouse_pos.y < sy + slot_size;
-
-            // Slot background
-            if is_hovered {
-                // Hover highlight (ember glow from mockup)
-                ui.quad(sx, sy, slot_size, slot_size, ember_soft);
-                ui.rect_border(sx, sy, slot_size, slot_size, 2.0, ember);
-                hovered_item_name = Some(&item.name);
-                hovered_item_cat = Some(&item.category);
-                hovered_slot_index = Some(i);
-            } else {
-                ui.quad(sx, sy, slot_size, slot_size, slot_bg);
-                // 3D inset effect
-                ui.quad(sx, sy, slot_size, 2.0, ink); // top shadow
-                ui.quad(sx, sy, 2.0, slot_size, ink); // left shadow
-                ui.quad(sx + slot_size - 2.0, sy, 2.0, slot_size, slate_light); // right highlight
-                ui.quad(sx, sy + slot_size - 2.0, slot_size, 2.0, slate_light); // bottom highlight
-            }
-
-            // Block icon
-            ui.block_icon(
-                sx + 2.0,
-                sy + 2.0,
-                slot_size - 4.0,
-                slot_size - 4.0,
-                item.tile,
-                [255, 255, 255, 255],
-            );
-        }
-
-        // ── Tooltip (shown when hovering over an item) ──
-        if let (Some(name), Some(cat), Some(slot)) =
-            (hovered_item_name, hovered_item_cat, hovered_slot_index)
+        // Item grid: only the scrolled window, indexed by content position
+        // via `slot_pos` so draw and click share one mapping.
+        let mut hovered: Option<(Rect, String, String)> = None;
+        for (k, item) in filtered
+            .iter()
+            .enumerate()
+            .skip(scroll.first() * lay.cols)
+            .take(lay.visible_rows * lay.cols)
         {
-            let tooltip_pad = 8.0f32;
-            let tooltip_w = 140.0f32;
-            let tooltip_h = 36.0f32;
-            // Position tooltip near the hovered slot, but not off-screen.
-            let Point { x: sx, y: sy } = slot_screen_pos(slot);
-            let mut tooltip_x = sx + slot_size + 6.0;
-            let mut tooltip_y = sy - 4.0;
-            if tooltip_x + tooltip_w > w - 10.0 {
-                tooltip_x = sx - tooltip_w - 6.0;
+            let Some((sx, sy)) = lay.slot_pos(k) else {
+                continue;
+            };
+            let r = kit.slot(sx, sy, lay.slot, Some(item.tile), None, false);
+            if kit.hovered(r) {
+                hovered = Some((r, item.name.clone(), item.category.clone()));
             }
-            if tooltip_y + tooltip_h > h - 10.0 {
-                tooltip_y = h - tooltip_h - 10.0;
-            }
-            if tooltip_y < 10.0 {
-                tooltip_y = 10.0;
-            }
-            // Tooltip background
-            ui.quad(tooltip_x, tooltip_y, tooltip_w, tooltip_h, ink);
-            ui.rect_border(tooltip_x, tooltip_y, tooltip_w, tooltip_h, 1.0, slate_light);
-            // Item name (ember color, like mockup)
-            ui.text(
-                name,
-                tooltip_x + tooltip_pad,
-                tooltip_y + 4.0,
-                0.85,
-                ember,
-                &self.render.font,
-            );
-            // Category (dust color)
-            ui.text(
-                cat,
-                tooltip_x + tooltip_pad,
-                tooltip_y + 18.0,
-                0.65,
-                dust,
-                &self.render.font,
-            );
         }
-        cy += grid_h + panel_pad;
 
-        // ── Divider ──
-        ui.quad(panel_x + panel_pad, cy, grid_w, divider_h, ink);
-        ui.quad(panel_x + panel_pad, cy + 1.0, grid_w, 1.0, slate_light);
-        cy += divider_h + 6.0;
-
-        // ── Hotbar (bottom section) ──
-        let hotbar_x0 = panel_x + panel_pad;
-        for i in 0..9 {
-            let sx = hotbar_x0 + i as f32 * (slot_size + slot_gap);
-            ui.quad(sx, cy, slot_size, slot_size, slot_bg);
-            ui.quad(sx, cy, slot_size, 2.0, ink);
-            ui.quad(sx, cy, 2.0, slot_size, ink);
-            ui.quad(sx + slot_size - 2.0, cy, 2.0, slot_size, slate_light);
-            ui.quad(sx, cy + slot_size - 2.0, slot_size, 2.0, slate_light);
-
-            // Highlight selected hotbar slot
-            if i == self.simulation.inventory().map_or(0, |inv| inv.selected) {
-                ui.rect_border(
-                    sx - 1.0,
-                    cy - 1.0,
-                    slot_size + 2.0,
-                    slot_size + 2.0,
-                    2.0,
-                    ember,
+        // Scrollbar on the grid's right edge when content overflows.
+        if total_rows > visible_rows {
+            if let Some(track) = lay.scrollbar {
+                let frac = scroll.first() as f32 / scroll.max_top().max(1) as f32;
+                kit.scrollbar(
+                    track.x,
+                    track.y,
+                    track.w,
+                    track.h,
+                    frac,
+                    visible_rows as f32 / total_rows as f32,
                 );
             }
+        }
 
-            // Show hotbar item if any
-            let block_id = self
+        // Player hotbar row at the bottom (selected slot framed gold).
+        let sel = self.simulation.inventory().map_or(0, |inv| inv.selected);
+        for i in 0..9 {
+            let x = lay.hotbar.x + i as f32 * (lay.slot + lay.gap);
+            let block = self
                 .simulation
                 .inventory()
                 .and_then(|inv| inv.hotbar_block(i))
                 .unwrap_or(voxel_core::BlockId::AIR);
-            if !block_id.is_air() {
-                // Try to find the item in our creative cache to get its tile
-                if let Some(cached) = self
-                    .gameplay
+            let icon = (!block.is_air()).then(|| {
+                self.gameplay
                     .creative_items
                     .iter()
-                    .find(|it| it.id == block_id)
-                {
-                    ui.block_icon(
-                        sx + 2.0,
-                        cy + 2.0,
-                        slot_size - 4.0,
-                        slot_size - 4.0,
-                        cached.tile,
-                        [255, 255, 255, 255],
-                    );
-                }
+                    .find(|it| it.id == block)
+                    .map_or(0, |it| it.tile)
+            });
+            let r = kit.slot(x, lay.hotbar.y, lay.slot, icon, None, false);
+            if i == sel {
+                kit.sel_frame(r);
             }
-
-            // Slot number
-            let num = format!("{}", i + 1);
-            ui.text(&num, sx + 1.0, cy + 1.0, 0.6, dust, &self.render.font);
+            kit.label(
+                &(i + 1).to_string(),
+                x + 2.0,
+                lay.hotbar.y + 2.0,
+                1.0,
+                palette::MUTED,
+            );
         }
+
+        // Tooltip: item name + category sub-text, anchored to the slot.
+        if let Some((rect, name, cat)) = hovered {
+            kit.tooltip2(
+                &name,
+                Some(&cat),
+                rect.x + rect.w + 6.0,
+                rect.y + rect.h * 0.5 - 17.0,
+            );
+        }
+        kit.finish();
     }
 
     /// Draw the chat overlay.

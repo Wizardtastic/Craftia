@@ -1339,8 +1339,9 @@ impl ApplicationHandler for EngineApp {
 
                 // Creative inventory search input takes priority when search tab is active.
                 if self.gameplay.block_picker_open {
-                    let tab_count = 8; // Must match draw_block_picker
-                    let is_search = self.gameplay.creative_tab == tab_count - 1;
+                    let is_search = self.gameplay.creative_tab
+                        == crate::screen_layout::PICKER_TABS.len()
+                            - 1;
                     if is_search && pressed {
                         if let PhysicalKey::Code(code) = event.physical_key {
                             match code {
@@ -1505,23 +1506,31 @@ impl ApplicationHandler for EngineApp {
                                     }
                                     self.gameplay.chat.push_message(format!("Render distance: {r}"));
                                 }
-                                Action::BlockPicker => {
+                                Action::BlockPicker | Action::Inventory => {
                                     if self.gameplay.game_state == GameState::Playing {
-                                        self.gameplay.block_picker_open = !self.gameplay.block_picker_open;
-                                        if self.gameplay.block_picker_open {
-                                            self.unlock_cursor();
-                                            self.input.input.held.clear();
+                                        // Mode-aware inventory routing (vanilla
+                                        // behavior): both E and I open the screen
+                                        // that matches the player's game mode —
+                                        // creative tabs in creative, the survival
+                                        // inventory in survival. The two overlays
+                                        // are mutually exclusive.
+                                        let creative = self
+                                            .simulation
+                                            .player_game_mode()
+                                            .inventory_behavior()
+                                            == voxel_game::InventoryBehavior::CreativeTabs;
+                                        if creative {
+                                            self.gameplay.inventory_open = false;
+                                            self.gameplay.block_picker_open =
+                                                !self.gameplay.block_picker_open;
                                         } else {
-                                            self.lock_cursor();
+                                            self.gameplay.block_picker_open = false;
+                                            self.gameplay.inventory_open =
+                                                !self.gameplay.inventory_open;
                                         }
-                                    }
-                                }
-                                Action::Inventory => {
-                                    if self.gameplay.game_state == GameState::Playing {
-                                        // Mutual exclusion with the creative picker.
-                                        self.gameplay.block_picker_open = false;
-                                        self.gameplay.inventory_open = !self.gameplay.inventory_open;
-                                        if self.gameplay.inventory_open {
+                                        if self.gameplay.block_picker_open
+                                            || self.gameplay.inventory_open
+                                        {
                                             self.unlock_cursor();
                                             self.input.input.held.clear();
                                         } else {
@@ -1890,15 +1899,22 @@ impl ApplicationHandler for EngineApp {
                 if self.gameplay.edit.mode.is_active() {
                     self.gameplay.edit.scroll_delta += dy;
                 }
-                // Scroll creative inventory when open.
+                // Scroll the creative/block-picker grid when open, clamped
+                // by the same Scroll math the draw and click paths use.
                 if self.gameplay.block_picker_open {
-                    if dy < 0.0 {
-                        // Scroll down.
-                        self.gameplay.creative_scroll = self.gameplay.creative_scroll.saturating_add(1);
-                    } else if dy > 0.0 {
-                        // Scroll up.
-                        self.gameplay.creative_scroll = self.gameplay.creative_scroll.saturating_sub(1);
-                    }
+                    let (total_rows, visible) =
+                        crate::screen_layout::creative_scroll_bounds(
+                            &self.gameplay.creative_items,
+                            self.gameplay.creative_tab,
+                            &self.gameplay.creative_search,
+                        );
+                    let scroll = crate::ui_kit::Scroll::new(
+                        self.gameplay.creative_scroll as f32,
+                        total_rows,
+                        visible,
+                    );
+                    let next = scroll.scroll_by(-dy.signum() * crate::ui_kit::SCROLL_STEP);
+                    self.gameplay.creative_scroll = next.first();
                 }
                 // Scroll the world-select list (only when no dialog is
                 // stacked on top of it).

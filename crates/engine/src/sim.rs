@@ -384,6 +384,14 @@ impl Simulation {
         self.ecs_world.resource::<PlayerEntity>().and_then(|p| p.0)
     }
 
+    /// The player's current game mode (Survival by default, before spawn).
+    pub fn player_game_mode(&self) -> voxel_game::GameMode {
+        self.player_entity()
+            .and_then(|e| self.ecs_world.get::<voxel_game::GameMode>(e))
+            .copied()
+            .unwrap_or(voxel_game::GameMode::Survival)
+    }
+
     /// Read the player's inventory (contents + hotbar selection). The
     /// component on the player entity is the single source of truth.
     pub fn inventory(&self) -> Option<&voxel_game::SurvivalInventory> {

@@ -97,8 +97,16 @@ fn bevel_button(pressed: bool, dim: bool) -> impl Fn(u32, u32) -> Px {
         let fill_bot = 0.80f32;
         let fill = fill_top - (fill_top - fill_bot) * (y as f32 / 15.0);
         if dim {
-            let v = if edge_light || edge_dark { 0.42 } else { 0.55 };
-            g(v, 255)
+            // Disabled: near-black stone so grayed-out entries clearly read
+            // as unclickable (light text goes on top, like Minecraft).
+            let v = if edge_light {
+                0.50
+            } else if edge_dark {
+                0.16
+            } else {
+                fill_top - (fill_top - fill_bot) * (y as f32 / 15.0) * 0.45 - 0.60
+            };
+            g(v.max(0.22), 255)
         } else if pressed {
             if edge_light {
                 g(0.38, 255)
