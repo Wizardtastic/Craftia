@@ -181,6 +181,204 @@ impl UiDrawData {
         self.quad(x + w - thickness, y, thickness, h, color); // right
     }
 
+    // ── UI-atlas helpers (tex_id = 3) ────────────────────────────────────
+
+    /// Draw one UI-atlas tile stretched to `size`. `tint` multiplies the
+    /// tile pixels — chrome tiles are grayscale so the tint carries the
+    /// widget colour.
+    pub fn sprite(&mut self, tile: u32, x: f32, y: f32, size: f32, tint: [u8; 4]) {
+        let (u0, v0, u1, v1) = crate::ui_atlas::ui_tile_uv(tile);
+        self.quad_uv(x, y, size, size, u0, v0, u1, v1, tint, 3.0);
+    }
+
+    /// Draw one UI-atlas tile stretched to `w` × `h` (non-uniform).
+    pub fn sprite_wh(&mut self, tile: u32, x: f32, y: f32, w: f32, h: f32, tint: [u8; 4]) {
+        let (u0, v0, u1, v1) = crate::ui_atlas::ui_tile_uv(tile);
+        self.quad_uv(x, y, w, h, u0, v0, u1, v1, tint, 3.0);
+    }
+
+    /// 9-slice draw of a UI-atlas chrome tile. `border` is the inset in
+    /// screen pixels; corners keep their aspect, edges stretch along one
+    /// axis, the centre stretches in both.
+    #[allow(clippy::too_many_arguments)]
+    pub fn nine_slice(
+        &mut self,
+        tile: u32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        border: f32,
+        tint: [u8; 4],
+    ) {
+        let (u0, v0, u1, v1) = crate::ui_atlas::ui_tile_uv(tile);
+        // Border width/height in UV space (tiles are square).
+        let bu = border
+            / (w.max(border) * crate::ui_atlas::UI_ATLAS_COLS as f32 / w.max(border)).max(1.0);
+        let _ = bu;
+        // Simpler: compute from the tile's pixel size (16 px).
+        let tile_px = 16.0f32;
+        let b = (border / tile_px).min(0.5);
+        let um = u0 + (u1 - u0) * b;
+        let vm = v0 + (v1 - v0) * b;
+        // Guard against zero-width middle sections.
+        let bx = border.min(w * 0.5);
+        let by = border.min(h * 0.5);
+        let xs = [x, x + bx, x + w - bx];
+        let ys = [y, y + by, y + h - by];
+        let ws = [bx, w - 2.0 * bx, bx];
+        let hs = [by, h - 2.0 * by, by];
+        // 4 UV stops: left edge, left-mid, right-mid, right edge. The
+        // middle stop of each is inset by the border so corners keep their
+        // aspect while edges/centre stretch.
+        let us = [u0, um, u1 - (u1 - u0) * b, u1];
+        let vs = [v0, vm, v1 - (v1 - v0) * b, v1];
+        for row in 0..3 {
+            for col in 0..3 {
+                if ws[col] <= 0.0 || hs[row] <= 0.0 {
+                    continue;
+                }
+                self.quad_uv(
+                    xs[col],
+                    ys[row],
+                    ws[col],
+                    hs[row],
+                    us[col],
+                    vs[row],
+                    us[col + 1],
+                    vs[row + 1],
+                    tint,
+                    3.0,
+                );
+            }
+        }
+    }
+
+    /// Vertical gradient quad (top colour → bottom colour). Uses the block
+    /// atlas white tile, so the gradient comes entirely from vertex colours.
+    pub fn gradient_v(&mut self, x: f32, y: f32, w: f32, h: f32, top: [u8; 4], bottom: [u8; 4]) {
+        let start = self.vertices.len() as u32;
+        let (u0, v0, u1, v1) = {
+            let tile = 20u32;
+            let tx = tile % crate::atlas::ATLAS_TILES;
+            let ty = tile / crate::atlas::ATLAS_TILES;
+            (
+                tx as f32 / crate::atlas::ATLAS_TILES as f32,
+                ty as f32 / crate::atlas::ATLAS_TILES as f32,
+                (tx + 1) as f32 / crate::atlas::ATLAS_TILES as f32,
+                (ty + 1) as f32 / crate::atlas::ATLAS_TILES as f32,
+            )
+        };
+        self.vertices.extend_from_slice(&[
+            UiVertex {
+                pos: [x, y],
+                uv: [u0, v0],
+                color: top,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: [x + w, y],
+                uv: [u1, v0],
+                color: top,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: [x + w, y + h],
+                uv: [u1, v1],
+                color: bottom,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: [x, y + h],
+                uv: [u0, v1],
+                color: bottom,
+                tex_id: 0.0,
+            },
+        ]);
+        self.indices
+            .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+
+    /// Horizontal gradient quad (left colour → right colour).
+    pub fn gradient_h(&mut self, x: f32, y: f32, w: f32, h: f32, left: [u8; 4], right: [u8; 4]) {
+        let start = self.vertices.len() as u32;
+        let (u0, v0, u1, v1) = {
+            let tile = 20u32;
+            let tx = tile % crate::atlas::ATLAS_TILES;
+            let ty = tile / crate::atlas::ATLAS_TILES;
+            (
+                tx as f32 / crate::atlas::ATLAS_TILES as f32,
+                ty as f32 / crate::atlas::ATLAS_TILES as f32,
+                (tx + 1) as f32 / crate::atlas::ATLAS_TILES as f32,
+                (ty + 1) as f32 / crate::atlas::ATLAS_TILES as f32,
+            )
+        };
+        self.vertices.extend_from_slice(&[
+            UiVertex {
+                pos: [x, y],
+                uv: [u0, v0],
+                color: left,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: [x + w, y],
+                uv: [u1, v0],
+                color: right,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: [x + w, y + h],
+                uv: [u1, v1],
+                color: right,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: [x, y + h],
+                uv: [u0, v1],
+                color: left,
+                tex_id: 0.0,
+            },
+        ]);
+        self.indices
+            .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+
+    /// Text with the classic game drop shadow: a dark copy drawn 1 px down-
+    /// right (scaled), then the text itself. Returns the end X like `text`.
+    pub fn text_shadow(
+        &mut self,
+        s: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [u8; 4],
+        font: &FontAtlas,
+    ) -> f32 {
+        let o = (1.0 * scale).max(1.0);
+        let shadow = [0, 0, 0, (color[3] as u32 * 3 / 4) as u8];
+        self.text(s, x + o, y + o, scale, shadow, font);
+        self.text(s, x, y, scale, color, font)
+    }
+
+    /// Progress bar drawn from UI-atlas chrome: inset track + filled span.
+    /// `t` in 0..1.
+    pub fn progress_bar(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, fill: [u8; 4]) {
+        self.nine_slice(
+            crate::ui_atlas::TILE_PANEL_INSET,
+            x,
+            y,
+            w,
+            h,
+            2.0,
+            [255, 255, 255, 255],
+        );
+        let pad = 2.0;
+        let fw = (w - 2.0 * pad) * t.clamp(0.0, 1.0);
+        if fw > 0.5 {
+            self.quad(x + pad, y + pad, fw, h - 2.0 * pad, fill);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.indices.clear();
@@ -340,9 +538,10 @@ fn auto_range(values: &[f32], min_y: Option<f32>, max_y: Option<f32>) -> (f32, f
 const FONT_ADVANCE: f32 = 12.0;
 /// Pixel height of a character quad.
 const FONT_HEIGHT: f32 = 16.0;
-/// Font atlas tile grid (columns × rows).
+/// Font atlas tile grid (columns × rows). 6 rows = 96 tiles, enough for
+/// the full printable ASCII set (uppercase + lowercase + digits + punctuation).
 const FONT_COLS: u32 = 16;
-const FONT_ROWS: u32 = 3;
+const FONT_ROWS: u32 = 6;
 /// Font atlas pixel size.
 const FONT_ATLAS_W: u32 = FONT_COLS * ATLAS_TILE_SIZE;
 const FONT_ATLAS_H: u32 = FONT_ROWS * ATLAS_TILE_SIZE;
@@ -393,6 +592,58 @@ const FONT_DATA: &[(char, [u8; 7])] = &[
     ('+', [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00]),
     ('[', [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E]),
     (']', [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E]),
+    // ── Lowercase ──
+    ('a', [0x00, 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0F]),
+    ('b', [0x10, 0x10, 0x1E, 0x11, 0x11, 0x11, 0x1E]),
+    ('c', [0x00, 0x00, 0x0E, 0x11, 0x10, 0x11, 0x0E]),
+    ('d', [0x01, 0x01, 0x0F, 0x11, 0x11, 0x11, 0x0F]),
+    ('e', [0x00, 0x00, 0x0E, 0x11, 0x1F, 0x10, 0x0E]),
+    ('f', [0x06, 0x09, 0x08, 0x1E, 0x08, 0x08, 0x08]),
+    ('g', [0x00, 0x0F, 0x11, 0x11, 0x0F, 0x01, 0x0E]),
+    ('h', [0x10, 0x10, 0x1E, 0x11, 0x11, 0x11, 0x11]),
+    ('i', [0x04, 0x00, 0x0C, 0x04, 0x04, 0x04, 0x0E]),
+    ('j', [0x02, 0x00, 0x06, 0x02, 0x02, 0x12, 0x0C]),
+    ('k', [0x10, 0x10, 0x12, 0x14, 0x18, 0x14, 0x12]),
+    ('l', [0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E]),
+    ('m', [0x00, 0x00, 0x1A, 0x15, 0x15, 0x15, 0x15]),
+    ('n', [0x00, 0x00, 0x1E, 0x11, 0x11, 0x11, 0x11]),
+    ('o', [0x00, 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E]),
+    ('p', [0x00, 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10]),
+    ('q', [0x00, 0x0F, 0x11, 0x11, 0x0F, 0x01, 0x01]),
+    ('r', [0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10]),
+    ('s', [0x00, 0x00, 0x0F, 0x10, 0x0E, 0x01, 0x1E]),
+    ('t', [0x08, 0x08, 0x1E, 0x08, 0x08, 0x08, 0x06]),
+    ('u', [0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x0F]),
+    ('v', [0x00, 0x00, 0x11, 0x11, 0x11, 0x0A, 0x04]),
+    ('w', [0x00, 0x00, 0x11, 0x15, 0x15, 0x15, 0x0A]),
+    ('x', [0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11]),
+    ('y', [0x00, 0x11, 0x11, 0x11, 0x0F, 0x01, 0x0E]),
+    ('z', [0x00, 0x00, 0x1F, 0x02, 0x04, 0x08, 0x1F]),
+    // ── Extended punctuation ──
+    ('!', [0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04]),
+    ('"', [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    ('\'', [0x04, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    ('(', [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02]),
+    (')', [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08]),
+    (',', [0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08]),
+    (';', [0x00, 0x0C, 0x00, 0x00, 0x0C, 0x04, 0x08]),
+    ('<', [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02]),
+    ('=', [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00]),
+    ('>', [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08]),
+    ('?', [0x0E, 0x11, 0x01, 0x06, 0x04, 0x00, 0x04]),
+    ('@', [0x0E, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0E]),
+    ('\\', [0x10, 0x10, 0x08, 0x04, 0x02, 0x01, 0x01]),
+    ('_', [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F]),
+    ('`', [0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    ('{', [0x06, 0x04, 0x0C, 0x04, 0x04, 0x0C, 0x06]),
+    ('}', [0x0C, 0x04, 0x06, 0x04, 0x04, 0x06, 0x0C]),
+    ('|', [0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04]),
+    ('~', [0x00, 0x00, 0x08, 0x15, 0x02, 0x00, 0x00]),
+    ('*', [0x04, 0x15, 0x0E, 0x04, 0x0E, 0x15, 0x04]),
+    ('%', [0x19, 0x1A, 0x02, 0x04, 0x08, 0x0D, 0x13]),
+    ('&', [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D]),
+    ('#', [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A]),
+    ('$', [0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04]),
 ];
 
 /// Runtime font atlas: pixel data + character→UV lookup.
@@ -457,9 +708,13 @@ impl FontAtlas {
     }
 
     /// UV coordinates for a character in the font atlas, or None if unsupported.
+    /// Tries the character as-is first (so lowercase renders as lowercase),
+    /// then falls back to its uppercase form for legacy callers.
     pub fn char_uv(&self, ch: char) -> Option<(f32, f32, f32, f32)> {
-        let upper = ch.to_ascii_uppercase();
-        let tile = *self.char_map.get(&upper)?;
+        let tile = *self
+            .char_map
+            .get(&ch)
+            .or_else(|| self.char_map.get(&ch.to_ascii_uppercase()))?;
         let tx = tile % FONT_COLS;
         let ty = tile / FONT_COLS;
         let u0 = tx as f32 / FONT_COLS as f32;

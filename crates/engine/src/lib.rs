@@ -24,8 +24,7 @@ use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::keybinds::physical_key_to_char;
-use crate::ui::SliderRange;
-use voxel_core::{Point, Rect};
+use voxel_core::Point;
 
 use voxel_game::input::Action;
 use voxel_game::{ChatState, CommandResult, DeveloperConsole, InputState, PlayerConfig};
@@ -41,11 +40,13 @@ mod frame;
 mod keybinds;
 mod map;
 mod save;
+mod screen_layout;
 pub mod settings;
 mod sim;
 mod telemetry;
 pub mod test_sim;
 mod ui;
+mod ui_kit;
 
 /// High-level application state. Drives which UI is shown and how input is
 /// routed. The flow is:
@@ -317,8 +318,6 @@ pub(crate) struct GamePlayState {
     /// Mouse position in logical UI pixels (physical / ui_scale), for
     /// pause-menu and block-picker hit-testing against UI rects.
     pub mouse_pos: Point,
-    /// Pre-computed pause-menu button rects (4 buttons: back, options, save&quit, quit).
-    pub pause_buttons: Option<[Rect; 4]>,
     /// Chat and command system.
     pub chat: ChatState,
     /// Undo/redo stack for block edits.
@@ -353,21 +352,18 @@ pub(crate) struct GamePlayState {
     /// Minimap / fullscreen map state.
     pub map: map::MapState,
     /// Title screen / world select / settings fields.
-    pub title_buttons: Option<[Rect; 4]>,
     pub world_list: Vec<save::WorldInfo>,
     pub selected_world_index: Option<usize>,
-    pub world_select_buttons: Option<WorldSelectButtons>,
+    /// World-select list scroll offset (index of the first visible world).
+    pub world_select_scroll: usize,
     pub create_world_state: Option<CreateWorldState>,
     pub settings_previous: GameState,
-    pub listening_rebind: Option<usize>,
     pub current_world_path: Option<std::path::PathBuf>,
     pub panorama_rotation: f32,
-    pub settings_back_btn: Option<Rect>,
     pub last_click_time: Option<std::time::Instant>,
     pub last_click_row: Option<usize>,
     pub pending_delete: Option<usize>,
     pub play_time_accumulator: f64,
-    pub settings_widgets: Option<SettingsWidgets>,
     /// Index of the slider currently being dragged (if any).
     pub settings_slider_dragging: Option<usize>,
     /// Whether the left mouse button is currently held in the settings menu.
@@ -384,19 +380,6 @@ pub(crate) struct GamePlayState {
     pub creative_scroll: usize,
 }
 
-/// Pre-computed interactive widget rects from the settings menu draw pass.
-#[derive(Clone, Debug)]
-pub(crate) struct SettingsWidgets {
-    /// Pre-computed slider widgets (bar rect + label + range):
-    /// render_distance, fog_distance, exposure, mouse_sensitivity, walk_speed, fly_speed
-    pub sliders: Vec<SliderWidget>,
-    /// Pre-computed toggle widgets (rect + label): vsync, shadows, vignette
-    pub toggles: Vec<ToggleWidget>,
-    /// Apply / Defaults button rects
-    pub apply_btn: Rect,
-    pub defaults_btn: Rect,
-}
-
 impl GamePlayState {
     fn new(spawn_pos: Vec3, day_length: f64) -> Self {
         Self {
@@ -405,7 +388,6 @@ impl GamePlayState {
             game_time: 300.0, // start at dawn
             day_length,
             mouse_pos: Point::default(),
-            pause_buttons: None,
             chat: ChatState::default(),
             undo_redo: voxel_game::UndoRedoState::default(),
             block_picker_open: false,
@@ -422,21 +404,17 @@ impl GamePlayState {
             pinned_entity: None,
             edit: edit::EditState::default(),
             map: map::MapState::default(),
-            title_buttons: None,
             world_list: Vec::new(),
             selected_world_index: None,
-            world_select_buttons: None,
+            world_select_scroll: 0,
             create_world_state: None,
             settings_previous: GameState::TitleScreen,
-            listening_rebind: None,
             current_world_path: None,
             panorama_rotation: 0.0,
-            settings_back_btn: None,
             last_click_time: None,
             last_click_row: None,
             pending_delete: None,
             play_time_accumulator: 0.0,
-            settings_widgets: None,
             settings_slider_dragging: None,
             settings_left_mouse_held: false,
             cheats_enabled: false,
@@ -570,21 +548,6 @@ fn categorize_block(name: &str, def: &voxel_world::registry::BlockDef) -> String
     "Blocks".to_string()
 }
 
-/// Pre-computed button rects for the world selection screen.
-#[derive(Clone, Debug)]
-pub(crate) struct WorldSelectButtons {
-    /// Per-world row rects for each world entry.
-    pub rows: Vec<Rect>,
-    /// Delete button rects parallel to `rows`.
-    pub delete_buttons: Vec<Rect>,
-    /// "Create New World" button.
-    pub create_btn: Rect,
-    /// "Play Selected World" button.
-    pub play_btn: Rect,
-    /// "Close" button.
-    pub close_btn: Rect,
-}
-
 /// State for the create-world mini-dialog.
 #[derive(Clone, Debug)]
 pub(crate) struct CreateWorldState {
@@ -595,19 +558,6 @@ pub(crate) struct CreateWorldState {
     pub error: Option<String>,
     /// 0 = name field, 1 = seed field (for keyboard input routing).
     pub active_field: usize,
-    /// Pre-computed rects for click handling: (name_input, seed_input, cancel_btn, create_btn, mode_survival, mode_creative).
-    pub rects: Option<CreateWorldRects>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct CreateWorldRects {
-    pub name_input: Rect,
-    pub seed_input: Rect,
-    pub cancel_btn: Rect,
-    pub create_btn: Rect,
-    pub mode_survival: Rect,
-    pub mode_creative: Rect,
-    pub cheats_toggle: Rect,
 }
 
 impl Default for CreateWorldState {
@@ -619,7 +569,6 @@ impl Default for CreateWorldState {
             allow_cheats: false,
             error: None,
             active_field: 0,
-            rects: None,
         }
     }
 }
@@ -733,29 +682,6 @@ pub fn run(config: EngineConfig) -> Result<()> {
 
 /// Schematic clipboard: origin corner, opposite corner, flattened block list.
 pub(crate) type Clipboard = ((i32, i32, i32), (i32, i32, i32), Vec<voxel_core::BlockId>);
-
-/// Pre-computed settings slider widget: slider-bar rect, label and value range.
-#[derive(Clone, Debug)]
-pub(crate) struct SliderWidget {
-    pub rect: Rect,
-    pub label: String,
-    pub range: SliderRange,
-}
-
-impl SliderWidget {
-    /// Value for a pointer position inside the slider bar (clamped to range).
-    pub fn value_at(&self, pos: Point) -> f32 {
-        let pct = ((pos.x - self.rect.x) / self.rect.w).clamp(0.0, 1.0);
-        self.range.min + pct * (self.range.max - self.range.min)
-    }
-}
-
-/// Pre-computed settings toggle widget: toggle rect + label.
-#[derive(Clone, Debug)]
-pub(crate) struct ToggleWidget {
-    pub rect: Rect,
-    pub label: String,
-}
 
 /// Manages loaded texture packs and their UI state.
 #[derive(Default)]
@@ -1069,7 +995,6 @@ impl EngineApp {
         self.gameplay.game_state = GameState::SettingsMenu;
         self.unlock_cursor();
         self.input.input.held.clear();
-        self.gameplay.listening_rebind = None;
         self.gameplay.settings_slider_dragging = None;
         self.gameplay.settings_left_mouse_held = false;
     }
@@ -1725,7 +1650,11 @@ impl ApplicationHandler for EngineApp {
                                     self.gameplay.want_exit = true;
                                 }
                                 GameState::WorldSelect => {
-                                    if self.gameplay.create_world_state.is_some() {
+                                    // Pop dialogs one at a time before leaving
+                                    // the screen (delete confirm is topmost).
+                                    if self.gameplay.pending_delete.is_some() {
+                                        self.gameplay.pending_delete = None;
+                                    } else if self.gameplay.create_world_state.is_some() {
                                         self.gameplay.create_world_state = None;
                                     } else {
                                         self.enter_title_screen();
@@ -1750,14 +1679,61 @@ impl ApplicationHandler for EngineApp {
                                         }
                                         GameState::PauseMenu => {
                                             self.enter_pause();
-                                        }
-                                        _ => {
+                                        }                                        _ => {
                                             self.enter_title_screen();
                                         }
                                     }
                                 }
                             }
                         }
+
+                        // World-select keyboard navigation: arrows move the
+                        // selection (scrolling to keep it visible), Enter
+                        // plays. Skipped while a dialog is stacked on top.
+                        if self.gameplay.game_state == GameState::WorldSelect
+                            && self.gameplay.create_world_state.is_none()
+                            && self.gameplay.pending_delete.is_none()
+                        {
+                            match code {
+                                KeyCode::ArrowDown | KeyCode::ArrowUp => {
+                                    let count = self.gameplay.world_list.len();
+                                    if count == 0 {
+                                        return;
+                                    }
+                                    let delta: i64 =
+                                        if code == KeyCode::ArrowDown { 1 } else { -1 };
+                                    let current = self
+                                        .gameplay
+                                        .selected_world_index
+                                        .map_or(-1, |i| i as i64);
+                                    let next =
+                                        (current + delta).clamp(0, count as i64 - 1) as usize;
+                                    self.gameplay.selected_world_index = Some(next);
+                                    // Keep the selection inside the visible window.
+                                    let capacity =
+                                        crate::screen_layout::WorldSelectLayout::capacity();
+                                    let top = self.gameplay.world_select_scroll;
+                                    if next < top {
+                                        self.gameplay.world_select_scroll = next;
+                                    } else if next >= top + capacity {
+                                        self.gameplay.world_select_scroll = next + 1 - capacity;
+                                    }
+                                    return;
+                                }
+                                KeyCode::Enter | KeyCode::NumpadEnter => {
+                                    if let Some(idx) = self.gameplay.selected_world_index {
+                                        if idx < self.gameplay.world_list.len() {
+                                            let save_path =
+                                                self.gameplay.world_list[idx].path.clone();
+                                            self.load_and_play_world(save_path);
+                                        }
+                                    }
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+
                         // Create world dialog keyboard input.
                         if self.gameplay.game_state == GameState::WorldSelect
                             && self.gameplay.create_world_state.is_some()
@@ -1923,6 +1899,20 @@ impl ApplicationHandler for EngineApp {
                         // Scroll up.
                         self.gameplay.creative_scroll = self.gameplay.creative_scroll.saturating_sub(1);
                     }
+                }
+                // Scroll the world-select list (only when no dialog is
+                // stacked on top of it).
+                if self.gameplay.game_state == GameState::WorldSelect
+                    && self.gameplay.pending_delete.is_none()
+                    && self.gameplay.create_world_state.is_none()
+                {
+                    let capacity =
+                        crate::screen_layout::WorldSelectLayout::capacity();
+                    let max_top = self.gameplay.world_list.len().saturating_sub(capacity);
+                    let step = dy.signum() * crate::ui_kit::SCROLL_STEP;
+                    let next = self.gameplay.world_select_scroll as f32 - step;
+                    self.gameplay.world_select_scroll =
+                        (next.round() as usize).min(max_top);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {

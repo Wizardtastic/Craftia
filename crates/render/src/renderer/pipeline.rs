@@ -1004,6 +1004,13 @@ pub(super) fn create_ui_descriptor_set_layout(
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        // Binding 3 = UI atlas: procedurally generated panel/button/slot
+        // chrome (see `voxel_render::ui_atlas`). Drawn via tex_id = 3.
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(3)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
     ];
     let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     unsafe { device.create_descriptor_set_layout(&create_info, None) }
@@ -1024,13 +1031,14 @@ pub(super) fn allocate_ui_descriptor_set(
     Ok(sets[0])
 }
 
-/// The three texture (view, sampler) pairs bound by the UI descriptor set.
+/// The four texture (view, sampler) pairs bound by the UI descriptor set.
 /// Bundled so [`update_ui_descriptor_set`] stays below the arg-count lint.
 #[derive(Clone, Copy)]
 pub(super) struct UiTextures {
     pub block: (vk::ImageView, vk::Sampler),
     pub font: (vk::ImageView, vk::Sampler),
     pub minimap: (vk::ImageView, vk::Sampler),
+    pub ui: (vk::ImageView, vk::Sampler),
 }
 
 pub(super) fn update_ui_descriptor_set(
@@ -1042,6 +1050,7 @@ pub(super) fn update_ui_descriptor_set(
         block: (block_view, block_sampler),
         font: (font_view, font_sampler),
         minimap: (minimap_view, minimap_sampler),
+        ui: (ui_view, ui_sampler),
     } = textures;
     let block_info = vk::DescriptorImageInfo::default()
         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -1058,6 +1067,11 @@ pub(super) fn update_ui_descriptor_set(
     let block_infos = [block_info];
     let font_infos = [font_info];
     let minimap_infos = [minimap_info];
+    let ui_info = vk::DescriptorImageInfo::default()
+        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .image_view(ui_view)
+        .sampler(ui_sampler);
+    let ui_infos = [ui_info];
     let writes = [
         vk::WriteDescriptorSet::default()
             .dst_set(set)
@@ -1074,6 +1088,11 @@ pub(super) fn update_ui_descriptor_set(
             .dst_binding(2)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .image_info(&minimap_infos),
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(3)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&ui_infos),
     ];
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }

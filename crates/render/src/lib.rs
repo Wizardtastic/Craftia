@@ -23,12 +23,21 @@ pub mod particle;
 pub mod renderer;
 pub mod texture;
 pub mod ui;
+pub mod ui_atlas;
 
 pub use atlas::{build_atlas_with_textures, Atlas};
 pub use hot_reload::{compile_shader, FileWatcher, HotReloadEvent};
 pub use renderer::{ChunkUpload, FrameInput, GpuTimings, MeshPass, Renderer, RendererConfig};
 pub use texture::AtlasTexture;
 pub use ui::{FontAtlas, GraphStyle, UiDrawData, UiVertex};
+pub use ui_atlas::{
+    ui_atlas, ui_tile_uv, NSLICE, TILE_ARMOR_BG, TILE_ARMOR_FULL, TILE_ARMOR_HALF, TILE_ARROW_DOWN,
+    TILE_ARROW_UP, TILE_BTN, TILE_BTN_DISABLED, TILE_BTN_HOVER, TILE_BTN_PRESSED, TILE_BUBBLE_BG,
+    TILE_BUBBLE_FULL, TILE_CROSSHAIR, TILE_HEART_BG, TILE_HEART_FULL, TILE_HEART_HALF,
+    TILE_HUD_FRAME, TILE_HUNGER_BG, TILE_HUNGER_FULL, TILE_HUNGER_HALF, TILE_PANEL,
+    TILE_PANEL_INSET, TILE_SCROLL_THUMB, TILE_SCROLL_TRACK, TILE_SEL_FRAME, TILE_SLOT,
+    TILE_SLOT_HIGHLIGHT, TILE_TOOLTIP, UI_ATLAS_COLS, UI_ATLAS_ROWS, UI_ATLAS_TILES,
+};
 
 use bytemuck::{Pod, Zeroable};
 

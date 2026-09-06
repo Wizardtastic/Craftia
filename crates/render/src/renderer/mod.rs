@@ -407,6 +407,7 @@ pub struct Renderer {
     ui_descriptor_pool: vk::DescriptorPool,
     ui_descriptor_set: vk::DescriptorSet,
     font_texture: AtlasTexture,
+    ui_atlas_texture: AtlasTexture,
     minimap_texture: crate::dynamic_texture::DynamicAtlasTexture,
     ui_vbo: GpuBuffer,
     ui_ibo: GpuBuffer,
@@ -1392,11 +1393,20 @@ impl Renderer {
         let font = crate::ui::FontAtlas::new();
         let font_texture =
             AtlasTexture::new(&device, &alloc, command_pool, graphics_queue, &font.atlas)?;
+        // Procedural UI atlas (buttons, slots, panels, HUD icons) — generated
+        // on the CPU once at startup, uploaded like any other atlas texture.
+        let ui_atlas_texture = AtlasTexture::new(
+            &device,
+            &alloc,
+            command_pool,
+            graphics_queue,
+            &crate::ui_atlas::ui_atlas(),
+        )?;
         let ui_descriptor_set_layout = pipeline::create_ui_descriptor_set_layout(&device)?;
-        // Separate pool for the UI descriptor set (3 image samplers: block + font + minimap).
+        // Separate pool for the UI descriptor set (4 image samplers: block + font + minimap + ui).
         let ui_pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 3,
+            descriptor_count: 4,
         }];
         let ui_pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&ui_pool_sizes)
@@ -1427,6 +1437,7 @@ impl Renderer {
                 block: (atlas.view, atlas.sampler),
                 font: (font_texture.view, font_texture.sampler),
                 minimap: (minimap_texture.view, minimap_texture.sampler),
+                ui: (ui_atlas_texture.view, ui_atlas_texture.sampler),
             },
         );
         let ui_pipeline_layout =
@@ -2000,6 +2011,7 @@ impl Renderer {
             ui_descriptor_pool,
             ui_descriptor_set,
             font_texture,
+            ui_atlas_texture,
             minimap_texture,
             ui_vbo,
             ui_ibo,
@@ -2189,7 +2201,8 @@ impl Renderer {
                 },
             );
         }
-        // UI descriptor set (binding 0 = block atlas, binding 1 = font atlas, binding 2 = minimap).
+        // UI descriptor set (binding 0 = block atlas, binding 1 = font atlas,
+        // binding 2 = minimap, binding 3 = ui atlas).
         pipeline::update_ui_descriptor_set(
             &self.device,
             self.ui_descriptor_set,
@@ -2197,6 +2210,7 @@ impl Renderer {
                 block: (new_atlas.view, new_atlas.sampler),
                 font: (self.font_texture.view, self.font_texture.sampler),
                 minimap: (self.minimap_texture.view, self.minimap_texture.sampler),
+                ui: (self.ui_atlas_texture.view, self.ui_atlas_texture.sampler),
             },
         );
         self.atlas.destroy_in_place(&self.device, &self.alloc);
@@ -5923,6 +5937,7 @@ impl Drop for Renderer {
         self.atlas.destroy_in_place(device, &self.alloc);
         self.fog_ubo.destroy_in_place(device, &self.alloc);
         self.font_texture.destroy_in_place(device, &self.alloc);
+        self.ui_atlas_texture.destroy_in_place(device, &self.alloc);
         self.minimap_texture.destroy_in_place(device, &self.alloc);
         self.ui_vbo.destroy_in_place(device, &self.alloc);
         self.ui_ibo.destroy_in_place(device, &self.alloc);

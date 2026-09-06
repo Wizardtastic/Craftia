@@ -2,7 +2,7 @@
 width = 2560
 height = 1369
 vsync = true
-fog_distance = 100.0
+fog_distance = 800.0
 shadow_enabled = true
 shadow_resolution = 1024
 exposure = 0.6000000238418579
@@ -50,6 +50,7 @@ render_distance_down = "F9"
 screenshot = "F2"
 pause = "Escape"
 block_picker = "E"
+inventory = "I"
 profiler = "F6"
 chunk_debug = "F7"
 ecs_inspector = "F10"
