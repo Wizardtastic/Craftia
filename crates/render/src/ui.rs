@@ -147,6 +147,191 @@ impl UiDrawData {
             .extend_from_slice(&[start, start + 1, start + 2]);
     }
 
+    /// Push a filled triangle sampling a specific block-atlas tile.
+    pub fn triangle_uv(
+        &mut self,
+        a: [f32; 2],
+        b: [f32; 2],
+        c: [f32; 2],
+        tile: u16,
+        color: [u8; 4],
+    ) {
+        let tx = tile as u32 % ATLAS_TILES;
+        let ty = tile as u32 / ATLAS_TILES;
+        let u0 = tx as f32 / ATLAS_TILES as f32;
+        let v0 = ty as f32 / ATLAS_TILES as f32;
+        let u1 = (tx + 1) as f32 / ATLAS_TILES as f32;
+        let v1 = (ty + 1) as f32 / ATLAS_TILES as f32;
+        let u_mid = (u0 + u1) * 0.5;
+        let start = self.vertices.len() as u32;
+        self.vertices.extend_from_slice(&[
+            UiVertex {
+                pos: a,
+                uv: [u_mid, v0],
+                color,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: b,
+                uv: [u0, v1],
+                color,
+                tex_id: 0.0,
+            },
+            UiVertex {
+                pos: c,
+                uv: [u1, v1],
+                color,
+                tex_id: 0.0,
+            },
+        ]);
+        self.indices
+            .extend_from_slice(&[start, start + 1, start + 2]);
+    }
+
+    /// Push a rectangle rotated around an explicit pivot by `angle` radians
+    /// (positive = clockwise, since +y points down). Colors/patterns only —
+    /// sample from the white tile like [`Self::quad`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn quad_rotated(
+        &mut self,
+        pivot: [f32; 2],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        angle: f32,
+        color: [u8; 4],
+    ) {
+        let tile = 20u32; // white tile
+        let tx = tile % ATLAS_TILES;
+        let ty = tile / ATLAS_TILES;
+        let u0 = tx as f32 / ATLAS_TILES as f32;
+        let v0 = ty as f32 / ATLAS_TILES as f32;
+        let u1 = (tx + 1) as f32 / ATLAS_TILES as f32;
+        let v1 = (ty + 1) as f32 / ATLAS_TILES as f32;
+        self.quad_uv_rotated(pivot, x, y, w, h, u0, v0, u1, v1, angle, color, 0.0);
+    }
+
+    /// Push a block-atlas tile rect rotated around an explicit pivot by
+    /// `angle` radians (positive = clockwise). A centre fan of triangles
+    /// carries the texture around with the rect.
+    #[allow(clippy::too_many_arguments)]
+    pub fn block_icon_rotated(
+        &mut self,
+        pivot: [f32; 2],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        angle: f32,
+        tile: u16,
+        color: [u8; 4],
+    ) {
+        let tx = tile as u32 % ATLAS_TILES;
+        let ty = tile as u32 / ATLAS_TILES;
+        let u0 = tx as f32 / ATLAS_TILES as f32;
+        let v0 = ty as f32 / ATLAS_TILES as f32;
+        let u1 = (tx + 1) as f32 / ATLAS_TILES as f32;
+        let v1 = (ty + 1) as f32 / ATLAS_TILES as f32;
+        self.quad_uv_rotated(pivot, x, y, w, h, u0, v0, u1, v1, angle, color, 0.0);
+    }
+
+    /// Shared implementation for the rotated quad/tile helpers: pivot-space
+    /// rotation of the rect's four corners, two triangles via a shared
+    /// centre vertex so both sample the tile interior (no edge bleed).
+    #[allow(clippy::too_many_arguments)]
+    fn quad_uv_rotated(
+        &mut self,
+        pivot: [f32; 2],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        u0: f32,
+        v0: f32,
+        u1: f32,
+        v1: f32,
+        angle: f32,
+        color: [u8; 4],
+        tex_id: f32,
+    ) {
+        let (sin, cos) = angle.sin_cos();
+        // Local (unrotated) corner offsets from the pivot.
+        let local = [
+            [x - pivot[0], y - pivot[1]],
+            [x + w - pivot[0], y - pivot[1]],
+            [x + w - pivot[0], y + h - pivot[1]],
+            [x - pivot[0], y + h - pivot[1]],
+        ];
+        // Rotate each corner: 2D rotation matrix, +y-down screen space.
+        let rot = |p: [f32; 2]| -> [f32; 2] {
+            [
+                pivot[0] + p[0] * cos - p[1] * sin,
+                pivot[1] + p[0] * sin + p[1] * cos,
+            ]
+        };
+        let c0 = rot(local[0]);
+        let c1 = rot(local[1]);
+        let c2 = rot(local[2]);
+        let c3 = rot(local[3]);
+        let centre = [
+            pivot[0] + (x + w * 0.5 - pivot[0]) * cos - (y + h * 0.5 - pivot[1]) * sin,
+            pivot[1] + (x + w * 0.5 - pivot[0]) * sin + (y + h * 0.5 - pivot[1]) * cos,
+        ];
+        let uc = (u0 + u1) * 0.5;
+        let vc = (v0 + v1) * 0.5;
+        let start = self.vertices.len() as u32;
+        // Centre vertex shared by the fan (tile interior, no bleed).
+        self.vertices.extend_from_slice(&[
+            UiVertex {
+                pos: centre,
+                uv: [uc, vc],
+                color,
+                tex_id,
+            },
+            UiVertex {
+                pos: c0,
+                uv: [u0, v0],
+                color,
+                tex_id,
+            },
+            UiVertex {
+                pos: c1,
+                uv: [u1, v0],
+                color,
+                tex_id,
+            },
+            UiVertex {
+                pos: c2,
+                uv: [u1, v1],
+                color,
+                tex_id,
+            },
+            UiVertex {
+                pos: c3,
+                uv: [u0, v1],
+                color,
+                tex_id,
+            },
+        ]);
+        // Four triangles fan from the centre — one per quad edge. Fewer
+        // leaves a missing wedge between the last and first corner.
+        self.indices.extend_from_slice(&[
+            start,
+            start + 1,
+            start + 2,
+            start,
+            start + 2,
+            start + 3,
+            start,
+            start + 3,
+            start + 4,
+            start,
+            start + 4,
+            start + 1,
+        ]);
+    }
+
     /// Push a text string using the bitmap font (tex_id=1).
     pub fn text(
         &mut self,
@@ -735,5 +920,80 @@ impl FontAtlas {
             }
         }
         count * FONT_ADVANCE * scale
+    }
+}
+
+#[cfg(test)]
+mod ui_rotation_tests {
+    use super::*;
+
+    /// The rotated quad's centre vertex must land on the rotated rect
+    /// centre, and at angle 0 the corners must match the axis-aligned quad.
+    #[test]
+    fn rotated_quad_matches_axis_aligned_at_zero_angle() {
+        let mut rot = UiDrawData::default();
+        let pivot = [40.0, 60.0];
+        rot.quad_rotated(pivot, 10.0, 20.0, 30.0, 24.0, 0.0, [1, 2, 3, 4]);
+        assert_eq!(rot.vertices.len(), 5); // centre + 4 corners
+        let cx = (10.0 + 15.0, 20.0 + 12.0);
+        assert_eq!(rot.vertices[0].pos, [cx.0, cx.1]);
+        // Corner 1 = top-right of the rect.
+        assert_eq!(rot.vertices[2].pos, [40.0, 20.0]);
+
+        let mut plain = UiDrawData::default();
+        plain.quad(10.0, 20.0, 30.0, 24.0, [1, 2, 3, 4]);
+        // Same winding corners as the unrotated quad (order: TR, BR, BL).
+        assert_eq!(plain.vertices[1].pos, rot.vertices[2].pos);
+        assert_eq!(plain.vertices[2].pos, rot.vertices[3].pos);
+        assert_eq!(plain.vertices[3].pos, rot.vertices[4].pos);
+    }
+
+    #[test]
+    fn rotated_quad_pivot_stays_fixed_and_rotation_moves_corners() {
+        let mut d = UiDrawData::default();
+        let pivot = [0.0, 0.0];
+        // A rect fully below the pivot, rotated 90° clockwise (+y down):
+        // its top edge (y=10) must swing onto the -x side… actually +x:
+        // point (0,10) rotates to (-10,0) with +y-down CW math being
+        // (x cos - y sin, x sin + y cos) = (-10, 0).
+        d.quad_rotated(
+            pivot,
+            0.0,
+            10.0,
+            8.0,
+            6.0,
+            std::f32::consts::FRAC_PI_2,
+            [9, 9, 9, 9],
+        );
+        // Local top-left (0,10) → (-10, 0).
+        assert!((d.vertices[1].pos[0] - (-10.0)).abs() < 1e-4);
+        assert!((d.vertices[1].pos[1] - 0.0).abs() < 1e-4);
+        // Index count: centre fan over 4 corners = 4 triangles = 12 indices.
+        assert_eq!(d.indices.len(), 12);
+    }
+
+    #[test]
+    fn rotated_tile_keeps_uv_inside_the_tile() {
+        let mut d = UiDrawData::default();
+        d.block_icon_rotated(
+            [0.0, 0.0],
+            4.0,
+            4.0,
+            16.0,
+            16.0,
+            0.7,
+            42,
+            [255, 255, 255, 255],
+        );
+        // All UVs must lie within one tile cell (no bleed across the atlas).
+        let uvs: Vec<(f32, f32)> = d.vertices.iter().map(|v| (v.uv[0], v.uv[1])).collect();
+        for (u, v) in uvs {
+            assert!((0.0..=1.0).contains(&u));
+            assert!((0.0..=1.0).contains(&v));
+        }
+        // The tile's local UV midpoint (centre vertex).
+        let tx = 42 % ATLAS_TILES;
+        let uc = (tx as f32 + 0.5) / ATLAS_TILES as f32;
+        assert!((d.vertices[0].uv[0] - uc).abs() < 1e-4);
     }
 }

@@ -736,6 +736,29 @@ impl InventoryLayout {
         }
     }
 
+    /// Body-part rects for the paper doll, in draw order (head, torso,
+    /// left arm, right arm, left leg, right leg). Shared by the draw pass
+    /// and the armor-overlay mapping so the preview can't drift from the
+    /// well it lives in.
+    pub fn doll_parts(&self) -> [Rect; 6] {
+        let p = self.player;
+        let cx = p.x + p.w * 0.5;
+        let top = p.y + 8.0;
+        [
+            Rect::from_xywh(cx - 10.0, top, 20.0, 20.0), // head
+            Rect::from_xywh(cx - 12.0, top + 24.0, 24.0, 36.0), // torso
+            Rect::from_xywh(cx - 20.0, top + 24.0, 8.0, 34.0), // left arm
+            Rect::from_xywh(cx + 12.0, top + 24.0, 8.0, 34.0), // right arm
+            Rect::from_xywh(cx - 11.0, top + 64.0, 10.0, 34.0), // left leg
+            Rect::from_xywh(cx + 1.0, top + 64.0, 10.0, 34.0), // right leg
+        ]
+    }
+
+    /// Rect of the doll's right hand — where the held item is drawn.
+    pub fn doll_hand(&self) -> Rect {
+        self.doll_parts()[3]
+    }
+
     /// Slot under a logical-pixel point, if any.
     pub fn slot_at(&self, x: f32, y: f32) -> Option<InventorySlot> {
         let pt = voxel_core::Point::new(x, y);
@@ -842,6 +865,30 @@ mod tests {
         // The band's rows must all start inside the panel too.
         assert!(lay.player.x >= lay.panel.x);
         assert!(lay.crafting[0].x >= lay.panel.x);
+    }
+
+    #[test]
+    fn doll_parts_stay_inside_the_preview_well() {
+        let lay = InventoryLayout::new(1920.0, 1080.0);
+        let parts = lay.doll_parts();
+        assert_eq!(parts.len(), 6);
+        for (i, p) in parts.iter().enumerate() {
+            assert!(
+                p.x >= lay.player.x
+                    && p.y >= lay.player.y
+                    && p.x + p.w <= lay.player.x + lay.player.w
+                    && p.y + p.h <= lay.player.y + lay.player.h,
+                "part {i} escapes the player well"
+            );
+        }
+        // Head above torso, legs below it, torso centred.
+        assert!(parts[0].y + parts[0].h <= parts[1].y);
+        assert!(parts[4].y >= parts[1].y + parts[1].h);
+        let torso_cx = parts[1].x + parts[1].w * 0.5;
+        let well_cx = lay.player.x + lay.player.w * 0.5;
+        assert!((torso_cx - well_cx).abs() < 0.01);
+        // The hand is the right arm.
+        assert_eq!(lay.doll_hand(), parts[3]);
     }
 
     #[test]

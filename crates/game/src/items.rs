@@ -83,7 +83,7 @@ impl ItemStack {
             *self = *other;
             return None;
         }
-        if self.id_raw != other.id_raw {
+        if self.id_raw != other.id_raw || self.damage != other.damage {
             return Some(*other);
         }
         // For now, use a default max stack size. This should be looked up

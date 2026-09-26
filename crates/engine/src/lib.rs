@@ -326,9 +326,8 @@ pub(crate) struct GamePlayState {
     pub block_picker_open: bool,
     /// Survival inventory screen open (renders main/armor/offhand slots).
     pub inventory_open: bool,
-    /// Slot currently "held" by a first click in the inventory screen
-    /// (two-click swap interaction).
-    pub inv_cursor: Option<voxel_game::InventorySlot>,
+    /// Stack currently carried by the survival inventory cursor.
+    pub inv_cursor: Option<voxel_game::ItemStack>,
     /// Schematic clipboard: ((x1,y1,z1), (x2,y2,z2), blocks)
     pub clipboard: Option<Clipboard>,
     /// Debug overlay enabled (F3 toggle).

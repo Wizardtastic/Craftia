@@ -146,9 +146,9 @@ fn query_mut_allows_mutation() {
     let mut world = World::new();
     world.spawn((Position { x: 0.0, y: 0.0 },));
     world.spawn((Position { x: 0.0, y: 0.0 },));
-    for (_e, p) in world.query::<&mut Position>() {
+    world.for_each_mut::<&mut Position, _>(|_e, p| {
         p.x += 1.0;
-    }
+    });
     let mut total = 0.0;
     for (_e, p) in world.query::<&Position>() {
         total += p.x;
@@ -158,18 +158,37 @@ fn query_mut_allows_mutation() {
 
 #[test]
 #[should_panic(expected = "aliased")]
-fn query_rejects_shared_mutable_duplicate_component() {
+fn mutable_query_rejects_shared_mutable_duplicate_component() {
     let mut world = World::new();
     world.spawn((Position { x: 0.0, y: 0.0 },));
-    let _ = world.query::<(&Position, &mut Position)>();
+    world.for_each_mut::<(&Position, &mut Position), _>(|_, _| {});
 }
 
 #[test]
 #[should_panic(expected = "duplicate mutable")]
-fn query_rejects_duplicate_mutable_component() {
+fn mutable_query_rejects_duplicate_mutable_component() {
     let mut world = World::new();
     world.spawn((Position { x: 0.0, y: 0.0 },));
-    let _ = world.query::<(&mut Position, &mut Position)>();
+    world.for_each_mut::<(&mut Position, &mut Position), _>(|_, _| {});
+}
+
+#[test]
+fn mutable_query_supports_mixed_read_write_access() {
+    let mut world = World::new();
+    world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { dx: 3.0, dy: 4.0 }));
+    world.for_each_mut::<(&mut Position, &Velocity), _>(|_, (position, velocity)| {
+        position.x += velocity.dx;
+        position.y += velocity.dy;
+    });
+    world.for_each_mut::<(&Velocity, &mut Position), _>(|_, (velocity, position)| {
+        position.x += velocity.dx;
+        position.y += velocity.dy;
+    });
+    let entity = world.query::<&Position>().next().unwrap().0;
+    assert_eq!(
+        world.get::<Position>(entity),
+        Some(&Position { x: 7.0, y: 10.0 })
+    );
 }
 
 // --- Archetypes ------------------------------------------------------------
@@ -209,14 +228,14 @@ fn schedule_runs_systems_in_order() {
 
     let mut schedule = SystemSchedule::new()
         .add_fn("heal", |world, _dt| {
-            for (_e, h) in world.query::<&mut Health>() {
+            world.for_each_mut::<&mut Health, _>(|_e, h| {
                 h.0 += 10;
-            }
+            });
         })
         .add_fn("heal again", |world, _dt| {
-            for (_e, h) in world.query::<&mut Health>() {
+            world.for_each_mut::<&mut Health, _>(|_e, h| {
                 h.0 += 5;
-            }
+            });
         });
 
     schedule.run(&mut world, 1.0 / 60.0);

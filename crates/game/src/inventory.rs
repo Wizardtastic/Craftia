@@ -75,6 +75,13 @@ enum Zone {
     Main,
 }
 
+/// Mouse button semantics for a survival-inventory slot interaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InventoryClick {
+    Left,
+    Right,
+}
+
 impl SurvivalInventory {
     /// Create a new empty inventory.
     pub fn new() -> Self {
@@ -308,6 +315,80 @@ impl SurvivalInventory {
             return None;
         }
         self.try_insert_into_empty(&remainder, 0..MAIN_SLOTS, Zone::Main)
+    }
+
+    /// Apply a left- or right-click to a slot using an independent cursor stack.
+    ///
+    /// Left-click picks up or places a whole stack, merges compatible stacks,
+    /// and swaps incompatible stacks. Right-click takes the upper half (rounded
+    /// up), places one item, or merges one item. The crafting output is
+    /// take-only: it can populate an empty cursor, but never accepts items.
+    pub fn click_slot(
+        &mut self,
+        held: &mut Option<ItemStack>,
+        slot: InventorySlot,
+        click: InventoryClick,
+    ) {
+        let carried = held.take().filter(|stack| !stack.is_empty());
+        let target = self.get_slot_mut(slot);
+
+        if slot == InventorySlot::CraftingOutput {
+            match carried {
+                Some(stack) => *held = Some(stack),
+                None => {
+                    if !target.is_empty() {
+                        let taken = match click {
+                            InventoryClick::Left => std::mem::replace(target, ItemStack::empty()),
+                            InventoryClick::Right => target.split(target.count.div_ceil(2)),
+                        };
+                        *held = Some(taken);
+                    }
+                }
+            }
+            return;
+        }
+
+        match carried {
+            None => {
+                if target.is_empty() {
+                    return;
+                }
+                let taken = match click {
+                    InventoryClick::Left => std::mem::replace(target, ItemStack::empty()),
+                    InventoryClick::Right => target.split(target.count.div_ceil(2)),
+                };
+                *held = Some(taken);
+            }
+            Some(mut stack) if target.is_empty() => {
+                let count = match click {
+                    InventoryClick::Left => stack.count.min(MAX_STACK_SIZE),
+                    InventoryClick::Right => 1,
+                };
+                *target = stack.split(count);
+                if !stack.is_empty() {
+                    *held = Some(stack);
+                }
+            }
+            Some(mut stack) if target.id() == stack.id() && target.damage == stack.damage => {
+                let space = MAX_STACK_SIZE.saturating_sub(target.count);
+                let count = match click {
+                    InventoryClick::Left => stack.count.min(space),
+                    InventoryClick::Right => u16::from(space > 0).min(stack.count),
+                };
+                target.count += count;
+                stack.count -= count;
+                if stack.count == 0 {
+                    stack.clear();
+                }
+                if !stack.is_empty() {
+                    *held = Some(stack);
+                }
+            }
+            Some(stack) if click == InventoryClick::Left => {
+                *held = Some(std::mem::replace(target, stack));
+            }
+            Some(stack) => *held = Some(stack),
+        }
     }
 
     /// Swap two slots in the inventory.

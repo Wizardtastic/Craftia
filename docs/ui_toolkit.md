@@ -68,6 +68,20 @@ procedural atlas (voxel-render/src/ui_atlas.rs)
   surfaces: inset panels, text fields, chat, console, tooltips.
 - **Screen functions** compose the above. Draw order = z order; the tooltip
   queue is flushed last via `kit.finish()`.
+- **Inventory paper doll**: the player preview's body-part rects come from
+  `InventoryLayout::doll_parts()` (shared geometry, unit-tested against the
+  preview well). Limbs idle-swing around their shoulder/hip pivots
+  (driven by play time); equipped armor overlays ride the same swing in
+  two stages — base body, then armor on its body part(s), leggings and
+  boots spanning both legs — and the selected hotbar stack rides
+  `doll_hand()`. Change the doll by editing the layout helper, not the
+  draw code. When a click is carrying a stack (`inv_cursor`), a ghost of
+  it follows the mouse, drawn last inside `draw_inventory_screen`.
+- **Rotated UI primitives**: `UiDrawData::quad_rotated` and
+  `block_icon_rotated` draw a rect/tile rotated around an explicit pivot
+  (a centre-fan of 4 triangles, so tiles never sample outside their cell).
+  Use them for any joint-driven UI motion; pair overlays with the same
+  pivot + angle as the part they decorate.
 
 ## Adding a new screen
 

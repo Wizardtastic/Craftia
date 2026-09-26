@@ -123,11 +123,11 @@ pub fn xp_collection_system(world: &mut voxel_ecs::World, _dt: f32) {
     let mut orbs_to_collect = Vec::new();
     let mut orbs_to_despawn = Vec::new();
 
-    for (entity, (orb, transform)) in world.query::<(&mut XpOrb, &Transform)>() {
+    world.for_each_mut::<(&mut XpOrb, &Transform), _>(|entity, (orb, transform)| {
         // Tick the orb.
         if orb.tick() {
             orbs_to_despawn.push(entity);
-            continue;
+            return;
         }
 
         // Check collection range (1.5 blocks).
@@ -135,7 +135,7 @@ pub fn xp_collection_system(world: &mut voxel_ecs::World, _dt: f32) {
         if dist < 1.5 && orb.merge_cooldown == 0 {
             orbs_to_collect.push((entity, orb.value));
         }
-    }
+    });
 
     // Collect orbs.
     for (entity, value) in orbs_to_collect {

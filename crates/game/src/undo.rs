@@ -6,7 +6,10 @@
 use std::collections::VecDeque;
 
 const MAX_UNDO: usize = 100;
-const MAX_EDITS_PER_ACTION: usize = 65536;
+// The editor's largest box brush at its 25-block radius is 51³ = 132,651
+// cells. Keep the transaction cap above that so a completed brush stroke
+// always has a complete undo/redo record.
+const MAX_EDITS_PER_ACTION: usize = 132_651;
 
 /// A single block change: position and the block IDs before and after.
 #[derive(Clone, Debug)]
@@ -211,6 +214,12 @@ mod tests {
             old_block: old,
             new_block: new,
         }
+    }
+
+    #[test]
+    fn edit_cap_covers_the_largest_brush_box() {
+        let largest_box_brush = 51usize.pow(3); // radius 25, inclusive on both sides
+        assert!(MAX_EDITS_PER_ACTION >= largest_box_brush);
     }
 
     #[test]

@@ -89,6 +89,12 @@ impl ShardedChunks {
     }
 }
 
+pub(crate) enum ConditionalBlockWrite {
+    Unloaded,
+    Skipped,
+    Changed(BlockId),
+}
+
 pub struct World {
     seed: i32,
     reg: Arc<BlockRegistry>,
@@ -502,14 +508,43 @@ impl World {
         true
     }
 
-    /// Set a block by world coordinate. Returns true if a loaded chunk was
-    /// updated. Also recomputes lighting for the affected chunk AND its
-    /// 6 cardinal neighbours — this is what makes lighting actually go
-    /// away when a torch / coloured emitter is broken (see the comment
-    /// block before `let cardinals = [...]` for the full rationale).
+    /// Set a block by world coordinate. Returns true if its chunk is loaded.
+    /// Also recomputes lighting for the affected chunk and its 6 cardinal
+    /// neighbours. Neighbours are processed first to scrub cross-chunk light
+    /// decreases before the central chunk is recalculated. Water flow remains
+    /// caller-driven because water level may not be set yet (bucket placement
+    /// sets the block before its level).
     pub fn set_block(&self, x: i32, y: i32, z: i32, id: BlockId) -> bool {
         if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
             return false;
+        }
+        match self.set_block_if(x, y, z, id, crate::volume::BlockPredicate::Any) {
+            ConditionalBlockWrite::Unloaded => false,
+            ConditionalBlockWrite::Skipped => {
+                // A loaded no-op still follows set_block's original lighting
+                // refresh behavior.
+                let cp = block_to_chunk(IVec3::new(x, y, z));
+                self.recompute_lighting_around(cp);
+                true
+            }
+            ConditionalBlockWrite::Changed(_) => true,
+        }
+    }
+
+    /// Conditionally replace a block, evaluating the built-in predicate
+    /// against the current value while holding the owning chunk's write lock.
+    /// Returns `Skipped` if the value already equals `id` or the predicate
+    /// rejects it.
+    pub(crate) fn set_block_if(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        id: BlockId,
+        predicate: crate::volume::BlockPredicate,
+    ) -> ConditionalBlockWrite {
+        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
+            return ConditionalBlockWrite::Unloaded;
         }
         let cp = block_to_chunk(IVec3::new(x, y, z));
         let origin = chunk_origin(cp);
@@ -517,14 +552,18 @@ impl World {
         let ly = y - origin.y;
         let lz = z - origin.z;
 
-        // Grab the chunk write lock once, write the block, drop the lock.
-        {
+        let old = {
             let mut chunks = self.chunks.write_shard(cp);
             let Some(chunk) = chunks.get_mut(&cp) else {
-                return false;
+                return ConditionalBlockWrite::Unloaded;
             };
+            let old = chunk.get(lx, ly, lz);
+            if old == id || !predicate.matches(old) {
+                return ConditionalBlockWrite::Skipped;
+            }
             chunk.set(lx, ly, lz, id);
-        }
+            old
+        };
 
         // Re-light the 6 cardinal neighbours FIRST so they pick up the new
         // central-chunk torchlight via `sample_torchlight`/`sample_block`,
@@ -540,6 +579,14 @@ impl World {
         // Cost: `compute_torchlight` is O(chunk volume) per chunk and the
         // BFS is cheap at 16³. We gate on `is_chunk_loaded` so unloaded
         // neighbour positions are a single hashmap probe (no chunk copy).
+        self.recompute_lighting_around(cp);
+        ConditionalBlockWrite::Changed(old)
+    }
+
+    /// Recompute lighting for the changed chunk and its loaded cardinal
+    /// neighbours. Recomputing the neighbours first lets them sample the new
+    /// center value; the final center pass then clears stale light decreases.
+    fn recompute_lighting_around(&self, cp: ChunkPos) {
         const CARDINALS: [glam::IVec3; 6] = [
             glam::IVec3::new(1, 0, 0),
             glam::IVec3::new(-1, 0, 0),
@@ -569,8 +616,6 @@ impl World {
         // Callers that need flow should enqueue the position (via
         // `place_water` / `remove_water`) and let `tick_water` drive the
         // incremental spread.
-
-        true
     }
 
     /// Convenience: set a block and report the owning chunk position, if any.
@@ -846,6 +891,18 @@ mod tests {
         let world = World::new(42);
         // No chunks loaded.
         assert!(!world.set_block(0, 0, 0, BlockId(1)));
+    }
+
+    #[test]
+    fn set_block_loaded_same_value_reports_success_without_changing_value() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        let mut chunk = Chunk::new(cp);
+        chunk.set(0, 0, 0, BlockId(2));
+        world.insert_chunk(cp, chunk);
+
+        assert!(world.set_block(0, 0, 0, BlockId(2)));
+        assert_eq!(world.get_block(0, 0, 0), BlockId(2));
     }
 
     #[test]

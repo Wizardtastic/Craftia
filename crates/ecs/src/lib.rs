@@ -6,8 +6,10 @@
 //! - [`Entity`] — unique entity identifier
 //! - [`Component`] — marker trait for ECS components
 //! - [`Bundle`] — spawn an entity with multiple components at once
-//! - [`Query`] / [`QueryIter`] — iterate entities matching a component
-//!   pattern
+//! - [`Query`] / [`QueryIter`] — iterate entities matching a read-only
+//!   component pattern
+//! - [`QueryMut`] — describe mutable component patterns for the scoped
+//!   [`World::for_each_mut`] callback API
 //! - [`System`] / [`SystemSchedule`] / [`FnSystem`] — ordered system
 //!   execution
 //! - [`Resources`] — singleton data accessible to all systems
@@ -24,7 +26,7 @@ pub mod world;
 pub use archetype::ArchetypeId;
 pub use component::{Bundle, Component};
 pub use entity::Entity;
-pub use query::{Query, QueryIter};
+pub use query::{Query, QueryIter, QueryMut};
 pub use resources::Resources;
 pub use schedule::{FnSystem, System, SystemSchedule};
 pub use world::World;

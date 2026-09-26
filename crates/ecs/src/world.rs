@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::archetype::{Archetype, ArchetypeId, ColumnCtor, ErasedColumn, TypedColumn};
 use crate::component::{Bundle, Component};
 use crate::entity::{Entity, EntityLocation};
-use crate::query::{Query, QueryIter};
+use crate::query::{Query, QueryIter, QueryMut};
 use crate::resources::Resources;
 
 /// The ECS world. Single owner of all entity, archetype, and resource
@@ -520,9 +520,11 @@ impl World {
                 .copied();
             if let Some(col_idx) = col_idx {
                 // Entity has T; replace in place.
-                let col = self.archetypes[arch_id as usize].columns[col_idx].as_any();
+                let col = self.archetypes[arch_id as usize].columns[col_idx]
+                    .as_any_mut()
+                    .expect("typed columns support mutable access");
                 let typed = col
-                    .downcast_ref::<TypedColumn<T>>()
+                    .downcast_mut::<TypedColumn<T>>()
                     .expect("column downcast mismatch in set");
                 typed.set(loc.index, value);
             } else {
@@ -587,9 +589,81 @@ impl World {
         self.get::<T>(entity).is_some()
     }
 
-    /// Begin a query for components matching `Q`.
+    /// Begin a read-only query for components matching `Q`.
     pub fn query<Q: Query>(&self) -> QueryIter<'_, Q> {
         QueryIter::new(self)
+    }
+
+    /// Run `f` once for every entity matching mutable query `Q`.
+    ///
+    /// The world is exclusively borrowed for the whole call. The higher-ranked
+    /// callback receives row references with a fresh, call-scoped lifetime, so
+    /// component references cannot be kept beyond one invocation or used to
+    /// overlap another mutable query. Duplicate component types in a mixed
+    /// shared/mutable tuple are rejected before iteration.
+    ///
+    /// ```
+    /// # use voxel_ecs::World;
+    /// # #[derive(Clone, Copy)] struct Position(f32);
+    /// let mut world = World::new();
+    /// world.spawn((Position(1.0),));
+    /// world.for_each_mut::<&mut Position, _>(|_entity, position| {
+    ///     position.0 += 1.0;
+    /// });
+    /// ```
+    ///
+    /// Mutable items cannot be requested from the read-only iterator:
+    ///
+    /// ```compile_fail
+    /// # use voxel_ecs::World;
+    /// # #[derive(Clone, Copy)] struct Position(f32);
+    /// let world = World::new();
+    /// for (_, position) in world.query::<&mut Position>() {
+    ///     position.0 += 1.0;
+    /// }
+    /// ```
+    ///
+    /// Mutable items cannot escape the callback:
+    ///
+    /// ```compile_fail
+    /// # use voxel_ecs::World;
+    /// # #[derive(Clone, Copy)] struct Position(f32);
+    /// let mut world = World::new();
+    /// world.spawn((Position(1.0),));
+    /// let mut saved = None;
+    /// world.for_each_mut::<&mut Position, _>(|_entity, position| {
+    ///     saved = Some(position);
+    /// });
+    /// ```
+    ///
+    /// An overlapping mutable query cannot borrow the same world from inside
+    /// the callback:
+    ///
+    /// ```compile_fail
+    /// # use voxel_ecs::World;
+    /// # #[derive(Clone, Copy)] struct Position(f32);
+    /// let mut world = World::new();
+    /// world.spawn((Position(1.0),));
+    /// world.for_each_mut::<&mut Position, _>(|_, _position| {
+    ///     world.for_each_mut::<&mut Position, _>(|_, _| {});
+    /// });
+    /// ```
+    pub fn for_each_mut<Q, F>(&mut self, mut f: F)
+    where
+        Q: QueryMut,
+        F: for<'a> FnMut(Entity, Q::Item<'a>),
+    {
+        Q::assert_no_aliasing();
+        for archetype in &mut self.archetypes {
+            if !Q::matches(archetype) {
+                continue;
+            }
+            for index in 0..archetype.len() {
+                let entity = archetype.entities()[index];
+                let item = Q::fetch(archetype, index);
+                f(entity, item);
+            }
+        }
     }
 
     // -----------------------------------------------------------------

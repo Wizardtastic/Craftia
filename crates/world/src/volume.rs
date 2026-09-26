@@ -23,7 +23,31 @@
 
 use voxel_core::{Aabb, BlockId};
 
+use crate::world::ConditionalBlockWrite;
 use crate::World;
+
+/// Built-in current-block predicates for conditional volume fills.
+///
+/// This value-based filter is evaluated under the chunk write lock without
+/// invoking caller code, so a predicate cannot re-enter the world or deadlock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockPredicate {
+    Any,
+    Air,
+    NonAir,
+    Equals(BlockId),
+}
+
+impl BlockPredicate {
+    pub(crate) fn matches(self, block: BlockId) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Air => block.is_air(),
+            Self::NonAir => !block.is_air(),
+            Self::Equals(target) => block == target,
+        }
+    }
+}
 
 /// One block change produced by a volume operation. Raw integer coordinates
 /// (instead of `BlockPos`) keep this module dependency-free of `voxel_core`'s
@@ -49,10 +73,18 @@ impl World {
     ///
     /// Idempotent w.r.t. `old == new`: writing the same block id it
     /// already is does not count, and no `BlockChange` is reported.
-    pub fn fill_aabb<F: FnMut(BlockChange)>(
+    pub fn fill_aabb<F: FnMut(BlockChange)>(&self, bounds: Aabb, id: BlockId, record: F) -> usize {
+        self.fill_aabb_where(bounds, id, BlockPredicate::Any, record)
+    }
+
+    /// Fill only blocks whose current value matches `predicate`. The
+    /// predicate check and write are atomic per block, so rejected,
+    /// unchanged, unloaded, and out-of-range positions emit no record.
+    pub fn fill_aabb_where<F: FnMut(BlockChange)>(
         &self,
         bounds: Aabb,
         id: BlockId,
+        predicate: BlockPredicate,
         mut record: F,
     ) -> usize {
         let (min_x, min_y, min_z, max_x, max_y, max_z) = aabb_block_range(bounds);
@@ -60,7 +92,7 @@ impl World {
         for y in min_y..max_y {
             for z in min_z..max_z {
                 for x in min_x..max_x {
-                    n += self.write_with_record(x, y, z, id, &mut record);
+                    n += self.write_where_with_record(x, y, z, id, predicate, &mut record);
                 }
             }
         }
@@ -116,14 +148,24 @@ impl World {
         center: (i32, i32, i32),
         radius: f32,
         id: BlockId,
+        record: F,
+    ) -> usize {
+        self.fill_sphere_where(center, radius, id, BlockPredicate::Any, record)
+    }
+
+    /// Fill only sphere cells whose current value matches `predicate`.
+    /// Predicate evaluation and writing are atomic with respect to changes to
+    /// the containing chunk; only successful writes produce records.
+    pub fn fill_sphere_where<F: FnMut(BlockChange)>(
+        &self,
+        center: (i32, i32, i32),
+        radius: f32,
+        id: BlockId,
+        predicate: BlockPredicate,
         mut record: F,
     ) -> usize {
         let r = radius.max(0.0);
-        // Bounding box must cover any cell with d² ≤ r².
         let r_round = r.ceil() as i32;
-        // In-sphere predicate uses floor(r²); do *not* widen to
-        // `r_round²` because that over-includes corner cells at fractional
-        // radii (e.g. r=2.5 would silently include blocks at d²=9).
         let r_sq = (r * r) as i32;
         let (cx, cy, cz) = center;
         let mut n = 0;
@@ -134,7 +176,7 @@ impl World {
                     let dy = y - cy;
                     let dz = z - cz;
                     if dx * dx + dy * dy + dz * dz <= r_sq {
-                        n += self.write_with_record(x, y, z, id, &mut record);
+                        n += self.write_where_with_record(x, y, z, id, predicate, &mut record);
                     }
                 }
             }
@@ -187,6 +229,21 @@ impl World {
         radius: f32,
         height: f32,
         id: BlockId,
+        record: F,
+    ) -> usize {
+        self.fill_cylinder_where(base, radius, height, id, BlockPredicate::Any, record)
+    }
+
+    /// Fill only cylinder cells whose current value matches `predicate`.
+    /// Predicate evaluation and writing are atomic with respect to changes to
+    /// the containing chunk; only successful writes produce records.
+    pub fn fill_cylinder_where<F: FnMut(BlockChange)>(
+        &self,
+        base: (i32, i32, i32),
+        radius: f32,
+        height: f32,
+        id: BlockId,
+        predicate: BlockPredicate,
         mut record: F,
     ) -> usize {
         let r = radius.max(0.0).ceil() as i32;
@@ -200,7 +257,7 @@ impl World {
                     let dx = x - bx;
                     let dz = z - bz;
                     if dx * dx + dz * dz <= r_sq {
-                        n += self.write_with_record(x, y, z, id, &mut record);
+                        n += self.write_where_with_record(x, y, z, id, predicate, &mut record);
                     }
                 }
             }
@@ -311,9 +368,14 @@ impl World {
         for y in min_y..max_y {
             for z in min_z..max_z {
                 for x in min_x..max_x {
-                    if self.get_block(x, y, z) == target {
-                        n += self.write_with_record(x, y, z, replacement, &mut record);
-                    }
+                    n += self.write_where_with_record(
+                        x,
+                        y,
+                        z,
+                        replacement,
+                        BlockPredicate::Equals(target),
+                        &mut record,
+                    );
                 }
             }
         }
@@ -322,10 +384,9 @@ impl World {
 
     // --- Internal ---------------------------------------------------------
 
-    /// Read block at `(x, y, z)`, call `set_block`, and on success report the
-    /// change via `record`. Returns `1` if the underlying call changed a
-    /// block, `0` if the chunk was unloaded OR the block's old value was
-    /// already `id` (idempotent skip).
+    /// Write block `(x, y, z)` if its current value matches `predicate`, then
+    /// report the actual change via `record`. Returns `1` for a changed block,
+    /// `0` if the position is unloaded/out of range, rejected, or unchanged.
     fn write_with_record<F: FnMut(BlockChange)>(
         &self,
         x: i32,
@@ -334,21 +395,30 @@ impl World {
         id: BlockId,
         record: &mut F,
     ) -> usize {
-        let old = self.get_block(x, y, z);
-        if old == id {
-            return 0;
-        }
-        if self.set_block(x, y, z, id) {
-            record(BlockChange {
-                x,
-                y,
-                z,
-                old,
-                new: id,
-            });
-            1
-        } else {
-            0
+        self.write_where_with_record(x, y, z, id, BlockPredicate::Any, record)
+    }
+
+    fn write_where_with_record<F: FnMut(BlockChange)>(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        id: BlockId,
+        predicate: BlockPredicate,
+        record: &mut F,
+    ) -> usize {
+        match self.set_block_if(x, y, z, id, predicate) {
+            ConditionalBlockWrite::Changed(old) => {
+                record(BlockChange {
+                    x,
+                    y,
+                    z,
+                    old,
+                    new: id,
+                });
+                1
+            }
+            ConditionalBlockWrite::Unloaded | ConditionalBlockWrite::Skipped => 0,
         }
     }
 }
@@ -451,6 +521,77 @@ mod tests {
             changes.push(c)
         });
         assert_eq!(n, 56);
+    }
+
+    #[test]
+    fn conditional_fills_reject_candidates_without_writes_or_records() {
+        let world = world_with_origin_chunk();
+        world.set_block(4, 5, 5, BlockId(2));
+        world.set_block(6, 5, 5, BlockId(4));
+
+        let mut sphere_changes = Vec::new();
+        let sphere_count = world.fill_sphere_where(
+            (5, 5, 5),
+            1.0,
+            BlockId(3),
+            BlockPredicate::Equals(BlockId(2)),
+            |change| sphere_changes.push(change),
+        );
+        assert_eq!(sphere_count, 1);
+        assert_eq!(sphere_changes.len(), 1);
+        assert_eq!(sphere_changes[0].old, BlockId(2));
+        assert_eq!(world.get_block(6, 5, 5), BlockId(4));
+
+        let mut cylinder_changes = Vec::new();
+        let cylinder_count = world.fill_cylinder_where(
+            (5, 5, 5),
+            1.0,
+            1.0,
+            BlockId(3),
+            BlockPredicate::Air,
+            |change| cylinder_changes.push(change),
+        );
+        assert_eq!(cylinder_count, 3);
+        assert_eq!(cylinder_changes.len(), 3);
+        assert_eq!(world.get_block(4, 5, 5), BlockId(3));
+        assert_eq!(world.get_block(6, 5, 5), BlockId(4));
+
+        let mut aabb_changes = Vec::new();
+        let aabb_count = world.fill_aabb_where(
+            aabb(4.0, 5.0, 5.0, 7.0, 6.0, 6.0),
+            BlockId(3),
+            BlockPredicate::NonAir,
+            |change| aabb_changes.push(change),
+        );
+        assert_eq!(aabb_count, 1);
+        assert_eq!(aabb_changes.len(), 1);
+        assert_eq!(aabb_changes[0].old, BlockId(4));
+        assert_eq!(world.get_block(6, 5, 5), BlockId(3));
+    }
+
+    #[test]
+    fn conditional_fills_skip_noop_and_unloaded_positions() {
+        let world = world_with_origin_chunk();
+        world.set_block(0, 0, 0, BlockId(3));
+        let mut changes = Vec::new();
+        let count =
+            world.fill_sphere_where((0, 0, 0), 0.0, BlockId(3), BlockPredicate::Any, |change| {
+                changes.push(change)
+            });
+        assert_eq!(count, 0);
+        assert!(changes.is_empty());
+
+        let unloaded = World::new(42);
+        let count = unloaded.fill_cylinder_where(
+            (0, 0, 0),
+            1.0,
+            2.0,
+            BlockId(3),
+            BlockPredicate::Air,
+            |change| changes.push(change),
+        );
+        assert_eq!(count, 0);
+        assert!(changes.is_empty());
     }
 
     #[test]

@@ -5,13 +5,11 @@
 //! ([`TypedColumn<T>`]) — one per component type — plus a parallel
 //! `Vec<Entity>` listing which entity occupies each row.
 //!
-//! All component columns use an interior `UnsafeCell<Vec<T>>` so that
-//! queries can hand out shared `&T` and exclusive `&mut T` references
-//! from a shared `&Archetype` borrow. The `QueryIter` consumes one
-//! reference at a time, so we never produce aliasing `&mut` references.
+//! Shared queries borrow columns immutably; mutation requires an exclusive
+//! `&mut Archetype` borrow. This keeps the storage itself free of interior
+//! mutability and makes Rust enforce the aliasing rules.
 
 use std::any::{Any, TypeId};
-use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
 
 use crate::component::Component;
@@ -49,6 +47,11 @@ pub trait ErasedColumn: Send + Sync {
     /// Borrow the column itself as a typed `Any`.
     fn as_any(&self) -> &dyn Any;
 
+    /// Mutably borrow the column as a typed `Any`, when supported.
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        None
+    }
+
     /// Borrow the row at `index` as `&dyn Any` so callers (notably the
     /// runtime ECS inspector) can format the value without knowing its
     /// concrete type. The lifetime is tied to `&self`, matching
@@ -56,72 +59,33 @@ pub trait ErasedColumn: Send + Sync {
     fn value_as_any(&self, index: u32) -> Option<&dyn Any>;
 }
 
-/// Typed column for a specific component.
-///
-/// The internal `Vec<T>` is wrapped in an `UnsafeCell` so that
-/// [`Archetype::get`] and [`Archetype::get_mut`] can hand out shared and
-/// exclusive references from a shared `&Archetype` (which is what
-/// `QueryIter` holds). All callers must ensure that no two `&mut T`
-/// references into the same column are live simultaneously. The
-/// `QueryIter` produces one mutable reference at a time and the caller
-/// drops it before asking for the next.
+/// Typed column for a specific component. Shared reads use `&self`; any
+/// mutation requires `&mut self` and is therefore exclusive.
 pub(crate) struct TypedColumn<T: Component> {
-    data: UnsafeCell<Vec<T>>,
+    data: Vec<T>,
 }
-
-// SAFETY: `TypedColumn<T>` synchronizes access to the inner `Vec<T>`
-// through `UnsafeCell` and is always accessed via the column API on
-// `Archetype`. All callers go through the [`World`](crate::World) which
-// is the sole owner of each archetype, so concurrent `&Self` access
-// from multiple threads is sound. Manual `Sync` is required because
-// `UnsafeCell` is `!Sync` by default.
-unsafe impl<T: Component> Sync for TypedColumn<T> {}
 
 impl<T: Component> TypedColumn<T> {
     pub(crate) fn new() -> Self {
-        Self {
-            data: UnsafeCell::new(Vec::new()),
-        }
+        Self { data: Vec::new() }
     }
 
-    /// Append a value to the column. Requires exclusive access; the
-    /// caller is responsible for ensuring no live references alias this
-    /// column at call time.
-    pub(crate) fn push(&self, value: T) {
-        // SAFETY: the column is owned by the `World` and not aliased at
-        // this point. The caller is the `World` mutating it during
-        // archetype construction.
-        let vec: &mut Vec<T> = unsafe { &mut *self.data.get() };
-        vec.push(value);
+    /// Append a value to the column.
+    pub(crate) fn push(&mut self, value: T) {
+        self.data.push(value);
     }
 
     pub(crate) fn get(&self, index: u32) -> Option<&T> {
-        // SAFETY: the column outlives any reference we hand out (the
-        // `QueryIter` borrows the whole `World`).
-        let vec: &Vec<T> = unsafe { &*self.data.get() };
-        vec.get(index as usize)
+        self.data.get(index as usize)
     }
 
-    // The `&mut T` returned here comes from the inner `UnsafeCell<Vec<T>>`,
-    // so it's logically a mutable borrow of `self` even though it isn't a
-    // syntactic `&mut self`. This is the entire point of `TypedColumn`:
-    // the column outlives the iterator (`QueryIter`) and the World is the
-    // sole owner, so handing out one `&mut T` at a time is sound.
-    #[allow(clippy::mut_from_ref)]
-    pub(crate) fn get_mut(&self, index: u32) -> Option<&mut T> {
-        // SAFETY: see module docs. The `QueryIter` hands out one `&mut T`
-        // at a time.
-        let vec: &mut Vec<T> = unsafe { &mut *self.data.get() };
-        vec.get_mut(index as usize)
+    pub(crate) fn get_mut(&mut self, index: u32) -> Option<&mut T> {
+        self.data.get_mut(index as usize)
     }
 
-    /// Overwrite the value at `index`. Requires exclusive access; the
-    /// caller is responsible for ensuring no live references alias this
-    /// column at call time.
-    pub(crate) fn set(&self, index: u32, value: T) {
-        // SAFETY: see `push`.
-        let vec: &mut Vec<T> = unsafe { &mut *self.data.get() };
-        vec[index as usize] = value;
+    /// Overwrite the value at `index`.
+    pub(crate) fn set(&mut self, index: u32, value: T) {
+        self.data[index as usize] = value;
     }
 }
 
@@ -136,21 +100,19 @@ impl<T: Component> ErasedColumn for TypedColumn<T> {
     }
 
     fn take_any(&mut self, index: u32) -> Box<dyn Any> {
-        // SAFETY: see `TypedColumn::push`.
-        let vec: &mut Vec<T> = unsafe { &mut *self.data.get() };
-        let removed = vec.swap_remove(index as usize);
-        Box::new(removed)
+        Box::new(self.data.swap_remove(index as usize))
     }
 
     fn as_any(&self) -> &dyn Any {
         self
     }
 
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        Some(self)
+    }
+
     fn value_as_any(&self, index: u32) -> Option<&dyn Any> {
-        // SAFETY: see `TypedColumn::get`. The returned reference outlives
-        // the `QueryIter` borrow of `Archetype`.
-        let vec: &Vec<T> = unsafe { &*self.data.get() };
-        vec.get(index as usize).map(|v| v as &dyn Any)
+        self.data.get(index as usize).map(|v| v as &dyn Any)
     }
 }
 
@@ -236,11 +198,120 @@ impl Archetype {
     }
 
     /// Exclusive reference to component `T` of the entity at `index`.
-    pub fn get_mut<T: Component>(&self, index: u32) -> Option<&mut T> {
+    pub fn get_mut<T: Component>(&mut self, index: u32) -> Option<&mut T> {
         let col_idx = *self.column_index.get(&TypeId::of::<T>())?;
-        let col = self.columns[col_idx].as_any();
-        let typed = col.downcast_ref::<TypedColumn<T>>()?;
+        let typed = self.columns[col_idx]
+            .as_any_mut()?
+            .downcast_mut::<TypedColumn<T>>()?;
         typed.get_mut(index)
+    }
+
+    /// Borrow distinct components with shared access to `A` and mutable
+    /// access to `B`, splitting the column slice to prove disjointness.
+    pub(crate) fn get_shared_mut<A: Component, B: Component>(
+        &mut self,
+        index: u32,
+    ) -> Option<(&A, &mut B)> {
+        let a_idx = *self.column_index.get(&TypeId::of::<A>())?;
+        let b_idx = *self.column_index.get(&TypeId::of::<B>())?;
+        if a_idx == b_idx {
+            return None;
+        }
+        if a_idx < b_idx {
+            let (left, right) = self.columns.split_at_mut(b_idx);
+            let a = left[a_idx]
+                .as_any()
+                .downcast_ref::<TypedColumn<A>>()?
+                .get(index)?;
+            let b = right[0]
+                .as_any_mut()?
+                .downcast_mut::<TypedColumn<B>>()?
+                .get_mut(index)?;
+            Some((a, b))
+        } else {
+            let (left, right) = self.columns.split_at_mut(a_idx);
+            let b = left[b_idx]
+                .as_any_mut()?
+                .downcast_mut::<TypedColumn<B>>()?
+                .get_mut(index)?;
+            let a = right[0]
+                .as_any()
+                .downcast_ref::<TypedColumn<A>>()?
+                .get(index)?;
+            Some((a, b))
+        }
+    }
+
+    /// Borrow distinct components with mutable access to `A` and shared
+    /// access to `B`.
+    pub(crate) fn get_mut_shared<A: Component, B: Component>(
+        &mut self,
+        index: u32,
+    ) -> Option<(&mut A, &B)> {
+        let a_idx = *self.column_index.get(&TypeId::of::<A>())?;
+        let b_idx = *self.column_index.get(&TypeId::of::<B>())?;
+        if a_idx == b_idx {
+            return None;
+        }
+        if a_idx < b_idx {
+            let (left, right) = self.columns.split_at_mut(b_idx);
+            let a = left[a_idx]
+                .as_any_mut()?
+                .downcast_mut::<TypedColumn<A>>()?
+                .get_mut(index)?;
+            let b = right[0]
+                .as_any()
+                .downcast_ref::<TypedColumn<B>>()?
+                .get(index)?;
+            Some((a, b))
+        } else {
+            let (left, right) = self.columns.split_at_mut(a_idx);
+            let b = left[b_idx]
+                .as_any()
+                .downcast_ref::<TypedColumn<B>>()?
+                .get(index)?;
+            let a = right[0]
+                .as_any_mut()?
+                .downcast_mut::<TypedColumn<A>>()?
+                .get_mut(index)?;
+            Some((a, b))
+        }
+    }
+
+    /// Borrow two distinct components mutably by splitting the column
+    /// slice, which makes their non-aliasing explicit to the borrow checker.
+    pub(crate) fn get_two_mut<A: Component, B: Component>(
+        &mut self,
+        index: u32,
+    ) -> Option<(&mut A, &mut B)> {
+        let a_idx = *self.column_index.get(&TypeId::of::<A>())?;
+        let b_idx = *self.column_index.get(&TypeId::of::<B>())?;
+        if a_idx == b_idx {
+            return None;
+        }
+        if a_idx < b_idx {
+            let (left, right) = self.columns.split_at_mut(b_idx);
+            let a = left[a_idx]
+                .as_any_mut()?
+                .downcast_mut::<TypedColumn<A>>()?
+                .get_mut(index)?;
+            let b = right[0]
+                .as_any_mut()?
+                .downcast_mut::<TypedColumn<B>>()?
+                .get_mut(index)?;
+            Some((a, b))
+        } else {
+            let (left, right) = self.columns.split_at_mut(a_idx);
+            let b = left[b_idx]
+                .as_any_mut()?
+                .downcast_mut::<TypedColumn<B>>()?
+                .get_mut(index)?;
+            let a = right[0]
+                .as_any_mut()?
+                .downcast_mut::<TypedColumn<A>>()?
+                .get_mut(index)?;
+            Some((a, b))
+        }
     }
 
     /// Entities in this archetype, in row order.
