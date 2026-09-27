@@ -131,7 +131,7 @@ pub fn movement_system(world: &mut World, dt: f32) {
 
     // Check for water in the player's AABB.
     let physics = world.resource::<PhysicsWorldRes>().cloned();
-    let in_water = physics
+    let submersion = physics
         .as_ref()
         .map(|w| {
             let half = glam::Vec3::new(
@@ -143,22 +143,10 @@ pub fn movement_system(world: &mut World, dt: f32) {
                 },
                 PLAYER_AABB_XZ,
             );
-            let aabb_min = transform.pos - half;
-            let aabb_max = transform.pos + half;
-            let min_b = voxel_core::math::world_to_block(aabb_min);
-            let max_b = voxel_core::math::world_to_block(aabb_max - glam::Vec3::splat(0.001));
-            for by in min_b.y..=max_b.y {
-                for bz in min_b.z..=max_b.z {
-                    for bx in min_b.x..=max_b.x {
-                        if w.0.is_liquid(bx, by, bz) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
+            w.0.water_submersion(transform.pos - half, transform.pos + half)
         })
-        .unwrap_or(false);
+        .unwrap_or(0.0);
+    let in_water = submersion > 0.05;
 
     // Compute new velocity based on mode.
     let mut new_vel = velocity.lin;
@@ -175,17 +163,18 @@ pub fn movement_system(world: &mut World, dt: f32) {
         }
         new_vel = fly_vel;
     } else if in_water {
-        new_vel *= 1.0 - WATER_DRAG * dt;
+        new_vel *= 1.0 - WATER_DRAG * submersion * dt;
         if input.jump {
             new_vel.y = SWIM_UP_SPEED;
         } else if input.sneaking {
             new_vel.y = -SWIM_UP_SPEED;
         } else {
-            new_vel.y -= GRAVITY * 0.15 * dt;
+            new_vel.y -= GRAVITY * (1.0 - 0.85 * submersion) * dt;
         }
         new_vel.y = new_vel.y.max(-3.0);
         if wish_horizontal.length_squared() > 0.0 {
-            let target = wish_horizontal * (speed * SWIM_BASE_FRACTION);
+            let swim_fraction = 1.0 - (1.0 - SWIM_BASE_FRACTION) * submersion;
+            let target = wish_horizontal * (speed * swim_fraction);
             new_vel.x = approach(new_vel.x, target.x, dt * 10.0);
             new_vel.z = approach(new_vel.z, target.z, dt * 10.0);
         }

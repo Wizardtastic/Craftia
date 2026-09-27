@@ -41,18 +41,8 @@ void main() {
     vec3 local = in_pos;
     vec3 origin = origins[gl_InstanceIndex].xyz;
 
-    // Water animation: detect water via light > 1.0 (same encoding as chunk.vert).
-    if (in_light > 1.0) {
-        float water_level = (in_light - 1.0) / 0.5 * 8.0; // 1.0..8.0
-        float height_frac = water_level / 8.0;
-
-        vec3 world_no_anim = origin + local;
-        float wave = sin(world_no_anim.x * 1.5 + push.time_pad.x * 1.8)
-                   * cos(world_no_anim.z * 1.2 + push.time_pad.x * 1.4) * 0.04;
-        if (abs(local.y - height_frac) < 0.01) {
-            local.y += wave * height_frac;
-        }
-    }
+    // Liquid geometry is kept fixed; water ripples remain in the fragment
+    // shader's normals/reflections without moving submerged block textures.
 
     vec3 world = origin + local;
     gl_Position = push.view_proj * vec4(world, 1.0);

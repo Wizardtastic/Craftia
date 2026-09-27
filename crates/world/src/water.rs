@@ -70,7 +70,10 @@ pub fn simulate_flow_step(
 ) -> HashSet<ChunkPos> {
     let mut affected = HashSet::new();
     let reg = world.registry();
-    let _ = reg.id_of("water");
+    let Some(water_id) = reg.id_of("water") else {
+        pending.clear();
+        return affected;
+    };
 
     buf.clear();
     buf.to_process.extend(pending.drain());
@@ -86,17 +89,14 @@ pub fn simulate_flow_step(
         }
 
         let level = world.get_water_level_world(pos.x, pos.y, pos.z);
-        if level == 0 {
-            // Water removed since this position was queued.
+        if level == 0 || world.get_block(pos.x, pos.y, pos.z) != water_id {
+            // Water removed/replaced since this position was queued.
             continue;
         }
+        let is_source = world.is_known_water_source(pos.x, pos.y, pos.z);
 
-        // Try flowing DOWN first. Water falls at full level (8) and does NOT
-        // spread sideways the same step.
-        // Falling water only fills the below-block if it is air (not water).
-        // Promoting existing water to source level would create infinite sources
-        // from non-source blocks; water that falls continues to flow as flowing
-        // water (level 8) and then the source above maintains it.
+        // Water falls vertically at full height. Falling water remains a
+        // flowing block, not a new source, and continues down until blocked.
         let below = pos + DOWN;
         let mut fell = false;
         if below.y >= 0
@@ -104,19 +104,25 @@ pub fn simulate_flow_step(
             && world.is_block_loaded(below.x, below.y, below.z)
         {
             let below_id = world.get_block(below.x, below.y, below.z);
-            let below_solid = reg.is_solid(below_id);
-            let below_water = reg.is_liquid(below_id);
-            let below_level = world.get_water_level_world(below.x, below.y, below.z);
-            if !below_solid && !below_water {
+            if below_id == water_id {
+                let below_level = world.get_water_level_world(below.x, below.y, below.z);
+                if below_level < 8 {
+                    world.set_water_level_world(below.x, below.y, below.z, 8);
+                    affected.insert(block_to_chunk(below));
+                    next_pending.insert(below);
+                }
+                // A full water column still occupies the fall path; do not
+                // spread sideways from a source above it.
+                fell = below_level > 0;
+            } else if below_id.is_air()
+                || (reg.get(below_id).replaceable && !reg.is_liquid(below_id))
+            {
                 world.set_water_level_world(below.x, below.y, below.z, 8);
-                affected.insert(block_to_chunk(below));
-                next_pending.insert(below);
-                fell = true;
-            } else if !below_solid && below_water && 8 > below_level {
-                // Below is already water at a lower level: leave it. The
-                // source above will be re-queued next tick and continue to
-                // supply this column. Setting the lower to 8 would promote
-                // a non-source to source, violating the source invariant.
+                if world.get_block(below.x, below.y, below.z) == water_id {
+                    affected.insert(block_to_chunk(below));
+                    next_pending.insert(below);
+                    fell = true;
+                }
             }
         }
 
@@ -124,66 +130,90 @@ pub fn simulate_flow_step(
             let next_lvl = level - 1;
             for &dir in &SIDES {
                 let npos = pos + dir;
-                if npos.y < 0 || npos.y >= WORLD_HEIGHT_BLOCKS {
-                    continue;
-                }
-                if !world.is_block_loaded(npos.x, npos.y, npos.z) {
+                if npos.y < 0
+                    || npos.y >= WORLD_HEIGHT_BLOCKS
+                    || !world.is_block_loaded(npos.x, npos.y, npos.z)
+                {
                     continue;
                 }
                 let n_id = world.get_block(npos.x, npos.y, npos.z);
-                let n_solid = reg.is_solid(n_id);
-                let n_water = reg.is_liquid(n_id);
                 let n_level = world.get_water_level_world(npos.x, npos.y, npos.z);
+                let can_fill = n_id == water_id
+                    || n_id.is_air()
+                    || (reg.get(n_id).replaceable && !reg.is_liquid(n_id));
+                if !can_fill || (n_id == water_id && next_lvl <= n_level) {
+                    continue;
+                }
 
-                if !n_solid && (!n_water || next_lvl > n_level) {
-                    // Don't spread water over the top of existing water — the
-                    // water at this position would be on top of the below
-                    // block. Skip the placement; the below water remains.
-                    let below_npos = npos + DOWN;
-                    if below_npos.y >= 0
-                        && below_npos.y < WORLD_HEIGHT_BLOCKS
-                        && world.is_block_loaded(below_npos.x, below_npos.y, below_npos.z)
-                    {
-                        let below_n_id = world.get_block(below_npos.x, below_npos.y, below_npos.z);
-                        if reg.is_liquid(below_n_id) {
-                            continue;
-                        }
+                // Route sideways flow down instead of stacking a new liquid
+                // voxel directly on top of another water voxel.
+                let below_npos = npos + DOWN;
+                if below_npos.y >= 0 && below_npos.y < WORLD_HEIGHT_BLOCKS {
+                    if !world.is_block_loaded(below_npos.x, below_npos.y, below_npos.z) {
+                        continue;
                     }
-                    world.set_water_level_world(npos.x, npos.y, npos.z, next_lvl);
+                    let below_id = world.get_block(below_npos.x, below_npos.y, below_npos.z);
+                    if below_id == water_id {
+                        let below_level =
+                            world.get_water_level_world(below_npos.x, below_npos.y, below_npos.z);
+                        if below_level < 8 {
+                            world.set_water_level_world(
+                                below_npos.x,
+                                below_npos.y,
+                                below_npos.z,
+                                8,
+                            );
+                            affected.insert(block_to_chunk(below_npos));
+                            next_pending.insert(below_npos);
+                        }
+                        continue;
+                    }
+                    if !below_id.is_air() && !reg.get(below_id).replaceable {
+                        // The destination is blocked beneath; a surface layer
+                        // is supported and can still be filled horizontally.
+                    } else if below_id.is_air() || reg.get(below_id).replaceable {
+                        world.set_water_level_world(below_npos.x, below_npos.y, below_npos.z, 8);
+                        if world.get_block(below_npos.x, below_npos.y, below_npos.z) == water_id {
+                            affected.insert(block_to_chunk(below_npos));
+                            next_pending.insert(below_npos);
+                        }
+                        continue;
+                    }
+                }
+
+                world.set_water_level_world(npos.x, npos.y, npos.z, next_lvl);
+                if world.get_block(npos.x, npos.y, npos.z) == water_id {
                     affected.insert(block_to_chunk(npos));
                     next_pending.insert(npos);
                 }
             }
         }
 
-        // Sources are persistent: keep them pending only if they could
-        // still spread (at least one non-solid, non-water side neighbour).
-        if level == 8 {
-            let mut can_spread = false;
-            for &dir in &SIDES {
-                let npos = pos + dir;
-                if npos.y < 0 || npos.y >= WORLD_HEIGHT_BLOCKS {
-                    continue;
+        // Only actual sources persist in the work queue. A level-8 waterfall
+        // is full-height but must not keep acting like an infinite source.
+        if is_source {
+            let below_id = world.get_block(below.x, below.y, below.z);
+            let below_level = world.get_water_level_world(below.x, below.y, below.z);
+            let can_fall = below.y >= 0
+                && below.y < WORLD_HEIGHT_BLOCKS
+                && world.is_block_loaded(below.x, below.y, below.z)
+                && (below_id.is_air()
+                    || (below_id == water_id && below_level < 8)
+                    || (reg.get(below_id).replaceable && !reg.is_liquid(below_id)));
+            let can_spread_sideways = SIDES.iter().any(|dir| {
+                let npos = pos + *dir;
+                if npos.y < 0
+                    || npos.y >= WORLD_HEIGHT_BLOCKS
+                    || !world.is_block_loaded(npos.x, npos.y, npos.z)
+                {
+                    return false;
                 }
-                if !world.is_block_loaded(npos.x, npos.y, npos.z) {
-                    continue;
-                }
-                let n_id = world.get_block(npos.x, npos.y, npos.z);
-                let n_solid = reg.is_solid(n_id);
-                let n_water = reg.is_liquid(n_id);
-                if !n_solid && !n_water {
-                    can_spread = true;
-                    break;
-                }
-                if !n_solid && n_water {
-                    let n_level = world.get_water_level_world(npos.x, npos.y, npos.z);
-                    if n_level < 8 {
-                        can_spread = true;
-                        break;
-                    }
-                }
-            }
-            if can_spread {
+                let id = world.get_block(npos.x, npos.y, npos.z);
+                id.is_air()
+                    || (reg.get(id).replaceable && !reg.is_liquid(id))
+                    || (id == water_id && world.get_water_level_world(npos.x, npos.y, npos.z) < 7)
+            });
+            if can_fall || can_spread_sideways {
                 next_pending.insert(pos);
             }
         }
@@ -323,6 +353,57 @@ fn clear_flow(world: &World, sources: &[IVec3], affected: &mut HashSet<ChunkPos>
             }
         }
     }
+}
+
+/// Recalculate a connected water body after a source is removed. Unsupported
+/// flowing blocks are cleared and the remaining sources are queued to refill
+/// any spaces they can still reach.
+pub(crate) fn rebuild_flow_after_source_removed(world: &World, removed: IVec3) {
+    let Some(water_id) = world.registry().id_of("water") else {
+        return;
+    };
+    let mut component = HashSet::new();
+    let mut queue = VecDeque::new();
+    for dir in [DOWN, UP, SIDES[0], SIDES[1], SIDES[2], SIDES[3]] {
+        let p = removed + dir;
+        if p.y >= 0
+            && p.y < WORLD_HEIGHT_BLOCKS
+            && world.get_block(p.x, p.y, p.z) == water_id
+            && world.get_water_level_world(p.x, p.y, p.z) > 0
+            && component.insert(p)
+        {
+            queue.push_back(p);
+        }
+    }
+
+    let mut remaining_sources = Vec::new();
+    while let Some(pos) = queue.pop_front() {
+        if world.is_known_water_source(pos.x, pos.y, pos.z) {
+            remaining_sources.push(pos);
+        }
+        for dir in [DOWN, UP, SIDES[0], SIDES[1], SIDES[2], SIDES[3]] {
+            let next = pos + dir;
+            if next.y >= 0
+                && next.y < WORLD_HEIGHT_BLOCKS
+                && world.get_block(next.x, next.y, next.z) == water_id
+                && world.get_water_level_world(next.x, next.y, next.z) > 0
+                && component.insert(next)
+            {
+                queue.push_back(next);
+            }
+        }
+    }
+
+    let mut affected_sources = remaining_sources.clone();
+    for pos in component.iter().copied() {
+        if !world.is_known_water_source(pos.x, pos.y, pos.z) {
+            world.set_water_level_world(pos.x, pos.y, pos.z, 0);
+            world.mark_water_remesh(pos);
+        } else {
+            affected_sources.push(pos);
+        }
+    }
+    world.replace_pending_water(component, affected_sources);
 }
 
 /// Promote flowing water between pre-existing sources on the same Y to level
@@ -504,6 +585,38 @@ mod tests {
         let world = setup_world();
         place_source(&world, 0, 1, 0);
         assert_eq!(world.get_water_level_world(0, 1, 0), 8);
+    }
+
+    #[test]
+    fn removing_source_rebuilds_the_remaining_water_body() {
+        let world = setup_world();
+        place_source(&world, 0, 1, 0);
+        simulate_flow_full(&world, IVec3::new(0, 1, 0));
+        assert_eq!(world.get_water_level_world(1, 1, 0), 7);
+
+        assert!(world.remove_water(0, 1, 0));
+        assert_eq!(world.get_water_level_world(1, 1, 0), 0);
+        assert_eq!(world.get_water_level_world(-1, 1, 0), 0);
+    }
+
+    #[test]
+    fn flow_fills_replaceable_blocks_but_not_solid_blocks() {
+        let world = setup_world();
+        let tall_grass = world.registry().id_of("tall_grass").unwrap();
+        let stone = world.registry().id_of("stone").unwrap();
+        world.set_block(1, 1, 0, tall_grass);
+        world.set_block(0, 2, 0, stone);
+        world.place_water(0, 1, 0);
+
+        let mut pending = HashSet::new();
+        pending.insert(IVec3::new(0, 1, 0));
+        step(&world, &mut pending);
+        assert_eq!(
+            world.get_block(1, 1, 0),
+            world.registry().id_of("water").unwrap()
+        );
+        assert_eq!(world.get_water_level_world(1, 1, 0), 7);
+        assert_eq!(world.get_block(0, 2, 0), stone);
     }
 
     #[test]
@@ -731,15 +844,17 @@ mod tests {
     }
 
     #[test]
-    fn step_keeps_source_in_pending() {
+    fn source_leaves_pending_queue_when_its_edges_are_filled() {
         let world = setup_world();
         place_source(&world, 0, 1, 0);
         let mut pending = HashSet::new();
         pending.insert(IVec3::new(0, 1, 0));
 
-        // After one tick, the source should still be in pending (level 8).
+        // The neighboring level-7 blocks now carry the front; the stationary
+        // source can sleep until a nearby block edit re-enqueues it.
         step(&world, &mut pending);
-        assert!(pending.contains(&IVec3::new(0, 1, 0)));
+        assert!(!pending.contains(&IVec3::new(0, 1, 0)));
+        assert_eq!(pending.len(), 4);
     }
 
     #[test]
@@ -755,9 +870,10 @@ mod tests {
         pending.insert(IVec3::new(5, 1, 0));
 
         step(&world, &mut pending);
-        // The cleared position is dropped; the source remains.
+        // The cleared position is dropped, and the stable source sleeps until
+        // a later neighboring edit asks it to flow again.
         assert!(!pending.contains(&IVec3::new(5, 1, 0)));
-        assert!(pending.contains(&IVec3::new(0, 1, 0)));
+        assert!(!pending.contains(&IVec3::new(0, 1, 0)));
     }
 
     #[test]

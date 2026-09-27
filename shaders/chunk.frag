@@ -358,8 +358,8 @@ void main() {
 
     // ── WATER: refraction + fresnel reflection (SSR with sky fallback) ───
     // Replaces the base shading for water tiles. The refraction samples the
-    // binding-6 opaque colour distorted by the procedural wave normal, with
-    // Beer-Lambert absorption over the REAL water column depth (binding-7
+    // binding-6 opaque colour without screen-space wobble, with Beer-Lambert
+    // absorption over the REAL water column depth (binding-7
     // scene depth minus this fragment's eye depth). The reflection is a
     // screen-space ray-march falling back to the analytic sky on miss,
     // weighted by Schlick fresnel. A specular sun glint rides on top.
@@ -373,12 +373,12 @@ void main() {
         vec2 frag_uv_ss = gl_FragCoord.xy / scene_size;
         float frag_eye = (push.view_proj * vec4(frag_world_pos, 1.0)).w;
 
-        // Refraction: wave-normal offset with a perspective-ish falloff so
-        // distant water distorts less (screen-space magnitude stays sane).
+        // Keep opaque block textures stable beneath water; the wave normal
+        // still drives reflections and highlights, but does not displace the
+        // refraction sample coordinates.
         vec3 refracted;
         {
-            vec2 refr_off = n.xz * (0.06 / max(frag_eye * 0.12, 0.35));
-            vec2 refr_uv = clamp(frag_uv_ss + refr_off, vec2(0.001), vec2(0.999));
+            vec2 refr_uv = clamp(frag_uv_ss, vec2(0.001), vec2(0.999));
             // Sample `scene_depth` only when SSR / depth-resolve is genuinely
             // available on this device. Otherwise the depth copy is skipped
             // (`depth_resolve_mode = None`) and `scene_opaque_depth` is

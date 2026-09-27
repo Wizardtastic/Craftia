@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use glam::IVec3;
 use voxel_core::{
     math::{block_to_chunk, chunk_origin, ChunkPos},
-    BlockId, BlockPos, WORLD_HEIGHT_BLOCKS,
+    BlockId, BlockPos, CHUNK_SIZE, WORLD_HEIGHT_BLOCKS,
 };
 
 use crate::schematic::{SchematicEntity, SchematicId};
@@ -111,6 +111,9 @@ pub struct World {
     /// Set of positions that are water sources (level 8). Used for O(1)
     /// lookups during water simulation instead of scanning all chunks.
     source_water: RwLock<HashSet<IVec3>>,
+    /// Chunks whose water mesh changed outside an active simulation tick
+    /// (e.g. source removal). Drained by `tick_water` for remeshing.
+    water_remesh: RwLock<HashSet<ChunkPos>>,
     /// Accumulated wall-clock seconds since the last water tick.
     water_tick_accumulator: RwLock<f32>,
     /// Reusable scratch buffers for `simulate_flow_step` to avoid per-tick allocations.
@@ -179,6 +182,7 @@ impl World {
             sun_dir: RwLock::new(glam::Vec3::new(0.3, 0.9, 0.1).normalize()),
             pending_flow: RwLock::new(HashSet::new()),
             source_water: RwLock::new(HashSet::new()),
+            water_remesh: RwLock::new(HashSet::new()),
             water_tick_accumulator: RwLock::new(0.0),
             water_sim_buf: RwLock::new(crate::water::SimulateBuffers::new()),
             self_ref: Weak::clone(weak),
@@ -208,13 +212,179 @@ impl World {
 
     pub fn insert_chunk(&self, pos: ChunkPos, mut chunk: Chunk) {
         chunk.pos = pos;
+        let origin = chunk_origin(pos);
+        let water_id = self.reg.id_of("water");
+        let mut water_blocks = Vec::new();
+        if let Some(water_id) = water_id {
+            for ly in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    for lx in 0..CHUNK_SIZE {
+                        let level = chunk.get_water_level(lx, ly, lz);
+                        if chunk.get(lx, ly, lz) == water_id && level > 0 {
+                            water_blocks.push((
+                                IVec3::new(origin.x + lx, origin.y + ly, origin.z + lz),
+                                level,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         self.chunks.write_shard(pos).insert(pos, chunk);
+
+        // Generated and loaded chunks may already contain water. Register it
+        // with the same incremental simulation used for bucket-placed water.
+        self.source_water
+            .write()
+            .retain(|p| block_to_chunk(*p) != pos);
+        self.pending_flow
+            .write()
+            .retain(|p| block_to_chunk(*p) != pos);
+        self.water_remesh.write().remove(&pos);
+        {
+            let mut sources = self.source_water.write();
+            let mut pending = self.pending_flow.write();
+
+            for &(p, level) in &water_blocks {
+                pending.insert(p);
+                if level == 8 {
+                    sources.insert(p);
+                }
+            }
+        }
+
+        // A boundary liquid cell may have stopped ticking while its adjacent
+        // chunk was unloaded. Resume water immediately across loaded borders.
+        let mut edge_water = Vec::new();
+        let mut check_edge = |p: IVec3| {
+            if let Some(water_id) = water_id {
+                if self.get_block(p.x, p.y, p.z) == water_id
+                    && self.get_water_level_world(p.x, p.y, p.z) > 0
+                {
+                    edge_water.push(p);
+                }
+            }
+        };
+        for a in 0..CHUNK_SIZE {
+            for b in 0..CHUNK_SIZE {
+                check_edge(IVec3::new(origin.x - 1, origin.y + a, origin.z + b));
+                check_edge(IVec3::new(
+                    origin.x + CHUNK_SIZE,
+                    origin.y + a,
+                    origin.z + b,
+                ));
+                check_edge(IVec3::new(origin.x + a, origin.y - 1, origin.z + b));
+                check_edge(IVec3::new(
+                    origin.x + a,
+                    origin.y + CHUNK_SIZE,
+                    origin.z + b,
+                ));
+                check_edge(IVec3::new(origin.x + a, origin.y + b, origin.z - 1));
+                check_edge(IVec3::new(
+                    origin.x + a,
+                    origin.y + b,
+                    origin.z + CHUNK_SIZE,
+                ));
+            }
+        }
+        self.pending_flow.write().extend(edge_water);
+    }
+
+    /// Fraction of an axis-aligned box occupied by water, accounting for the
+    /// 0–8 fluid surface height. Used by player movement so shallow water only
+    /// affects physics when the player's bounds actually intersect it.
+    pub fn water_submersion(&self, min: glam::Vec3, max: glam::Vec3) -> f32 {
+        let size = max - min;
+        let volume = size.x * size.y * size.z;
+        if !volume.is_finite() || volume <= 0.0 {
+            return 0.0;
+        }
+        let Some(water_id) = self.reg.id_of("water") else {
+            return 0.0;
+        };
+        let min_block = voxel_core::math::world_to_block(min);
+        let max_block = voxel_core::math::world_to_block(max - glam::Vec3::splat(0.001));
+        let mut submerged_volume = 0.0;
+        for by in min_block.y..=max_block.y {
+            for bz in min_block.z..=max_block.z {
+                for bx in min_block.x..=max_block.x {
+                    if self.get_block(bx, by, bz) != water_id {
+                        continue;
+                    }
+                    let level = self.get_water_level_world(bx, by, bz);
+                    if level == 0 {
+                        continue;
+                    }
+                    let overlap_x = (max.x.min(bx as f32 + 1.0) - min.x.max(bx as f32)).max(0.0);
+                    let overlap_z = (max.z.min(bz as f32 + 1.0) - min.z.max(bz as f32)).max(0.0);
+                    let water_top = by as f32 + level as f32 / 8.0;
+                    let overlap_y = (max.y.min(water_top) - min.y.max(by as f32)).max(0.0);
+                    submerged_volume += overlap_x * overlap_y * overlap_z;
+                }
+            }
+        }
+        (submerged_volume / volume).clamp(0.0, 1.0)
+    }
+
+    /// Queue loaded water blocks beside a changed block so openings and newly
+    /// loaded chunk boundaries immediately affect nearby fluid flow.
+    fn enqueue_water_neighbours(&self, pos: IVec3) {
+        let Some(water_id) = self.reg.id_of("water") else {
+            return;
+        };
+        let neighbours: Vec<_> = water_neighbours(pos)
+            .into_iter()
+            .filter(|p| {
+                self.get_block(p.x, p.y, p.z) == water_id
+                    && self.get_water_level_world(p.x, p.y, p.z) > 0
+            })
+            .collect();
+        self.pending_flow.write().extend(neighbours);
     }
 
     pub fn remove_chunk(&self, pos: ChunkPos) {
-        let mut meshes = self.meshes.write();
         self.chunks.write_shard(pos).remove(&pos);
-        meshes.remove(&pos);
+        self.meshes.write().remove(&pos);
+        self.water_remesh.write().remove(&pos);
+        self.source_water
+            .write()
+            .retain(|p| block_to_chunk(*p) != pos);
+        self.pending_flow
+            .write()
+            .retain(|p| block_to_chunk(*p) != pos);
+        let origin = chunk_origin(pos);
+        let mut edge_water = Vec::new();
+        let mut check_edge = |p: IVec3| {
+            if self.reg.id_of("water").is_some_and(|water_id| {
+                self.get_block(p.x, p.y, p.z) == water_id
+                    && self.get_water_level_world(p.x, p.y, p.z) > 0
+            }) {
+                edge_water.push(p);
+            }
+        };
+        for a in 0..CHUNK_SIZE {
+            for b in 0..CHUNK_SIZE {
+                check_edge(IVec3::new(origin.x - 1, origin.y + a, origin.z + b));
+                check_edge(IVec3::new(
+                    origin.x + CHUNK_SIZE,
+                    origin.y + a,
+                    origin.z + b,
+                ));
+                check_edge(IVec3::new(origin.x + a, origin.y - 1, origin.z + b));
+                check_edge(IVec3::new(
+                    origin.x + a,
+                    origin.y + CHUNK_SIZE,
+                    origin.z + b,
+                ));
+                check_edge(IVec3::new(origin.x + a, origin.y + b, origin.z - 1));
+                check_edge(IVec3::new(
+                    origin.x + a,
+                    origin.y + b,
+                    origin.z + CHUNK_SIZE,
+                ));
+            }
+        }
+        self.pending_flow.write().extend(edge_water);
     }
 
     /// Record that the chunk at `pos` has a finished mesh. The world does not
@@ -230,6 +400,22 @@ impl World {
     }
     pub fn meshed_chunk_count(&self) -> usize {
         self.meshes.read().len()
+    }
+
+    pub(crate) fn mark_water_remesh(&self, pos: IVec3) {
+        self.water_remesh.write().insert(block_to_chunk(pos));
+    }
+
+    pub(crate) fn replace_pending_water(
+        &self,
+        remove: HashSet<IVec3>,
+        insert: impl IntoIterator<Item = IVec3>,
+    ) {
+        let mut pending = self.pending_flow.write();
+        for pos in remove {
+            pending.remove(&pos);
+        }
+        pending.extend(insert);
     }
 
     /// Number of blocks pending water flow simulation.
@@ -251,9 +437,8 @@ impl World {
 
     /// Insert multiple chunks (for load).
     pub fn insert_chunks(&self, chunks: Vec<(ChunkPos, Chunk)>) {
-        for (cp, mut chunk) in chunks {
-            chunk.pos = cp;
-            self.chunks.write_shard(cp).insert(cp, chunk);
+        for (cp, chunk) in chunks {
+            self.insert_chunk(cp, chunk);
         }
     }
 
@@ -562,8 +747,18 @@ impl World {
                 return ConditionalBlockWrite::Skipped;
             }
             chunk.set(lx, ly, lz, id);
+            // Water-level metadata belongs to the old block value; never let
+            // it survive replacement by another block type.
+            chunk.set_water_level(lx, ly, lz, 0);
             old
         };
+        let pos = IVec3::new(x, y, z);
+        let removed_water = self
+            .reg
+            .id_of("water")
+            .is_some_and(|water_id| old == water_id && id != water_id);
+        self.source_water.write().remove(&pos);
+        self.pending_flow.write().remove(&pos);
 
         // Re-light the 6 cardinal neighbours FIRST so they pick up the new
         // central-chunk torchlight via `sample_torchlight`/`sample_block`,
@@ -580,6 +775,11 @@ impl World {
         // BFS is cheap at 16³. We gate on `is_chunk_loaded` so unloaded
         // neighbour positions are a single hashmap probe (no chunk copy).
         self.recompute_lighting_around(cp);
+        self.enqueue_water_neighbours(pos);
+        if removed_water {
+            self.mark_water_remesh(pos);
+            crate::water::rebuild_flow_after_source_removed(self, pos);
+        }
         ConditionalBlockWrite::Changed(old)
     }
 
@@ -655,6 +855,9 @@ impl World {
         if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
             return;
         }
+        let Some(water_id) = self.reg.id_of("water") else {
+            return;
+        };
         let cp = block_to_chunk(IVec3::new(x, y, z));
         let mut chunks = self.chunks.write_shard(cp);
         let Some(chunk) = chunks.get_mut(&cp) else {
@@ -664,24 +867,43 @@ impl World {
         let lx = x - origin.x;
         let ly = y - origin.y;
         let lz = z - origin.z;
+        let pos = IVec3::new(x, y, z);
+        let old_level = chunk.get_water_level(lx, ly, lz);
 
         if level > 0 {
-            let water_id = self
-                .reg
-                .id_of("water")
-                .expect("water block must be registered");
             let current = chunk.get(lx, ly, lz);
-            if (current.is_air() || self.reg.is_liquid(current))
-                && current != water_id {
-                    chunk.set(lx, ly, lz, water_id);
-                }
-        } else {
-            let current = chunk.get(lx, ly, lz);
-            if self.reg.is_liquid(current) {
-                chunk.set(lx, ly, lz, BlockId::AIR);
+            if current != water_id && current != BlockId::AIR && self.reg.is_liquid(current) {
+                return;
             }
+            let can_replace = current.is_air() || self.reg.get(current).replaceable;
+            if current != water_id && !can_replace {
+                return;
+            }
+            if current != water_id {
+                chunk.set(lx, ly, lz, water_id);
+            }
+            chunk.set_water_level(lx, ly, lz, level.min(8));
+            if old_level != level.min(8) || current != water_id {
+                self.water_remesh.write().insert(cp);
+            }
+            return;
         }
-        chunk.set_water_level(lx, ly, lz, level);
+
+        let current = chunk.get(lx, ly, lz);
+        if current == water_id {
+            chunk.set(lx, ly, lz, BlockId::AIR);
+            chunk.set_water_level(lx, ly, lz, 0);
+        } else if !self.reg.is_liquid(current) {
+            // Clean stale water metadata without ever deleting another liquid.
+            chunk.set_water_level(lx, ly, lz, 0);
+        }
+        if old_level != 0 || current == water_id {
+            self.water_remesh.write().insert(cp);
+        }
+        drop(chunks);
+        self.source_water.write().remove(&pos);
+        self.pending_flow.write().remove(&pos);
+        self.enqueue_water_neighbours(pos);
     }
 
     /// True if the block at (x,y,z) is a water source (liquid with level 8).
@@ -711,29 +933,14 @@ impl World {
     /// positions so the simulation resumes on the next tick. Returns true if
     /// removed.
     pub fn remove_water(&self, x: i32, y: i32, z: i32) -> bool {
-        if !self.is_water_source(x, y, z) {
+        let Some(water_id) = self.reg.id_of("water") else {
+            return false;
+        };
+        if !self.is_water_source(x, y, z) || self.get_block(x, y, z) != water_id {
             return false;
         }
-        // Use set_block to remove water so lighting is recalculated.
-        self.set_block(x, y, z, BlockId::AIR);
-        // Clear the water level array too (set_block only changes block ID).
-        self.set_water_level_world(x, y, z, 0);
-        // Remove from the source index so subsequent lookups don't see it.
-        self.source_water.write().remove(&IVec3::new(x, y, z));
-        // Remove from pending flow and enqueue neighbours so the surrounding
-        // water resumes spreading on the next tick.
-        {
-            let mut pending = self.pending_flow.write();
-            pending.remove(&IVec3::new(x, y, z));
-            for npos in water_neighbours(IVec3::new(x, y, z)) {
-                if self.is_block_loaded(npos.x, npos.y, npos.z)
-                    && self.reg.is_liquid(self.get_block(npos.x, npos.y, npos.z))
-                {
-                    pending.insert(npos);
-                }
-            }
-        }
-        true
+        // Use set_block to remove water so lighting and water indexes update.
+        self.set_block(x, y, z, BlockId::AIR)
     }
 
     /// Place a water source block at (x,y,z). Sets the block + water level 8
@@ -744,10 +951,17 @@ impl World {
             Some(id) => id,
             None => return false,
         };
+        let current = self.get_block(x, y, z);
+        if !current.is_air()
+            && current != water_id
+            && (!self.reg.get(current).replaceable || self.reg.is_liquid(current))
+        {
+            return false;
+        }
         if !self.set_block(x, y, z, water_id) {
             return false;
         }
-        // Set water level to 8 (source) after block is placed.
+        // Set water level to 8 (source) after the block is placed.
         self.set_water_level_world(x, y, z, 8);
         // Enqueue the source for incremental flow on the next tick.
         self.pending_flow.write().insert(IVec3::new(x, y, z));
@@ -782,9 +996,10 @@ impl World {
         // duplicates are harmless (the sim re-checks actual water levels).
         let mut pending = std::mem::take(&mut *self.pending_flow.write());
         let mut buf = self.water_sim_buf.write();
-        let affected = crate::water::simulate_flow_step(self, &mut pending, &mut buf);
+        let mut affected = crate::water::simulate_flow_step(self, &mut pending, &mut buf);
         drop(buf);
         self.pending_flow.write().extend(pending);
+        affected.extend(std::mem::take(&mut *self.water_remesh.write()));
         affected
     }
 
@@ -870,11 +1085,13 @@ impl World {
     }
 }
 
-/// Four cardinal neighbour offsets of `pos` on the same Y plane.
-fn water_neighbours(pos: IVec3) -> [IVec3; 4] {
+/// Six face-adjacent neighbours of `pos`.
+fn water_neighbours(pos: IVec3) -> [IVec3; 6] {
     [
         pos + IVec3::new(1, 0, 0),
         pos + IVec3::new(-1, 0, 0),
+        pos + IVec3::new(0, 1, 0),
+        pos + IVec3::new(0, -1, 0),
         pos + IVec3::new(0, 0, 1),
         pos + IVec3::new(0, 0, -1),
     ]
@@ -991,6 +1208,44 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].0, cp);
         assert_eq!(chunks[0].1.get(0, 0, 0), BlockId(5));
+    }
+
+    #[test]
+    fn inserted_chunk_registers_water_sources_and_replacing_chunk_clears_them() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        let water = world.registry().id_of("water").unwrap();
+        let mut chunk = Chunk::new(cp);
+        chunk.set(2, 3, 4, water);
+        chunk.set_water_level(2, 3, 4, 8);
+        world.insert_chunk(cp, chunk);
+        assert!(world.is_known_water_source(2, 3, 4));
+        assert_eq!(world.pending_flow_count(), 1);
+
+        world.insert_chunk(cp, Chunk::new(cp));
+        assert!(!world.is_known_water_source(2, 3, 4));
+        assert_eq!(world.pending_flow_count(), 0);
+    }
+
+    #[test]
+    fn water_submersion_uses_partial_fluid_height() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        world.insert_chunk(cp, Chunk::new(cp));
+        world.set_water_level_world(0, 1, 0, 4);
+
+        let submerged = world.water_submersion(
+            glam::Vec3::new(0.2, 1.0, 0.2),
+            glam::Vec3::new(0.8, 1.9, 0.8),
+        );
+        assert!((submerged - (0.5 / 0.9)).abs() < 0.01);
+        assert_eq!(
+            world.water_submersion(
+                glam::Vec3::new(0.2, 1.6, 0.2),
+                glam::Vec3::new(0.8, 2.0, 0.8),
+            ),
+            0.0
+        );
     }
 
     #[test]

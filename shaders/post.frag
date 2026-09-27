@@ -113,15 +113,9 @@ float compute_ssao(vec2 uv, float depth_linear, vec3 view_pos) {
 }
 
 void main() {
+    // Underwater coloring is applied below, but keep scene UVs fixed so
+    // submerged block textures do not sway with the water animation.
     vec2 uv = frag_uv;
-
-    // Underwater distortion effect.
-    if (push.params.w > 0.5) {
-        float distortion = sin(uv.x * 100.0 + push.params.z * 2.0) * 0.003;
-        float distortion2 = cos(uv.y * 80.0 + push.params.z * 1.5) * 0.002;
-        uv.x += distortion;
-        uv.y += distortion2;
-    }
 
     // Sample HDR scene and apply exposure.
     vec3 hdr = texture(scene_color, uv).rgb;

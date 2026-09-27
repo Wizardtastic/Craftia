@@ -86,8 +86,6 @@ const MIN_FACE_LIGHT: f32 = 0.15;
 const MIN_FOLIAGE_LIGHT: f32 = 0.2;
 // Half-width of the foliage cross planes, in blocks.
 const FOLIAGE_PLANE_WIDTH: f32 = 0.45;
-// How far a full water block's top surface sits below the block ceiling.
-const WATER_SURFACE_INSET: f32 = 2.0 / 16.0;
 // Extra vertex light per unit of water level (0..8) — brightens water as it
 // deepens.
 const WATER_LIGHT_BOOST: f32 = 0.5;
@@ -840,10 +838,26 @@ fn emit_water_block(
         if neighbour_def.opaque {
             continue;
         }
-        if !neighbour.is_air() && neighbour_def.kind == BlockKind::Liquid {
-            let nw = sample_water(wx + n.x, wy + n.y, wz + n.z);
-            if nw == water_level {
-                continue;
+        let neighbour_level = if !neighbour.is_air() && neighbour_def.kind == BlockKind::Liquid {
+            sample_water(wx + n.x, wy + n.y, wz + n.z)
+        } else {
+            0
+        };
+        let water_height = water_level as f32 / 8.0;
+        let neighbour_height = neighbour_level as f32 / 8.0;
+        if neighbour_level > 0 {
+            match face {
+                Face::PosX | Face::NegX | Face::PosZ | Face::NegZ => {
+                    // Only the taller cell owns the exposed step between
+                    // adjacent liquid surfaces. This avoids overlapping
+                    // transparent quads and z-fighting at different levels.
+                    if water_height <= neighbour_height {
+                        continue;
+                    }
+                }
+                Face::PosY if water_height >= 1.0 => continue,
+                Face::NegY if neighbour_height >= 1.0 => continue,
+                _ => {}
             }
         }
         if *face == Face::NegY && neighbour_def.kind == BlockKind::Solid {
@@ -856,16 +870,16 @@ fn emit_water_block(
         let base = FACE_BASE[fi];
         let uvs = FACE_UVS[fi];
         let mut p_base = GVec3::new(lx as f32, ly as f32, lz as f32) + base;
-        let y_scale = if *face != Face::PosY && *face != Face::NegY {
-            let nw = if neighbour_def.kind == BlockKind::Liquid {
-                sample_water(wx + n.x, wy + n.y, wz + n.z)
-            } else {
-                0
-            };
-            (water_level.max(nw)) as f32 / 8.0
+        let side_neighbour_height = if *face == Face::PosX
+            || *face == Face::NegX
+            || *face == Face::PosZ
+            || *face == Face::NegZ
+        {
+            neighbour_height
         } else {
-            1.0
+            0.0
         };
+        let side_height = (water_height - side_neighbour_height).max(0.0);
         if *face == Face::PosY {
             p_base.y = ly as f32 + height_frac;
         }
@@ -876,10 +890,7 @@ fn emit_water_block(
         for c in 0..4 {
             let mut cp = p_base + corners[c];
             if *face != Face::PosY && *face != Face::NegY {
-                cp.y = ly as f32 + corners[c].y * y_scale;
-            }
-            if *face == Face::PosY && water_level == 8 {
-                cp.y -= WATER_SURFACE_INSET;
+                cp.y = ly as f32 + side_neighbour_height + corners[c].y * side_height;
             }
             let vertex_light = 1.0 + (water_f / 8.0) * WATER_LIGHT_BOOST;
             bundle.transparent.vertices.push(ChunkVertex {
@@ -1132,6 +1143,48 @@ mod tests {
         );
         assert_eq!(bundle.transparent.vertices.len(), 24);
         assert_eq!(bundle.transparent.indices.len(), 36);
+    }
+
+    #[test]
+    fn adjacent_water_levels_emit_only_the_exposed_step_face() {
+        let reg = BlockRegistry::with_builtins();
+        let water = reg.id_of("water").unwrap();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0));
+        chunk.set(7, 7, 7, water);
+        chunk.set_water_level(7, 7, 7, 6);
+        chunk.set(8, 7, 7, water);
+        chunk.set_water_level(8, 7, 7, 3);
+
+        let bundle = ChunkMesher.build(
+            &chunk,
+            &reg,
+            |x, y, z| chunk.get(x, y, z),
+            |x, y, z| chunk.get_water_level(x, y, z),
+            air_loaded_sample,
+            Vec3::new(0.0, -1.0, 0.0),
+        );
+
+        // The taller cell emits the exposed step; the lower cell must not
+        // emit a coincident face at the same X plane.
+        let faces_on_shared_plane = bundle
+            .transparent
+            .vertices
+            .chunks_exact(4)
+            .filter(|quad| quad.iter().all(|v| (v.pos[0] - 8.0).abs() < 1e-6))
+            .count();
+        assert_eq!(faces_on_shared_plane, 1);
+        let has_step_height = bundle.transparent.vertices.chunks_exact(4).any(|quad| {
+            quad.iter().all(|v| (v.pos[0] - 8.0).abs() < 1e-6)
+                && (quad
+                    .iter()
+                    .map(|v| v.pos[1])
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    - quad.iter().map(|v| v.pos[1]).fold(f32::INFINITY, f32::min)
+                    - 3.0 / 8.0)
+                    .abs()
+                    < 1e-6
+        });
+        assert!(has_step_height);
     }
 
     #[test]

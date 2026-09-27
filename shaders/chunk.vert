@@ -43,26 +43,8 @@ layout(set = 0, binding = 0) uniform Camera {
 void main() {
     vec3 local = in_pos;
 
-    // Water animation: detect water via light > 1.0.
-    if (in_light > 1.0) {
-        // Extract water level from light encoding.
-        float water_level = (in_light - 1.0) / 0.5 * 8.0; // 1.0..8.0
-        float height_frac = water_level / 8.0;
-
-        // Apply sine-wave to the top face vertices (Y component).
-        // Use world XZ position for wave pattern.
-        vec3 world_no_anim = push.origin_pad.xyz + local;
-        float wave = sin(world_no_anim.x * 1.5 + push.time_and_pad.x * 1.8)
-                   * cos(world_no_anim.z * 1.2 + push.time_and_pad.x * 1.4) * 0.04;
-        // Only animate vertices at the water surface (those at the top of the
-        // water block). Side faces have corners at y=0 and y=height_frac;
-        // top faces have all corners at y=height_frac. Animate only the
-        // upper corners (y > 0.0 relative to the block base) — this catches
-        // the top face and the upper edge of side faces.
-        if (abs(local.y - height_frac) < 0.01) {
-            local.y += wave * height_frac;
-        }
-    }
+    // Liquid geometry is kept fixed; water ripples remain in the fragment
+    // shader's normals/reflections without moving submerged block textures.
 
     vec3 world = push.origin_pad.xyz + local;
     gl_Position = push.view_proj * vec4(world, 1.0);

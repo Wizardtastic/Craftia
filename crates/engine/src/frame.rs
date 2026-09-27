@@ -1282,12 +1282,14 @@ impl crate::EngineApp {
             .world
             .set_sun_dir(glam::Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]).normalize());
 
-        // Detect if camera is underwater for visual effects.
-        let eye_block = voxel_core::math::world_to_block(camera_now.pos);
+        // Detect actual water overlap at the camera point for visual effects;
+        // a shallow liquid block should not tint the view above its surface.
+        let eye_extent = glam::Vec3::splat(0.01);
         let underwater = self
             .world_state
             .world
-            .is_liquid(eye_block.x, eye_block.y, eye_block.z);
+            .water_submersion(camera_now.pos - eye_extent, camera_now.pos + eye_extent)
+            > 0.5;
 
         // Build & push the per-tile material lookup table (chunk shader
         // binding 5). The registry + scalars are read once per frame; cost
@@ -1548,11 +1550,12 @@ impl crate::EngineApp {
         };
         let ui = self.build_ui();
         let dp = self.day_params();
-        let eye_block = voxel_core::math::world_to_block(camera.pos);
+        let eye_extent = glam::Vec3::splat(0.01);
         let underwater = self
             .world_state
             .world
-            .is_liquid(eye_block.x, eye_block.y, eye_block.z);
+            .water_submersion(camera.pos - eye_extent, camera.pos + eye_extent)
+            > 0.5;
         let Some(r) = self.render.renderer.as_mut() else {
             return;
         };

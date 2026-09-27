@@ -105,7 +105,7 @@ impl BlockAction {
                         // otherwise adjacent to the hit face.
                         let target = world.get_block(h.block.x, h.block.y, h.block.z);
                         let place = if target.is_air()
-                            || (!reg.is_solid(target) && !reg.is_liquid(target))
+                            || (reg.get(target).replaceable && !reg.is_liquid(target))
                         {
                             h.block
                         } else {

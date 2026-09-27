@@ -121,7 +121,8 @@ impl Player {
             wish -= right;
         }
 
-        // Water detection: check if any block overlapping the player's AABB is liquid.
+        // Apply water physics in proportion to the player's actual overlap
+        // with water volume; shallow flow below the feet is not immersion.
         let half = if self.sneaking {
             glam::Vec3::new(PLAYER_HALF.x, PLAYER_HALF_SNEAK_Y, PLAYER_HALF.z)
         } else {
@@ -129,28 +130,9 @@ impl Player {
         };
         let aabb_min = self.pos - half;
         let aabb_max = self.pos + half;
-        let min_b = world_to_block(aabb_min);
-        let max_b = world_to_block(aabb_max - glam::Vec3::splat(0.001));
+        let submersion = world.water_submersion(aabb_min, aabb_max);
         self.was_in_water = self.in_water;
-        let mut in_water = false;
-        for by in min_b.y..=max_b.y {
-            for bz in min_b.z..=max_b.z {
-                for bx in min_b.x..=max_b.x {
-                    if world.is_liquid(bx, by, bz) {
-                        in_water = true;
-                        break;
-                    }
-                }
-                if in_water {
-                    break;
-                }
-            }
-            if in_water {
-                break;
-            }
-        }
-        self.in_water = in_water;
-
+        self.in_water = submersion > 0.05;
         if self.flying {
             // Fly mode: noclip, no gravity, full 3D movement.
             let speed = self.config.fly_speed;
@@ -168,8 +150,10 @@ impl Player {
             self.pos += self.vel * dt;
             self.on_ground = false;
         } else if self.in_water {
-            // Water physics: buoyancy, drag, swimming.
-            let swim_speed = self.config.walk_speed * 0.5;
+            // Water physics: scale horizontal drag and buoyancy with actual
+            // immersion so shallow splashes still feel less controllable.
+            let immersion = submersion.clamp(0.0, 1.0);
+            let swim_speed = self.config.walk_speed * (1.0 - 0.5 * immersion);
 
             if wish.length_squared() > 1e-6 {
                 wish = wish.normalize() * swim_speed;
@@ -187,7 +171,7 @@ impl Player {
             } else {
                 // Buoyancy: counteract gravity (70% buoyancy = 30% of gravity).
                 let buoyant_gravity = self.config.gravity * 0.3;
-                self.vel.y -= buoyant_gravity * dt;
+                self.vel.y -= buoyant_gravity * submersion * dt;
                 // Water terminal velocity (much lower than air).
                 if self.vel.y < -3.0 {
                     self.vel.y = -3.0;
