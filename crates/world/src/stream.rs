@@ -201,9 +201,10 @@ fn run_worker(
     let mesher = ChunkMesher;
     let gen: Arc<TerrainGenerator> = world.terrain();
     let reg: Arc<BlockRegistry> = world.registry();
-
     let mut focus = Vec3::new(0.0, 80.0, 0.0);
     let mut sun_dir = Vec3::new(0.3, 0.9, 0.1).normalize();
+    let mut desired = Vec::new();
+    let mut desired_chunks = std::collections::HashSet::new();
     let mut frustum = None::<Frustum>;
     let mut load_radius = config.load_radius;
     let mut state: HashMap<ChunkPos, State> = HashMap::new();
@@ -263,7 +264,8 @@ fn run_worker(
 
         // Desired loaded set (cylindrical band around focus).
         let focus_chunk = block_to_chunk(world_to_block(focus));
-        let desired: Vec<ChunkPos> = desired_set(focus_chunk, load_radius, config.vertical_half);
+        desired.clear();
+        desired.extend(desired_set(focus_chunk, load_radius, config.vertical_half));
 
         // Unload chunks outside the unload radius.
         let unload_r2 = (config.unload_radius + 1) as i64 * (config.unload_radius + 1) as i64;
@@ -445,7 +447,8 @@ fn run_worker(
         // desired loaded set (edge of load radius). This guarantees the
         // `sample` closure reads real neighbour data when verifying structure
         // placement conditions (e.g. "is the surface block grass?"). ---
-        let desired_set: std::collections::HashSet<ChunkPos> = desired.iter().copied().collect();
+        desired_chunks.clear();
+        desired_chunks.extend(desired.iter().copied());
         let struct_todo: Vec<ChunkPos> = desired
             .iter()
             .filter(|p| matches!(state.get(p), Some(State::Generated)))
@@ -457,7 +460,7 @@ fn run_worker(
                         | Some(State::Structuring)
                         | Some(State::Structured)
                         | Some(State::Meshed) => true,
-                        _ => !desired_set.contains(n),
+                        _ => !desired_chunks.contains(n),
                     })
             })
             .copied()

@@ -2981,7 +2981,6 @@ name = "voxel-core"
 version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
- "log",
  "proptest",
 ]
 

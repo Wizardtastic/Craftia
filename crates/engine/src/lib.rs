@@ -956,6 +956,9 @@ impl EngineApp {
 
     /// Transition to TitleScreen state (unlock cursor, stop sim).
     fn enter_title_screen(&mut self) {
+        if self.gameplay.inventory_open && !self.try_close_inventory() {
+            return;
+        }
         self.gameplay.game_state = GameState::TitleScreen;
         self.unlock_cursor();
         self.input.input.held.clear();
@@ -1002,6 +1005,7 @@ impl EngineApp {
     fn enter_playing(&mut self) {
         self.gameplay.game_state = GameState::Playing;
         self.gameplay.inventory_open = false;
+        self.gameplay.inv_cursor = None;
         self.lock_cursor();
         self.input.running = true;
         self.input.last_time = Instant::now();
@@ -1012,6 +1016,9 @@ impl EngineApp {
 
     /// Transition to PauseMenu state (unlock cursor, pause sim).
     fn enter_pause(&mut self) {
+        if self.gameplay.inventory_open && !self.try_close_inventory() {
+            return;
+        }
         self.gameplay.game_state = GameState::PauseMenu;
         self.unlock_cursor();
         self.input.input.held.clear();
@@ -1482,9 +1489,13 @@ impl ApplicationHandler for EngineApp {
                                 Action::Pause => {
                                     // Pause key only toggles Playing Γåö PauseMenu.
                                     if self.gameplay.game_state == GameState::Playing {
-                                        self.gameplay.block_picker_open = false;
-                                        self.gameplay.chat.open = false;
-                                        self.enter_pause();
+                                        if !self.gameplay.inventory_open
+                                            || self.try_close_inventory()
+                                        {
+                                            self.gameplay.block_picker_open = false;
+                                            self.gameplay.chat.open = false;
+                                            self.enter_pause();
+                                        }
                                     } else if self.gameplay.game_state == GameState::PauseMenu {
                                         self.enter_playing();
                                     }
@@ -1518,22 +1529,36 @@ impl ApplicationHandler for EngineApp {
                                             .player_game_mode()
                                             .inventory_behavior()
                                             == voxel_game::InventoryBehavior::CreativeTabs;
-                                        if creative {
-                                            self.gameplay.inventory_open = false;
-                                            self.gameplay.block_picker_open =
-                                                !self.gameplay.block_picker_open;
+                                        let inventory_toggle_allowed = if creative {
+                                            if self.gameplay.inventory_open {
+                                                self.try_close_inventory()
+                                            } else {
+                                                self.gameplay.block_picker_open =
+                                                    !self.gameplay.block_picker_open;
+                                                true
+                                            }
                                         } else {
-                                            self.gameplay.block_picker_open = false;
-                                            self.gameplay.inventory_open =
-                                                !self.gameplay.inventory_open;
-                                        }
-                                        if self.gameplay.block_picker_open
-                                            || self.gameplay.inventory_open
-                                        {
-                                            self.unlock_cursor();
-                                            self.input.input.held.clear();
-                                        } else {
-                                            self.lock_cursor();
+                                            if !self.gameplay.inventory_open
+                                                && self.gameplay.block_picker_open
+                                            {
+                                                self.gameplay.block_picker_open = false;
+                                            }
+                                            if self.gameplay.inventory_open {
+                                                self.try_close_inventory()
+                                            } else {
+                                                self.gameplay.inventory_open = true;
+                                                true
+                                            }
+                                        };
+                                        if inventory_toggle_allowed {
+                                            if self.gameplay.block_picker_open
+                                                || self.gameplay.inventory_open
+                                            {
+                                                self.unlock_cursor();
+                                                self.input.input.held.clear();
+                                            } else {
+                                                self.lock_cursor();
+                                            }
                                         }
                                     }
                                 }
@@ -1670,6 +1695,9 @@ impl ApplicationHandler for EngineApp {
                                 }
                                 GameState::Playing => {
                                     if self.gameplay.block_picker_open || self.gameplay.inventory_open {
+                                        if self.gameplay.inventory_open && !self.try_close_inventory() {
+                                            return;
+                                        }
                                         self.gameplay.block_picker_open = false;
                                         self.gameplay.inventory_open = false;
                                         self.lock_cursor();
@@ -1951,7 +1979,9 @@ impl ApplicationHandler for EngineApp {
                 if self.gameplay.game_state == GameState::Playing
                     && self.config.capture_after_frames.is_none() =>
             {
-                self.enter_pause();
+                if !self.gameplay.inventory_open || self.try_close_inventory() {
+                    self.enter_pause();
+                }
             }
             WindowEvent::Focused(true) => {
                 // Re-set last_time so the first frame after refocus doesn't

@@ -94,14 +94,26 @@ const WATER_LIGHT_BOOST: f32 = 0.5;
 // Cactus sides are pulled in from the block edge by this amount.
 const CACTUS_INSET: f32 = 3.0 / 16.0;
 
+// Base corner offsets and per-face UVs used by the block-shaped liquid and
+// cactus emitters. Keep geometry positions independent from texture data.
 #[rustfmt::skip]
-const FACE_GEO: [(GVec3, [Vec2; 4]); 6] = [
-    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0)]),
-    (GVec3::new(1.0, 0.0, 0.0), [Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0), Vec2::new(0.0,0.0)]),
-    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0), Vec2::new(0.0,1.0)]),
-    (GVec3::new(0.0, 1.0, 0.0), [Vec2::new(0.0,0.0), Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0)]),
-    (GVec3::new(0.0, 0.0, 0.0), [Vec2::new(1.0,1.0), Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0)]),
-    (GVec3::new(0.0, 0.0, 1.0), [Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0), Vec2::new(0.0,0.0)]),
+const FACE_BASE: [GVec3; 6] = [
+    GVec3::new(0.0, 0.0, 0.0),
+    GVec3::new(1.0, 0.0, 0.0),
+    GVec3::new(0.0, 0.0, 0.0),
+    GVec3::new(0.0, 1.0, 0.0),
+    GVec3::new(0.0, 0.0, 0.0),
+    GVec3::new(0.0, 0.0, 1.0),
+];
+
+#[rustfmt::skip]
+const FACE_UVS: [[Vec2; 4]; 6] = [
+    [Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0)],
+    [Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0), Vec2::new(0.0,0.0)],
+    [Vec2::new(0.0,0.0), Vec2::new(1.0,0.0), Vec2::new(1.0,1.0), Vec2::new(0.0,1.0)],
+    [Vec2::new(0.0,0.0), Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0)],
+    [Vec2::new(1.0,1.0), Vec2::new(0.0,1.0), Vec2::new(0.0,0.0), Vec2::new(1.0,0.0)],
+    [Vec2::new(0.0,1.0), Vec2::new(1.0,1.0), Vec2::new(1.0,0.0), Vec2::new(0.0,0.0)],
 ];
 
 #[rustfmt::skip]
@@ -287,18 +299,17 @@ fn build_mask_cell(
     {
         return EMPTY_CELL;
     }
-    let wx = origin.x + lx;
-    let wy = origin.y + ly;
-    let wz = origin.z + lz;
     if !should_emit_face(face, lx, ly, lz, chunk, origin, sample, sample_loaded) {
         return EMPTY_CELL;
     }
+    let wx = origin.x + lx;
+    let wy = origin.y + ly;
+    let wz = origin.z + lz;
     let n = face.normal();
-    // For NegX / NegZ / NegY faces at chunk borders, should_emit_face
-    // already verified the neighbour is air or not loaded — the
-    // neighbour-sample + opaque check below would be a no-op. Skip it.
-    let is_neg_border = is_neg_border(face, lx, ly, lz, chunk);
-    if !is_neg_border {
+    // A border face resolved by should_emit_face already knows its neighbour
+    // is air (or unloaded), so the inner-chunk neighbour tests cannot hide it.
+    let resolved_border = is_neg_border(face, lx, ly, lz, chunk);
+    if !resolved_border {
         let nlx = lx + n.x;
         let nly = ly + n.y;
         let nlz = lz + n.z;
@@ -396,10 +407,8 @@ fn fi_from_face(face: Face) -> usize {
     }
 }
 
-/// True for negative-side faces (NegX/NegZ/NegY) sitting exactly on a chunk
-/// border that has a negative-side neighbour chunk. `should_emit_face` has
-/// already resolved border ownership for exactly these faces, so callers can
-/// skip the redundant neighbour re-sample.
+/// True for negative-side faces on chunk borders whose neighbour was checked
+/// during face ownership resolution. The caller can skip sampling it again.
 fn is_neg_border(face: Face, lx: i32, ly: i32, lz: i32, chunk: &Chunk) -> bool {
     (face == Face::NegX && lx == 0)
         || (face == Face::NegZ && lz == 0)
@@ -678,7 +687,7 @@ fn greedy_emit(
                 BlockKind::Transparent => &mut bundle.transparent,
                 _ => &mut bundle.opaque,
             };
-            let base = target.vertices.len() as u32;
+            let vertex_base = target.vertices.len() as u32;
 
             for c in 0..4 {
                 target.vertices.push(ChunkVertex {
@@ -694,25 +703,31 @@ fn greedy_emit(
             // diagonal that hides the AO seam along the brighter pair.
             if corner_ao[0] + corner_ao[2] > corner_ao[1] + corner_ao[3] {
                 target.indices.extend_from_slice(&[
-                    base,
-                    base + 1,
-                    base + 3,
-                    base + 1,
-                    base + 2,
-                    base + 3,
+                    vertex_base,
+                    vertex_base + 1,
+                    vertex_base + 3,
+                    vertex_base + 1,
+                    vertex_base + 2,
+                    vertex_base + 3,
                 ]);
             } else {
                 target.indices.extend_from_slice(&[
-                    base,
-                    base + 1,
-                    base + 2,
-                    base,
-                    base + 2,
-                    base + 3,
+                    vertex_base,
+                    vertex_base + 1,
+                    vertex_base + 2,
+                    vertex_base,
+                    vertex_base + 2,
+                    vertex_base + 3,
                 ]);
             }
         }
     }
+}
+
+fn emit_quad_indices(target: &mut ChunkMesh, base: u32) {
+    target
+        .indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 fn emit_foliage_cross(
@@ -813,12 +828,10 @@ fn emit_water_block(
             continue;
         }
         let n = face.normal();
-        // For NegX / NegZ / NegY faces at chunk borders, should_emit_face
-        // already verified the neighbour is air or not loaded. Skip the
-        // redundant cross-chunk sample — use AIR as a dummy since all
-        // checks below (opaque, same-liquid, solid) are no-ops for air.
-        let is_neg_border = is_neg_border(*face, lx, ly, lz, chunk);
-        let neighbour = if is_neg_border {
+        // A border face resolved by should_emit_face already knows its
+        // neighbour is air or unloaded; avoid sampling it again.
+        let resolved_border = is_neg_border(*face, lx, ly, lz, chunk);
+        let neighbour = if resolved_border {
             BlockId::AIR
         } else {
             sample(wx + n.x, wy + n.y, wz + n.z)
@@ -840,7 +853,8 @@ fn emit_water_block(
             continue;
         }
 
-        let (base, uvs) = FACE_GEO[fi];
+        let base = FACE_BASE[fi];
+        let uvs = FACE_UVS[fi];
         let mut p_base = GVec3::new(lx as f32, ly as f32, lz as f32) + base;
         let y_scale = if *face != Face::PosY && *face != Face::NegY {
             let nw = if neighbour_def.kind == BlockKind::Liquid {
@@ -876,14 +890,7 @@ fn emit_water_block(
                 light_color: packed_color,
             });
         }
-        bundle.transparent.indices.extend_from_slice(&[
-            start,
-            start + 1,
-            start + 2,
-            start,
-            start + 2,
-            start + 3,
-        ]);
+        emit_quad_indices(&mut bundle.transparent, start);
     }
 }
 
@@ -914,7 +921,7 @@ fn emit_cactus_block(
             continue;
         }
 
-        let (base, _) = FACE_GEO[fi];
+        let base = FACE_BASE[fi];
         let fn_f = GVec3::new(n.x as f32, n.y as f32, n.z as f32);
         let diffuse = fn_f.dot(-sun_dir).max(0.0);
         let directional = (diffuse * SUN_SHADE_SCALE + SUN_SHADE_BIAS).clamp(0.0, 1.0);
@@ -972,14 +979,7 @@ fn emit_cactus_block(
                 light_color: packed_color,
             });
         }
-        bundle.opaque.indices.extend_from_slice(&[
-            start,
-            start + 1,
-            start + 2,
-            start,
-            start + 2,
-            start + 3,
-        ]);
+        emit_quad_indices(&mut bundle.opaque, start);
     }
 }
 

@@ -369,7 +369,9 @@ impl SurvivalInventory {
                     *held = Some(stack);
                 }
             }
-            Some(mut stack) if target.id() == stack.id() && target.damage == stack.damage => {
+            Some(mut stack)
+                if target.id() == stack.id() && target.damage == stack.damage =>
+            {
                 let space = MAX_STACK_SIZE.saturating_sub(target.count);
                 let count = match click {
                     InventoryClick::Left => stack.count.min(space),
@@ -833,6 +835,104 @@ mod tests {
         inv.armor[0] = ItemStack::new(BlockId(3), 1);
         inv.shift_click_merge(InventorySlot::Armor(0)); // armor: no-op
         assert_eq!(inv.armor[0].count, 1);
+    }
+
+    fn carried_count(inv: &SurvivalInventory, held: Option<ItemStack>, id: BlockId) -> u32 {
+        inv.main
+            .iter()
+            .chain(inv.hotbar.iter())
+            .chain(inv.armor.iter())
+            .chain(inv.crafting_input.iter())
+            .chain(std::iter::once(&inv.offhand))
+            .chain(std::iter::once(&inv.crafting_output))
+            .filter(|stack| !stack.is_empty() && stack.id() == id)
+            .map(|stack| stack.count as u32)
+            .sum::<u32>()
+            + held
+                .filter(|stack| !stack.is_empty() && stack.id() == id)
+                .map_or(0, |stack| stack.count as u32)
+    }
+
+    #[test]
+    fn cursor_left_click_picks_up_places_and_preserves_items() {
+        let mut inv = SurvivalInventory::new();
+        let id = BlockId(1);
+        inv.hotbar[0] = ItemStack::new(id, 37);
+        let mut held = None;
+
+        inv.click_slot(&mut held, InventorySlot::Hotbar(0), InventoryClick::Left);
+        assert_eq!(held.unwrap().count, 37);
+        assert!(inv.hotbar[0].is_empty());
+        assert_eq!(carried_count(&inv, held, id), 37);
+
+        inv.click_slot(&mut held, InventorySlot::Main(0), InventoryClick::Left);
+        assert!(held.is_none());
+        assert_eq!(inv.main[0].count, 37);
+        assert_eq!(carried_count(&inv, held, id), 37);
+    }
+
+    #[test]
+    fn cursor_right_click_splits_and_places_one() {
+        let mut inv = SurvivalInventory::new();
+        let id = BlockId(1);
+        inv.main[0] = ItemStack::new(id, 5);
+        let mut held = None;
+
+        inv.click_slot(&mut held, InventorySlot::Main(0), InventoryClick::Right);
+        assert_eq!(inv.main[0].count, 2);
+        assert_eq!(held.unwrap().count, 3); // round the taken half up
+        inv.click_slot(&mut held, InventorySlot::Hotbar(0), InventoryClick::Right);
+        assert_eq!(inv.hotbar[0].count, 1);
+        assert_eq!(held.unwrap().count, 2);
+        assert_eq!(carried_count(&inv, held, id), 5);
+    }
+
+    #[test]
+    fn cursor_merges_without_exceeding_stack_limit() {
+        let mut inv = SurvivalInventory::new();
+        let id = BlockId(1);
+        inv.main[0] = ItemStack::new(id, 63);
+        let mut held = Some(ItemStack::new(id, 3));
+
+        inv.click_slot(&mut held, InventorySlot::Main(0), InventoryClick::Right);
+        assert_eq!(inv.main[0].count, MAX_STACK_SIZE);
+        assert_eq!(held.unwrap().count, 2);
+        inv.click_slot(&mut held, InventorySlot::Main(0), InventoryClick::Left);
+        assert_eq!(held.unwrap().count, 2); // no room: don't lose the remainder
+        assert_eq!(carried_count(&inv, held, id), 66);
+    }
+
+    #[test]
+    fn cursor_swaps_damage_incompatible_stacks_and_preserves_total() {
+        let mut inv = SurvivalInventory::new();
+        let id = BlockId(1);
+        inv.hotbar[0] = ItemStack::new(id, 7);
+        inv.hotbar[0].damage = 4;
+        let carried = ItemStack::new(id, 9);
+        let mut held = Some(carried);
+
+        inv.click_slot(&mut held, InventorySlot::Hotbar(0), InventoryClick::Left);
+        assert_eq!(inv.hotbar[0].count, 9);
+        assert_eq!(held.unwrap().count, 7);
+        assert_eq!(held.unwrap().damage, 4);
+        assert_eq!(carried_count(&inv, held, id), 16);
+    }
+
+    #[test]
+    fn crafting_output_never_consumes_a_carried_stack() {
+        let mut inv = SurvivalInventory::new();
+        let id = BlockId(1);
+        inv.crafting_output = ItemStack::new(id, 4);
+        let mut held = Some(ItemStack::new(id, 2));
+
+        inv.click_slot(
+            &mut held,
+            InventorySlot::CraftingOutput,
+            InventoryClick::Left,
+        );
+        assert_eq!(inv.crafting_output.count, 4);
+        assert_eq!(held.unwrap().count, 2);
+        assert_eq!(carried_count(&inv, held, id), 6);
     }
 
     #[test]

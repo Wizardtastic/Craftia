@@ -2241,39 +2241,6 @@ pub(super) fn create_particle_pipeline_layout(
         .map_err(|e| anyhow!("create_particle_pipeline_layout: {e:?}"))
 }
 
-/// Pool + set allocation for the per-frame particle input attachment.
-/// Separate pool (no UBOs/samplers needed) — INPUT_ATTACHMENT type is enough.
-#[allow(dead_code)]
-pub(super) fn create_particle_descriptor_pool(
-    device: &ash::Device,
-    max_sets: usize,
-) -> Result<vk::DescriptorPool> {
-    let pool_sizes = [vk::DescriptorPoolSize {
-        ty: vk::DescriptorType::INPUT_ATTACHMENT,
-        descriptor_count: max_sets as u32,
-    }];
-    let create_info = vk::DescriptorPoolCreateInfo::default()
-        .pool_sizes(&pool_sizes)
-        .max_sets(max_sets as u32);
-    unsafe { device.create_descriptor_pool(&create_info, None) }
-        .map_err(|e| anyhow!("create_particle_descriptor_pool: {e:?}"))
-}
-
-#[allow(dead_code)]
-pub(super) fn allocate_particle_descriptor_sets(
-    device: &ash::Device,
-    pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
-    count: usize,
-) -> Result<Vec<vk::DescriptorSet>> {
-    let layouts = vec![layout; count];
-    let alloc_info = vk::DescriptorSetAllocateInfo::default()
-        .descriptor_pool(pool)
-        .set_layouts(&layouts);
-    unsafe { device.allocate_descriptor_sets(&alloc_info) }
-        .map_err(|e| anyhow!("allocate_particle_descriptor_sets: {e:?}"))
-}
-
 /// Bind the depth image view into the particle input attachment descriptor
 /// set at binding 0. Layout must be DEPTH_STENCIL_READ_ONLY_OPTIMAL to match
 /// the subpass 1 VkAttachmentReference.

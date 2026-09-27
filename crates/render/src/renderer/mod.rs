@@ -55,6 +55,8 @@ use gpu_allocator::MemoryLocation;
 
 const FRAMES_IN_FLIGHT: usize = 2;
 const GPU_TIMESTAMP_COUNT: u32 = 8; // frame_start, shadow_end, sky_end, opaque_end, transparent_end, ui_end, main_pass_end, post_end
+const GPU_TIMESTAMP_TRANSPARENT_END: usize = 4;
+const GPU_TIMESTAMP_UI_END: usize = 5;
 
 /// GPU timing results for a single frame (in milliseconds).
 #[derive(Clone, Copy, Debug, Default)]
@@ -627,17 +629,9 @@ pub struct PackInfo {
 /// Remaining slots stay zero. (The occlusion-proxy variant packs min/max AABB
 /// corners instead — see `record_chunk_passes`.)
 fn write_chunk_push_constants(pc: &mut [f32; 24], origin: Vec3, vp_cols: &[f32], game_time: f32) {
-    pc[0] = origin.x;
-    pc[1] = origin.y;
-    pc[2] = origin.z;
-    pc[3] = 0.0;
-    if vp_cols.len() >= 16 {
-        pc[4..20].copy_from_slice(&vp_cols[..16]);
-    }
-    pc[20] = game_time;
-    pc[21] = 0.0;
-    pc[22] = 0.0;
-    pc[23] = 0.0;
+    pc[..4].copy_from_slice(&[origin.x, origin.y, origin.z, 0.0]);
+    pc[4..20].copy_from_slice(&vp_cols[..16]);
+    pc[20..24].copy_from_slice(&[game_time, 0.0, 0.0, 0.0]);
 }
 
 /// Load texture pack tile mappings from `texture_packs_dir` (if configured)
@@ -3389,8 +3383,13 @@ impl Renderer {
                         shadow_ms: t[1].saturating_sub(t[0]) as f32 * ns_to_ms,
                         sky_ms: t[2].saturating_sub(t[1]) as f32 * ns_to_ms,
                         opaque_ms: t[3].saturating_sub(t[2]) as f32 * ns_to_ms,
-                        transparent_ms: t[4].saturating_sub(t[3]) as f32 * ns_to_ms,
-                        ui_ms: t[5].saturating_sub(t[4]) as f32 * ns_to_ms,
+                        transparent_ms: t[GPU_TIMESTAMP_TRANSPARENT_END].saturating_sub(t[3])
+                            as f32
+                            * ns_to_ms,
+                        ui_ms: t[GPU_TIMESTAMP_UI_END]
+                            .saturating_sub(t[GPU_TIMESTAMP_TRANSPARENT_END])
+                            as f32
+                            * ns_to_ms,
                         post_ms: t[7].saturating_sub(t[6]) as f32 * ns_to_ms,
                         frame_ms: t[7].saturating_sub(t[0]) as f32 * ns_to_ms,
                     };
@@ -3503,7 +3502,6 @@ impl Renderer {
         // Chunk passes: Phase-1 GPU-driven indirect path or legacy per-chunk loop.
         // Transparent geometry (water/foliage) renders in
         // `record_transparent_pass` for both paths, so query 4 is written there.
-        let transparent_end_ts = Some(query_offset + 4);
         let chunk_t0 = std::time::Instant::now();
         if let Some(gpu) = self.gpu_driven.as_mut() {
             gpu.record_opaque(
@@ -3612,8 +3610,8 @@ impl Renderer {
             ui_index_count,
             descriptor_set,
             tile_remap_descriptor_set,
-            transparent_end_ts,
-            Some(query_offset + 5),
+            Some(query_offset + GPU_TIMESTAMP_TRANSPARENT_END as u32),
+            Some(query_offset + GPU_TIMESTAMP_UI_END as u32),
         );
 
         // Timestamp 6: main pass end.
@@ -4114,7 +4112,7 @@ impl Renderer {
         type DrawList = Vec<(ChunkPos, vk::Buffer, vk::Buffer, u32, f32)>;
         let mut opaque_draws: DrawList = {
             let chunks = self.chunks.read();
-            let mut opaque = Vec::new();
+            let mut opaque = Vec::with_capacity(chunks.len());
             for (&pos, bufs) in chunks.iter() {
                 let (min, max) = chunk_aabb(pos);
                 if !frustum.intersects_aabb(min, max) {
@@ -5711,6 +5709,7 @@ impl Renderer {
         let mut draws: Vec<(glam::Vec3, vk::Buffer, vk::Buffer, u32, f32)> = Vec::new();
         {
             let chunks = self.chunks.read();
+            draws.reserve(chunks.len());
             for (pos, bufs) in chunks.iter() {
                 if let Some(ref t) = bufs.transparent {
                     let (origin, max) = chunk_aabb(*pos);

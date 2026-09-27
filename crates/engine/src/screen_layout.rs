@@ -754,11 +754,6 @@ impl InventoryLayout {
         ]
     }
 
-    /// Rect of the doll's right hand — where the held item is drawn.
-    pub fn doll_hand(&self) -> Rect {
-        self.doll_parts()[3]
-    }
-
     /// Slot under a logical-pixel point, if any.
     pub fn slot_at(&self, x: f32, y: f32) -> Option<InventorySlot> {
         let pt = voxel_core::Point::new(x, y);
@@ -887,8 +882,6 @@ mod tests {
         let torso_cx = parts[1].x + parts[1].w * 0.5;
         let well_cx = lay.player.x + lay.player.w * 0.5;
         assert!((torso_cx - well_cx).abs() < 0.01);
-        // The hand is the right arm.
-        assert_eq!(lay.doll_hand(), parts[3]);
     }
 
     #[test]

@@ -8,7 +8,6 @@ description = "Shared primitives: math, IDs, config, error types, profiling."
 
 [dependencies]
 glam.workspace = true
-log.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
