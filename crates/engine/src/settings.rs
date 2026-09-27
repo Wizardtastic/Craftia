@@ -598,7 +598,7 @@ impl Default for GraphicsSettings {
             shadow_resolution: 2048,
             exposure: 0.6,
             vignette_strength: 0.15,
-            textures_dir: None,
+            textures_dir: Some("assets/textures".into()),
             texture_packs_dir: None,
             msaa_samples: 4,
             occlusion_culling: true,
@@ -950,6 +950,8 @@ mod tests {
 
         assert_eq!(s.world.day_length, 1200.0);
 
+        assert_eq!(s.graphics.textures_dir.as_deref(), Some("assets/textures"));
+
         assert_eq!(s.keys.debug_overlay, "F3");
 
         assert_eq!(s.keys.wireframe, "F4");
@@ -979,6 +981,8 @@ mod tests {
         assert_eq!(s.world.load_radius, 6); // default
 
         assert_eq!(s.graphics.width, 1280); // default
+
+        assert_eq!(s.graphics.textures_dir.as_deref(), Some("assets/textures"));
     }
 
     #[test]
