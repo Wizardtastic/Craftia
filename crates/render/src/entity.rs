@@ -272,7 +272,9 @@ pub fn create_held_item_pipeline(
 pub fn unit_quad_vertices() -> Vec<crate::Vertex> {
     let tile = 0u32;
     let light = 1.0f32;
-    let white = 0xFFFFFFFFu32; // white light color (no tint)
+    // White RGB tint with alpha = 0: the alpha byte now carries the block
+    // (torch) light level, and entities are lit by sun/sky only.
+    let white = 0x00FF_FFFFu32;
     vec![
         crate::Vertex {
             pos: [-0.5, -0.5, 0.0],

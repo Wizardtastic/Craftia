@@ -17,6 +17,10 @@ pub struct Health {
     pub max: f32,
     /// Ticks of invulnerability remaining after taking damage.
     pub invulnerability_ticks: u32,
+    /// Fractional part of a game tick accumulated by `tick(dt)`. The engine
+    /// runs at 60 Hz, so invulnerability must be decremented in 20 Hz ticks.
+    #[serde(default)]
+    pub invulnerability_subtick: f32,
     /// Game time (in seconds) when the entity last took damage.
     pub last_damage_time: f64,
     /// Whether the entity is dead. Set to true when `current <= 0`.
@@ -29,6 +33,7 @@ impl Default for Health {
             current: 20.0,
             max: 20.0,
             invulnerability_ticks: 0,
+            invulnerability_subtick: 0.0,
             last_damage_time: 0.0,
             dead: false,
         }
@@ -52,7 +57,8 @@ impl Health {
         }
         let actual = amount.min(self.current);
         self.current -= actual;
-        self.invulnerability_ticks = 20; // 1 second at 20 tps
+        // Vanilla grants 10 ticks (0.5 s) of invulnerability after a hit.
+        self.invulnerability_ticks = 10;
         self.last_damage_time = game_time;
         if self.current <= 0.0 {
             self.current = 0.0;
@@ -73,13 +79,23 @@ impl Health {
     pub fn reset(&mut self) {
         self.current = self.max;
         self.dead = false;
-        self.invulnerability_ticks = 60; // brief invulnerability on respawn
+        self.invulnerability_subtick = 0.0;
+        self.invulnerability_ticks = 60; // three seconds of respawn protection
     }
 
-    /// Tick down invulnerability timer. Call once per game tick.
-    pub fn tick(&mut self) {
-        if self.invulnerability_ticks > 0 {
-            self.invulnerability_ticks -= 1;
+    /// Advance the invulnerability timer by `dt_seconds`, in 20 Hz ticks.
+    pub fn tick(&mut self, dt_seconds: f32) {
+        if self.invulnerability_ticks == 0 {
+            self.invulnerability_subtick = 0.0;
+            return;
+        }
+        self.invulnerability_subtick += dt_seconds * 20.0;
+        let whole = self.invulnerability_subtick.floor();
+        if whole >= 1.0 {
+            self.invulnerability_subtick -= whole;
+            self.invulnerability_ticks = self
+                .invulnerability_ticks
+                .saturating_sub(whole as u32);
         }
     }
 
@@ -173,6 +189,16 @@ impl DamageSource {
     pub fn ignores_invulnerability(&self) -> bool {
         matches!(self, Self::Void | Self::Starvation)
     }
+
+    /// Whether armor reduces this source of damage. Vanilla armor protects
+    /// against physical hits (including falls and cacti) but not fire, lava,
+    /// drowning, starvation or the void.
+    pub fn is_armor_reducible(&self) -> bool {
+        matches!(
+            self,
+            Self::Entity { .. } | Self::Fall(_) | Self::Cactus | Self::Generic
+        )
+    }
 }
 
 // ─── Damage Event ────────────────────────────────────────────────────────────
@@ -262,8 +288,11 @@ impl DamageQueue {
 /// Tracks regeneration delay per entity.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RegenState {
-    /// Ticks since last damage. Regen only kicks in after 400 ticks (20s).
+    /// Ticks since last damage (diagnostics / future post-hit delay rules).
     pub ticks_since_damage: u32,
+    /// Ticks accumulated toward the next regenerated health point. Vanilla
+    /// uses 10 ticks with saturation and 80 ticks without.
+    pub heal_timer: f32,
 }
 
 impl RegenState {

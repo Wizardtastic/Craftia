@@ -17,16 +17,27 @@ pub struct CameraOwner;
 pub struct PlayerEntity(pub Option<Entity>);
 
 /// Compute the camera's position and orientation from the player's
-/// transform + current eye offset. Includes camera bobbing.
+/// transform + current eye offset. The position is interpolated between the
+/// last two 20 Hz physics ticks (entities without physics state, such as
+/// debug pins, simply use their current position). Includes camera bobbing.
 pub fn update_camera_from_transform(
     camera: &mut Camera,
     transform: &Transform,
     state: &PlayerState,
 ) {
-    let base_pos = transform.pos + glam::Vec3::new(0.0, state.eye_offset, 0.0);
+    let current_eye = transform.pos + glam::Vec3::new(0.0, state.eye_offset, 0.0);
+    let base_pos = if state.prev_eye_pos.length_squared() > f32::EPSILON {
+        state
+            .prev_eye_pos
+            .lerp(current_eye, state.interp_alpha.clamp(0.0, 1.0))
+    } else {
+        current_eye
+    };
 
     // Compute bob offset (figure-8 pattern: up/down + slight left/right).
-    let bob_amp = 0.012; // ~1.2cm (MC is ~1cm)
+    // Vanilla view bobbing is roughly 5cm at the extreme; use a slightly
+    // gentler 3cm so it reads the same without becoming distracting.
+    let bob_amp = 0.03;
     let y_bob = state.bob_phase.sin() * bob_amp;
     let x_bob = (state.bob_phase * 2.0 + std::f32::consts::PI).sin() * bob_amp * 0.3;
 

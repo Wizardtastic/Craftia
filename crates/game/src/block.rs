@@ -14,10 +14,12 @@ use voxel_world::{ChunkStreamer, World};
 use crate::input::Clicks;
 use crate::inventory::SurvivalInventory;
 use crate::undo::BlockEdit;
+use voxel_gamemode::GameMode;
 
-/// How far the player can reach to interact with a block (Minecraft creative is
-/// ~5; survival ~4.5). We use 5.0.
-pub const REACH: f32 = 5.0;
+/// Block interaction reach in survival / adventure (vanilla 4.5 blocks).
+pub const REACH: f32 = 4.5;
+/// Block interaction reach in creative (vanilla 5.0 blocks).
+pub const REACH_CREATIVE: f32 = 5.0;
 
 /// The result of attempting a break or place this frame.
 #[derive(Clone, Debug, Default)]
@@ -42,8 +44,14 @@ impl BlockAction {
         look_dir: glam::Vec3,
         clicks: Clicks,
         player_pos: glam::Vec3,
+        mode: GameMode,
     ) -> ActionResult {
-        let ray = voxel_core::Ray::new(eye, look_dir, REACH);
+        let reach = if mode == GameMode::Creative {
+            REACH_CREATIVE
+        } else {
+            REACH
+        };
+        let ray = voxel_core::Ray::new(eye, look_dir, reach);
         let hit = raycast_voxels(world, ray);
         let mut out = ActionResult {
             target: hit,
@@ -51,7 +59,9 @@ impl BlockAction {
         };
 
         if let Some(h) = hit {
-            if clicks.left {
+            // Survival breaks blocks over time in the mining system; only
+            // creative breaks instantly here. Adventure/spectator cannot.
+            if clicks.left && mode == GameMode::Creative {
                 let old = world.get_block(h.block.x, h.block.y, h.block.z);
                 let reg = world.registry();
                 if !reg.get(old).breakable {
@@ -71,7 +81,10 @@ impl BlockAction {
                         streamer.request_remesh(n);
                     }
                 }
-            } else if clicks.right {
+            } else if clicks.right
+                && mode.allows_block_interaction()
+                && mode != GameMode::Adventure
+            {
                 // No slot selected -> nothing to place. Returning early keeps
                 // the rest of the function focusing on actual placement work.
                 let Some(id) = inventory.selected_block() else {
@@ -207,6 +220,7 @@ mod tests {
                 right: false,
             },
             glam::Vec3::new(5.5, 50.0, 5.5),
+            GameMode::Creative,
         );
         assert!(result.broke);
         assert_eq!(world.get_block(5, 5, 5), BlockId::AIR);
@@ -233,6 +247,7 @@ mod tests {
                 right: false,
             },
             glam::Vec3::new(5.5, 50.0, 5.5),
+            GameMode::Creative,
         );
         assert!(!result.broke);
         assert_eq!(world.get_block(5, 5, 5), bedrock_id);
@@ -261,6 +276,7 @@ mod tests {
                 right: true,
             },
             glam::Vec3::new(0.5, 50.0, 5.5),
+            GameMode::Creative,
         );
         assert!(result.placed);
         // The placed block is at hit.block + hit.normal = (5,5,5) + (-1,0,0) = (4,5,5).

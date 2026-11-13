@@ -563,6 +563,42 @@ impl crate::EngineApp {
             }
         }
 
+        // Blocks broken by survival mining: rebuild the chunk mesh and spawn
+        // the same break particles the creative path uses.
+        let mined = self
+            .simulation
+            .ecs_world_mut()
+            .resource_mut::<voxel_game::MinedBlocks>()
+            .map(|m| std::mem::take(&mut m.0))
+            .unwrap_or_default();
+        if !mined.is_empty() {
+            let reg = self.world_state.world.registry();
+            for (pos, block_id) in mined {
+                let bp = glam::IVec3::new(pos[0], pos[1], pos[2]);
+                let cp = voxel_core::math::block_to_chunk(bp);
+                if let Some(streamer) = &self.world_state.streamer {
+                    streamer.request_remesh(cp);
+                    for n in voxel_core::chunk_neighbours(cp) {
+                        streamer.request_remesh(n);
+                    }
+                }
+                if (block_id.0 as usize) < reg.count() {
+                    let center = glam::Vec3::new(
+                        pos[0] as f32 + 0.5,
+                        pos[1] as f32 + 0.5,
+                        pos[2] as f32 + 0.5,
+                    );
+                    let color = reg.get(block_id).map_color;
+                    spawn_particles_break(
+                        &mut self.render.renderer,
+                        center,
+                        color,
+                        glam::Vec3::Y,
+                    );
+                }
+            }
+        }
+
         // Wall-clock ms spent in `tick_water` across this frame's fixed steps.
         let water_tick_ms = self.simulation.take_water_tick_ms();
 
@@ -640,12 +676,7 @@ impl crate::EngineApp {
             }
             // Only send sun_dir if it changed.
             let dp = self.day_params();
-            let sun_dir = glam::Vec3::new(
-                dp.sun_angle.cos() * 0.3,
-                dp.sun_altitude,
-                dp.sun_angle.sin() * 0.3,
-            )
-            .normalize();
+            let sun_dir = glam::Vec3::from_array(dp.sun_dir);
             if (sun_dir - self.input.last_sun_dir).length_squared() > 0.0001 {
                 streamer.set_sun_dir(sun_dir);
                 self.input.last_sun_dir = sun_dir;
@@ -722,6 +753,7 @@ impl crate::EngineApp {
         {
             if let Some(streamer) = &self.world_state.streamer {
                 let eye = self.simulation.player_eye_pos().unwrap_or(camera_now.pos);
+                let block_mode = self.simulation.player_game_mode();
                 // Block actions need the player's inventory (selected block,
                 // slot replacement); without a player entity there is nothing
                 // to interact with.
@@ -734,6 +766,7 @@ impl crate::EngineApp {
                         camera_now.forward(),
                         clicks,
                         player_pos_now,
+                        block_mode,
                     )
                 }) {
                     if !result.edits.is_empty() {
@@ -809,7 +842,13 @@ impl crate::EngineApp {
         // Update looked_at_block from raycast (for outline rendering and mining).
         if self.gameplay.game_state == crate::GameState::Playing && self.input.cursor_locked {
             let eye = self.simulation.player_eye_pos().unwrap_or(camera_now.pos);
-            let ray = voxel_core::Ray::new(eye, camera_now.forward(), 6.0);
+            let mode = self.simulation.player_game_mode();
+            let reach = if mode == voxel_game::GameMode::Creative {
+                voxel_game::block::REACH_CREATIVE
+            } else {
+                voxel_game::block::REACH
+            };
+            let ray = voxel_core::Ray::new(eye, camera_now.forward(), reach);
             if let Some(hit) = voxel_physics::raycast_voxels(&self.world_state.world, ray) {
                 self.gameplay.looked_at_block = Some([hit.block.x, hit.block.y, hit.block.z]);
                 // Update ECS resource for mining system.
@@ -1271,16 +1310,12 @@ impl crate::EngineApp {
             (opaque, held)
         };
 
-        // Update sky parameters for day/night.
+        // Update lighting parameters for the day/night cycle.
         let dp = self.day_params();
-        let sun_dir = [
-            dp.sun_angle.cos() * 0.3,
-            dp.sun_altitude,
-            dp.sun_angle.sin() * 0.3,
-        ];
+        let sun_dir = dp.sun_dir;
         self.world_state
             .world
-            .set_sun_dir(glam::Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]).normalize());
+            .set_sun_dir(glam::Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]));
 
         // Detect actual water overlap at the camera point for visual effects;
         // a shallow liquid block should not tint the view above its surface.
@@ -1296,14 +1331,19 @@ impl crate::EngineApp {
         // is ~256 std430 entries of plain-struct writes, well under 0.01 ms
         // on any modern CPU. If profiling later shows it matters we can
         // hoist to a cache invalidated on registry/config edits.
-        let world_registry = self.world_state.world.registry().clone();
-        let material_table = Self::build_material_table_from_registry(
-            &world_registry,
-            self.config.water_y,
-            self.config.wet_edge_strength,
-            self.config.caustics_strength,
-            self.config.leaves_sss_strength,
-        );
+        // Borrow the registry directly — the old code cloned the whole
+        // registry (block defs, strings, texture tables) every frame just to
+        // read the per-block material fields.
+        let material_table = {
+            let world_registry = self.world_state.world.registry();
+            Self::build_material_table_from_registry(
+                &world_registry,
+                self.config.water_y,
+                self.config.wet_edge_strength,
+                self.config.caustics_strength,
+                self.config.leaves_sss_strength,
+            )
+        };
         if let Some(r) = self.render.renderer.as_mut() {
             r.set_tile_material_table(material_table);
         }
@@ -1317,25 +1357,27 @@ impl crate::EngineApp {
             1.0
         };
         if let Some(r) = self.render.renderer.as_mut() {
-            r.set_sky(
-                dp.horizon,
-                dp.zenith,
+            r.set_lighting(
+                dp.sun_dir,
+                dp.sun_color,
+                dp.sun_visibility,
+                dp.sky_ambient,
                 dp.fog,
-                dp.daylight.max(0.15),
+                dp.night,
+                self.gameplay.game_time as f32,
                 underwater,
             );
-            r.set_sun_dir(sun_dir);
             if self.config.shadow_enabled {
-                let (cascade_vps, cascade_splits, light_dir_and_bias) = compute_shadow_cascades(
-                    &camera,
-                    glam::Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]),
-                    0.1,
-                    self.config.render.fog_distance,
-                );
+                let (cascade_vps, cascade_splits, light_dir_and_bias) =
+                    compute_shadow_cascades(
+                        &camera,
+                        glam::Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]),
+                        self.config.render.fog_distance,
+                    );
                 r.set_shadow_data(cascade_vps, cascade_splits, light_dir_and_bias);
             }
             r.set_post_params(
-                self.config.exposure,
+                self.config.exposure * dp.exposure,
                 self.config.vignette_strength,
                 self.gameplay.game_time as f32,
                 underwater,
@@ -1559,17 +1601,51 @@ impl crate::EngineApp {
         let Some(r) = self.render.renderer.as_mut() else {
             return;
         };
-        r.set_sky(
-            dp.horizon,
-            dp.zenith,
+        r.set_lighting(
+            dp.sun_dir,
+            dp.sun_color,
+            dp.sun_visibility,
+            dp.sky_ambient,
             dp.fog,
-            dp.daylight.max(0.15),
+            dp.night,
+            self.gameplay.game_time as f32,
             underwater,
         );
         r.set_reflection_strength(self.config.reflection_strength);
         {
             let ext = r.extent();
             r.set_proj_params(camera.near, camera.far, ext.width as f32, ext.height as f32);
+        }
+        if let Ok(dump) = r.debug_shadow_map_dump() {
+            let sun = glam::Vec3::from_array(dp.sun_dir);
+            let (vps, splits, _) = compute_shadow_cascades(
+                &camera,
+                sun,
+                self.config.render.fog_distance,
+            );
+            log::info!("DIAG splits={splits:?} dump_len={}", dump.len());
+            for d in [2.0f32, 5.0, 12.0, 30.0, 80.0] {
+                let cascade = splits.iter().position(|&s| d < s).unwrap_or(3);
+                let p = camera.pos + camera.forward() * d;
+                let clip = glam::Mat4::from_cols_array(&vps[cascade]) * p.extend(1.0);
+                let ndc = clip.truncate() / clip.w;
+                let u = (ndc.x * 0.5 + 0.5) * 2048.0;
+                let v_direct = (ndc.y * 0.5 + 0.5) * 2048.0;
+                let v_flip = (0.5 - ndc.y * 0.5) * 2048.0;
+                let at = |x: f32, y: f32| {
+                    let xi = (x as usize).min(2047);
+                    let yi = (y as usize).min(2047);
+                    dump[yi * 2048 + xi]
+                };
+                log::info!(
+                    "DIAG d={d} casc={cascade} ndc=({:.3},{:.3},{:.4}) direct={:.4} flip={:.4}",
+                    ndc.x,
+                    ndc.y,
+                    ndc.z,
+                    at(u, v_direct),
+                    at(u, v_flip)
+                );
+            }
         }
         match r.capture_frame(voxel_render::FrameInput {
             camera,
@@ -1707,10 +1783,14 @@ impl crate::EngineApp {
 fn compute_shadow_cascades(
     camera: &voxel_core::Camera,
     sun_dir: glam::Vec3,
-    near: f32,
-    far: f32,
+    max_distance: f32,
 ) -> ([[f32; 16]; 4], [f32; 4], [f32; 4]) {
-    let split_factors = [0.05, 0.15, 0.4, 1.0];
+    let split_factors = [0.06, 0.16, 0.36, 1.0];
+    // Cascades only need to cover the visible world: the fog distance is
+    // usually far closer than the camera's clip plane, and tighter cascades
+    // mean smaller texels and sharper contact shadows.
+    let near = camera.near.max(0.01);
+    let far = max_distance.clamp(near * 20.0, camera.far);
     let mut cascade_vps = [[0.0f32; 16]; 4];
     let mut cascade_splits = [0.0f32; 4];
 
@@ -1727,27 +1807,30 @@ fn compute_shadow_cascades(
         let far_split = near + (far - near) * split;
         cascade_splits[i] = far_split;
 
-        let corners_ndc = [
-            [-1.0, -1.0, -1.0],
-            [1.0, -1.0, -1.0],
-            [1.0, 1.0, -1.0],
-            [-1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0],
-            [1.0, -1.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [-1.0, 1.0, 1.0],
+        // Unproject the camera's near/far planes once, then interpolate along
+        // each corner ray to the cascade's split depths. NDC z is deeply
+        // nonlinear in view depth (near maps to 0, and nearly the whole range
+        // serves the last few hundred metres), so treating the split distance
+        // as an NDC z — the original bug — collapsed the cascade onto the
+        // near plane. View space is affine, so a world-space lerp between the
+        // near and far corners gives the correct point for any split depth.
+        let corners_xy = [
+            [-1.0f32, -1.0f32],
+            [1.0, -1.0],
+            [1.0, 1.0],
+            [-1.0, 1.0],
         ];
+        let t_near = ((near_split - near) / (camera.far - near)).clamp(0.0, 1.0);
+        let t_far = ((far_split - near) / (camera.far - near)).clamp(0.0, 1.0);
 
         let mut corners_world = [glam::Vec3::ZERO; 8];
-        for j in 0..8 {
-            let ndc_z = if j < 4 {
-                -1.0 + 2.0 * (near_split - near) / (far - near)
-            } else {
-                -1.0 + 2.0 * (far_split - near) / (far - near)
-            };
-            let ndc = glam::Vec4::new(corners_ndc[j][0], corners_ndc[j][1], ndc_z, 1.0);
-            let world = inv_vp * ndc;
-            corners_world[j] = world.truncate() / world.w;
+        for (j, &[nx, ny]) in corners_xy.iter().enumerate() {
+            let near_clip = inv_vp * glam::Vec4::new(nx, ny, 0.0, 1.0);
+            let near_world = near_clip.truncate() / near_clip.w;
+            let far_clip = inv_vp * glam::Vec4::new(nx, ny, 1.0, 1.0);
+            let far_world = far_clip.truncate() / far_clip.w;
+            corners_world[j] = near_world.lerp(far_world, t_near);
+            corners_world[j + 4] = near_world.lerp(far_world, t_far);
         }
 
         let center = corners_world
@@ -1762,7 +1845,11 @@ fn compute_shadow_cascades(
             max = max.max(c);
         }
 
-        let light_pos = center - sun_dir * 100.0;
+        // `sun_dir` points *towards* the sun, so the light camera must sit on
+        // that side of the cascade. The old `center - sun_dir * 100` placed
+        // the light underground at noon, which made the shadow map contain the
+        // undersides of the terrain and shadowed everything above it.
+        let light_pos = center + sun_dir * 100.0;
         let up = if sun_dir.y.abs() > 0.99 {
             glam::Vec3::new(1.0, 0.0, 0.0)
         } else {
@@ -1770,44 +1857,45 @@ fn compute_shadow_cascades(
         };
         let light_view = glam::Mat4::look_at_lh(light_pos, center, up);
 
-        let mut light_min = glam::Vec3::ZERO;
-        let mut light_max = glam::Vec3::ZERO;
-        for &c in &corners_world {
-            let lc = light_view * glam::Vec4::new(c.x, c.y, c.z, 1.0);
-            let lc = lc.truncate();
-            if lc.x < light_min.x {
-                light_min.x = lc.x;
-            }
-            if lc.x > light_max.x {
-                light_max.x = lc.x;
-            }
-            if lc.y < light_min.y {
-                light_min.y = lc.y;
-            }
-            if lc.y > light_max.y {
-                light_max.y = lc.y;
-            }
-            if lc.z < light_min.z {
-                light_min.z = lc.z;
-            }
-            if lc.z > light_max.z {
-                light_max.z = lc.z;
-            }
+        // Fit the light-space box to the cascade corners ONLY. Seeding these
+        // with Vec3::ZERO (the world origin) was a real bug: any camera away
+        // from the origin stretched the box to include it, so the cascade was
+        // both huge (blurry shadows) and off-centre — the view's forward ray
+        // landed on x = -1.0, the very edge of the map.
+        let first = (light_view * corners_world[0].extend(1.0)).truncate();
+        let mut light_min = first;
+        let mut light_max = first;
+        for &c in &corners_world[1..] {
+            let lc = (light_view * glam::Vec4::new(c.x, c.y, c.z, 1.0)).truncate();
+            light_min = light_min.min(lc);
+            light_max = light_max.max(lc);
         }
 
         let pad = 2.0;
         light_min -= glam::Vec3::splat(pad);
         light_max += glam::Vec3::splat(pad);
 
-        let radius = (light_max - light_min).length() * 0.5;
+        // Square the footprint so the 2048² shadow texels stay isotropic, and
+        // snap its origin to the texel grid. Snapping is what stops shadow
+        // edges from crawling as the camera moves sub-texel distances.
+        let size_x = (light_max.x - light_min.x).max(1.0);
+        let size_y = (light_max.y - light_min.y).max(1.0);
+        let size = size_x.max(size_y);
+        let texel = size / 2048.0;
+        let min_x = (light_min.x / texel).floor() * texel;
+        let min_y = (light_min.y / texel).floor() * texel;
+        let radius = size * 0.5;
 
+        // The light sits 100 units behind the cascade centre, so the scene
+        // occupies z ≈ 100 in light space. The old range (±radius + 50) did
+        // not contain that, which clipped every caster out of the depth map.
         let light_proj = glam::Mat4::orthographic_lh(
-            light_min.x,
-            light_max.x,
-            light_min.y,
-            light_max.y,
-            -radius - 50.0,
-            radius + 50.0,
+            min_x,
+            min_x + size,
+            min_y,
+            min_y + size,
+            1.0,
+            200.0 + radius,
         );
 
         let vp = light_proj * light_view;
@@ -1817,4 +1905,90 @@ fn compute_shadow_cascades(
     let light_dir_and_bias = [sun_dir.x, sun_dir.y, sun_dir.z, 0.01];
 
     (cascade_vps, cascade_splits, light_dir_and_bias)
+}
+
+#[cfg(test)]
+mod shadow_tests {
+    use super::compute_shadow_cascades;
+
+    fn test_camera() -> voxel_core::Camera {
+        voxel_core::Camera {
+            pos: glam::Vec3::new(0.0, 70.0, 0.0),
+            yaw: 0.0,
+            pitch: -0.25,
+            fov_y: std::f32::consts::FRAC_PI_3,
+            aspect: 16.0 / 9.0,
+            near: 0.05,
+            far: 1024.0,
+        }
+    }
+
+    /// Probe: noon (sun straight up) must still map the ground into the
+    /// middle of every cascade's depth range, not clamp to 1.0.
+    #[test]
+    fn noon_ground_depth_is_sane() {
+        let mut cam = test_camera();
+        cam.pos = glam::Vec3::new(2.5, 65.9, 2.5);
+        cam.pitch = -0.25;
+        let sun = glam::Vec3::new(0.0, 1.0, 0.0);
+        let (vps, splits, _) = compute_shadow_cascades(&cam, sun, 320.0);
+        eprintln!("splits = {splits:?}");
+        for (ndc_depth, cascade) in [(1.0f32, 0usize), (10.0, 1), (40.0, 2), (150.0, 3)] {
+            let p = cam.pos + cam.forward() * ndc_depth;
+            let clip = glam::Mat4::from_cols_array(&vps[cascade]) * p.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            eprintln!("view depth {ndc_depth} -> cascade {cascade} ndc {ndc:?}");
+        }
+    }
+
+    /// Regression test: every point on the camera's forward ray must land
+    /// inside the cascade that its view distance selects. The original code
+    /// unprojected the cascade corners with a [-1,1] NDC z range while glam's
+    /// `perspective_rh` uses [0,1], collapsing the near cascades onto a tiny
+    /// region and sampling outside the shadow map.
+    #[test]
+    fn cascades_cover_the_view_ray() {
+        let cam = test_camera();
+        let sun = glam::Vec3::new(-0.2, 1.0, 0.3).normalize();
+        let (vps, splits, _) = compute_shadow_cascades(&cam, sun, 320.0);
+
+        assert!(splits[0] > 1.0 && splits[0] < splits[1]);
+        assert!((splits[3] - 320.0).abs() < 1.0);
+
+        for depth in [0.5f32, 2.0, 8.0, 18.0, 25.0, 60.0, 150.0, 300.0] {
+            let cascade = splits
+                .iter()
+                .position(|&s| depth < s)
+                .unwrap_or(3);
+            let p = cam.pos + cam.forward() * depth;
+            let clip = glam::Mat4::from_cols_array(&vps[cascade]) * p.extend(1.0);
+            assert!(clip.w > 0.0, "depth {depth}: behind the light (w={})", clip.w);
+            let ndc = clip.truncate() / clip.w;
+            assert!(
+                (-1.0..=1.0).contains(&ndc.x)
+                    && (-1.0..=1.0).contains(&ndc.y)
+                    && (0.0..=1.0).contains(&ndc.z),
+                "depth {depth} (cascade {cascade}) maps outside the shadow map: {ndc:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod lh_probe {
+    #[test]
+    fn look_at_lh_forward_axis() {
+        let view = glam::Mat4::look_at_lh(
+            glam::Vec3::ZERO,
+            glam::Vec3::new(0.0, 0.0, 10.0),
+            glam::Vec3::Y,
+        );
+        let p = view * glam::Vec4::new(0.0, 0.0, 10.0, 1.0);
+        eprintln!("look_at_lh target view-space = {p:?}");
+        let proj = glam::Mat4::orthographic_lh(-1.0, 1.0, -1.0, 1.0, 1.0, 200.0);
+        for z in [1.0f32, 100.0, 200.0] {
+            let c = proj * view * glam::Vec4::new(0.0, 0.0, z, 1.0);
+            eprintln!("world z={z} -> ndc z={}", c.z / c.w);
+        }
+    }
 }

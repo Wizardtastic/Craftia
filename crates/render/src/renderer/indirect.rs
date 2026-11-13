@@ -192,6 +192,8 @@ pub struct GpuDrivenConfig {
     pub chunk_set_layout: vk::DescriptorSetLayout,
     pub msaa_samples: vk::SampleCountFlags,
     pub gpu_meshing: bool,
+    /// Bakes the chunk shader's `SHADOW_ENABLED` specialization constant.
+    pub shadow_enabled: bool,
     /// Hi-Z depth pyramid inputs for the cull shader's occlusion test.
     pub hiz_view: vk::ImageView,
     pub hiz_sampler: vk::Sampler,
@@ -261,6 +263,7 @@ impl GpuDriven {
             chunk_set_layout,
             msaa_samples,
             gpu_meshing,
+            shadow_enabled,
             hiz_view,
             hiz_sampler,
             hiz_params,
@@ -372,6 +375,7 @@ impl GpuDriven {
                 fs_spirv: &frag_spv,
                 msaa_samples,
                 depth_write: true,
+                shadow_enabled,
             },
         )?;
         let transparent_pipeline = create_graphics_pipeline(
@@ -385,6 +389,7 @@ impl GpuDriven {
                 fs_spirv: &frag_spv,
                 msaa_samples: vk::SampleCountFlags::TYPE_1,
                 depth_write: false,
+                shadow_enabled,
             },
         )?;
         let ind_pool = create_indirect_descriptor_pool(device)?;

@@ -13,10 +13,12 @@ use crate::input::{Action, InputState};
 
 /// Player dimensions (half-extents of the AABB, in blocks/metres).
 pub const PLAYER_HALF: glam::Vec3 = glam::Vec3::new(0.3, 0.9, 0.3);
-/// Sneak height reduces the half-extent Y.
-pub const PLAYER_HALF_SNEAK_Y: f32 = 0.65;
-/// Eye height above the AABB centre.
-pub const EYE_HEIGHT: f32 = 0.8;
+/// Sneak height reduces the half-extent Y (vanilla 1.5-block-tall AABB).
+pub const PLAYER_HALF_SNEAK_Y: f32 = 0.75;
+/// Eye height above the AABB centre (vanilla 1.62 above the feet).
+pub const EYE_HEIGHT: f32 = 0.72;
+/// Eye height above the AABB centre while sneaking (vanilla 1.27).
+pub const EYE_HEIGHT_SNEAK: f32 = 0.52;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize)]
 #[serde(default)]
@@ -35,14 +37,15 @@ pub struct PlayerConfig {
 impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
-            walk_speed: 4.317, // MC walking m/s
-            sprint_speed: 5.6,
-            sneak_speed: 1.8,
-            jump_speed: 7.5,
-            gravity: 26.0,
-            terminal_velocity: 55.0,
+            walk_speed: 4.317,   // vanilla walking blocks/s
+            sprint_speed: 5.612, // vanilla sprinting blocks/s
+            sneak_speed: 1.295,  // vanilla sneaking blocks/s
+            jump_speed: 8.4,     // 0.42 blocks/tick
+            gravity: 32.0,       // 0.08 blocks/tick²
+            terminal_velocity: 78.4,
             mouse_sensitivity: 0.0022,
-            fly_speed: 20.0,
+            fly_speed: 10.92, // vanilla creative flight
+
         }
     }
 }
@@ -264,7 +267,7 @@ impl Player {
 
         // --- camera follows eye ---
         let eye = if self.sneaking {
-            EYE_HEIGHT - 0.25
+            EYE_HEIGHT_SNEAK
         } else {
             EYE_HEIGHT
         };

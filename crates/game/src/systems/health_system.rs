@@ -3,16 +3,18 @@
 //! This system runs each tick and:
 //! 1. Drains the `DamageQueue` resource
 //! 2. Applies damage to entities with `Health` components
-//! 3. Ticks down invulnerability timers
+//! 3. Ticks down invulnerability timers (vanilla: 10 ticks / 0.5 s)
 //! 4. Fires `DeathEvent` when health reaches zero
+//! 5. Charges 0.1 exhaustion per damage point taken
 
 use crate::systems::hunger_system::GameTimeResource;
 use voxel_combat::{DamageQueue, DeathEvent, Health};
 use voxel_ecs::World;
 use voxel_gamemode::GameMode;
+use voxel_hunger::{exhaustion, Hunger};
 
 /// Health system entry point. Called each fixed timestep.
-pub fn health_system(world: &mut World, _dt: f32) {
+pub fn health_system(world: &mut World, dt: f32) {
     // Read current game time from ECS resource.
     let game_time = world
         .resource::<GameTimeResource>()
@@ -39,8 +41,9 @@ pub fn health_system(world: &mut World, _dt: f32) {
             continue;
         }
 
-        // Get the health component.
-        let Some(health) = world.get_mut::<Health>(entity) else {
+        // Copy the health component so the ECS world is free for the hunger
+        // and death-event writes below.
+        let Some(mut health) = world.get::<Health>(entity).copied() else {
             continue;
         };
 
@@ -50,7 +53,16 @@ pub fn health_system(world: &mut World, _dt: f32) {
         }
 
         // Apply the damage.
-        let _actual = health.apply_damage(event.amount, game_time);
+        let actual = health.apply_damage(event.amount, game_time);
+        world.set(entity, health);
+
+        // Vanilla charges 0.1 exhaustion per damage point taken.
+        if actual > 0.0 {
+            if let Some(mut hunger) = world.get::<Hunger>(entity).copied() {
+                hunger.add_exhaustion(exhaustion::DAMAGE_TAKEN * actual);
+                world.set(entity, hunger);
+            }
+        }
 
         // Check for death.
         if health.dead {
@@ -58,7 +70,6 @@ pub fn health_system(world: &mut World, _dt: f32) {
             log::info!("Player died: {}", message);
 
             // Store the death event on the entity for the engine to pick up.
-            // We'll use a simple approach: set a DeathEvent component.
             world.set(
                 entity,
                 DeathEvent {
@@ -74,7 +85,7 @@ pub fn health_system(world: &mut World, _dt: f32) {
     let entities: Vec<_> = world.query::<&Health>().map(|(e, _)| e).collect();
     for entity in entities {
         if let Some(health) = world.get_mut::<Health>(entity) {
-            health.tick();
+            health.tick(dt);
         }
     }
 }

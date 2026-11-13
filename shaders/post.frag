@@ -12,10 +12,13 @@ layout(push_constant) uniform Push {
     vec4 proj;       // x = near, y = far, z = screen_w, w = screen_h
 } push;
 
-// Bloom constants.
-#define BLOOM_INTENSITY    0.25
-#define BLOOM_THRESHOLD    0.80
-#define BLOOM_PIXEL_RADIUS 1.5
+// Bloom constants. The scene target is RGBA16F, so only genuinely bright
+// pixels (HDR sun disc, emissive tiles, sunlit snow) exceed the threshold.
+// A wider ring radius gives a soft atmospheric glow instead of the old
+// one-pixel halo.
+#define BLOOM_INTENSITY    0.22
+#define BLOOM_THRESHOLD    1.05
+#define BLOOM_PIXEL_RADIUS 5.0
 #define BLOOM_RINGS        2
 
 // SSAO constants.

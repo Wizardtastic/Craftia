@@ -1,14 +1,23 @@
 //! Progressive mining system: handles block breaking over time.
 //!
-//! This system:
-//! 1. Checks if the player is holding left-click on a block
-//! 2. Calculates break time based on hardness and tool
-//! 3. Updates mining progress
-//! 4. Breaks the block when progress reaches 1.0
-//! 5. Handles interruption (releasing mouse, changing target)
+//! Break time follows the vanilla formula:
+//!
+//! ```text
+//! damage per tick = tool_speed / hardness / (can_harvest ? 30 : 100)
+//! ```
+//!
+//! which is `hardness × 1.5 / tool_speed` seconds with the right tool and
+//! `hardness × 5` seconds by hand. Tool speeds match vanilla materials
+//! (wood 2, stone 4, iron 6, diamond 8, netherite 9, gold 12).
+//!
+//! Blocks with hardness 0 break instantly; hardness < 0 (bedrock) never does.
+//! Progress resets when the target changes or the mouse is released.
 
 use voxel_core::BlockId;
 use voxel_ecs::World;
+use voxel_gamemode::GameMode;
+use voxel_hunger::exhaustion::MINE_BLOCK;
+use voxel_hunger::Hunger;
 use voxel_world::registry::ToolType;
 
 use crate::components::{MiningProgress, PlayerEntity, PlayerInput, PlayerLookTarget, Transform};
@@ -16,31 +25,96 @@ use crate::inventory::SurvivalInventory;
 use crate::item_entity::ItemEntity;
 use crate::systems::PhysicsWorldRes;
 
-/// Speed multiplier for each tool type when used on the correct block type.
-fn tool_speed_for_block(tool: ToolType, required: ToolType) -> f32 {
-    if tool == ToolType::None || tool != required {
-        return 1.0; // bare hand or wrong tool
+/// Resource: blocks broken by the mining system this frame. The engine drains
+/// it to remesh the affected chunks and spawn break particles.
+#[derive(Clone, Debug, Default)]
+pub struct MinedBlocks(pub Vec<([i32; 3], BlockId)>);
+
+/// Vanilla tool speed for a material prefix.
+fn tool_material_speed(name: &str) -> (f32, u8) {
+    if name.starts_with("wooden") || name.starts_with("wood_") {
+        (2.0, 1)
+    } else if name.starts_with("stone") {
+        (4.0, 2)
+    } else if name.starts_with("iron") {
+        (6.0, 3)
+    } else if name.starts_with("diamond") {
+        (8.0, 4)
+    } else if name.starts_with("netherite") {
+        (9.0, 5)
+    } else if name.starts_with("golden") || name.starts_with("gold_") {
+        (12.0, 1)
+    } else {
+        (1.0, 0)
     }
-    // Correct tool: faster mining. Use 2.0 as a reasonable default speed.
-    // A full implementation would look up the tool's speed from an item registry.
-    2.0
 }
 
-/// Check if the held block is the correct tool type for mining a block.
-fn held_is_correct_tool(
+/// Infer the tool category from an item name (`iron_pickaxe` → pickaxe).
+fn tool_type_from_name(name: &str) -> ToolType {
+    let n = name.to_lowercase();
+    if n.ends_with("_pickaxe") {
+        ToolType::Pickaxe
+    } else if n.ends_with("_axe") {
+        ToolType::Axe
+    } else if n.ends_with("_shovel") {
+        ToolType::Shovel
+    } else if n.ends_with("_sword") {
+        ToolType::Sword
+    } else if n.ends_with("_hoe") {
+        ToolType::Hoe
+    } else {
+        ToolType::None
+    }
+}
+
+/// Speed multiplier and tier of the held item, if it is a tool.
+fn held_tool_speed(
     held: BlockId,
-    required: ToolType,
     registry: &voxel_world::BlockRegistry,
-) -> bool {
-    if required == ToolType::None {
-        return true; // any tool (or hand) works
+) -> (f32, u8, ToolType) {
+    if held.is_air() {
+        return (1.0, 0, ToolType::None);
     }
-    let def = registry.get(held);
-    def.required_tool == required
+    let name = registry.get(held).name.as_ref().to_string();
+    let kind = tool_type_from_name(&name);
+    let (speed, tier) = tool_material_speed(&name);
+    (speed, tier, kind)
 }
 
-/// Calculate break time while enforcing the held tool's minimum tier.
-/// Returns the time in seconds to break the block. -1.0 means unbreakable.
+/// The tool that speeds this block up. Blocks without a hard requirement
+/// still have a preferred tool (dirt → shovel, logs → axe, ...).
+fn preferred_tool_for_block(name: &str) -> ToolType {
+    let n = name.to_lowercase();
+    if n.contains("ore")
+        || n.contains("stone")
+        || n.contains("cobble")
+        || n.contains("bedrock")
+    {
+        ToolType::Pickaxe
+    } else if n.contains("dirt")
+        || n.contains("sand")
+        || n.contains("gravel")
+        || n.contains("snow")
+    {
+        ToolType::Shovel
+    } else if n.contains("log")
+        || n.contains("wood")
+        || n.contains("plank")
+        || n.contains("chest")
+    {
+        ToolType::Axe
+    } else if n.contains("leaves") {
+        ToolType::Hoe
+    } else {
+        ToolType::None
+    }
+}
+
+/// Vanilla break time in seconds.
+///
+/// `has_correct_tool` selects the 30× divisor (can harvest) instead of the
+/// 100× wrong-tool divisor. An insufficient tool tier is reported as
+/// unbreakable; builtin blocks all use tier 0.
 pub fn calculate_break_time_with_tier(
     hardness: f32,
     required_tool: ToolType,
@@ -52,8 +126,6 @@ pub fn calculate_break_time_with_tier(
     if hardness < 0.0 {
         return -1.0; // unbreakable
     }
-    // A minimum tier applies even to instant-break blocks. Unbreakable blocks
-    // are handled above and remain unbreakable regardless of tool metadata.
     if required_tier > held_tool_tier {
         return -1.0;
     }
@@ -61,24 +133,18 @@ pub fn calculate_break_time_with_tier(
         return 0.0; // instant break
     }
 
-    // Base break time: hardness * 1.5 seconds
-    let base_time = hardness * 1.5;
-
-    // Apply tool speed multiplier.
-    // If the player has the correct tool, divide by tool speed.
-    // If not, use bare hand speed (1.0).
-    let speed = if has_correct_tool { tool_speed } else { 1.0 };
-
-    // Blocks that require a specific tool can't be harvested without the
-    // correct category and minimum tier. Keep the slower wrong-tool path for
-    // category mismatches, but reject an insufficient tier entirely: this is
-    // the contract exposed by BlockDef::required_tier.
-    if required_tool != ToolType::None && !has_correct_tool {
-        // Can still mine, but much slower (5x slower).
-        base_time * 5.0
+    let speed = if has_correct_tool {
+        tool_speed.max(1.0)
     } else {
-        base_time / speed
-    }
+        1.0
+    };
+    let divisor = if required_tool == ToolType::None || has_correct_tool {
+        30.0
+    } else {
+        100.0
+    };
+
+    hardness * divisor / (20.0 * speed)
 }
 
 /// Evaluate block drops based on the block's drop table.
@@ -136,9 +202,6 @@ pub fn evaluate_drops(
         }
     }
 
-    // An empty table is an explicit no-drop policy. Blocks that should drop
-    // themselves declare that through an explicit BlockDrop entry in the
-    // registry; do not infer it from `breakable`.
     drops
 }
 
@@ -149,19 +212,40 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
         None => return,
     };
 
-    // Get player input to check if mining (left click).
+    // Only survival/adventure mine over time; creative breaks instantly
+    // through the block-interaction path.
+    let game_mode = world
+        .get::<GameMode>(player_entity)
+        .copied()
+        .unwrap_or(GameMode::Survival);
+    // Adventure players cannot break blocks in vanilla.
+    if game_mode != GameMode::Survival {
+        return;
+    }
+
     let input = match world.get::<PlayerInput>(player_entity) {
         Some(i) => *i,
         None => return,
     };
 
-    // Get or create mining progress component.
     let mut mining = world
         .get::<MiningProgress>(player_entity)
         .copied()
         .unwrap_or_default();
 
-    // If not mining (no left click), reset progress.
+    // Keep the arm swinging while the button is held.
+    if input.mining {
+        if let Some(mut state) = world
+            .get::<crate::components::PlayerState>(player_entity)
+            .copied()
+        {
+            if state.mining_swing <= 0.0 {
+                state.mining_swing = 1.0;
+                world.set(player_entity, state);
+            }
+        }
+    }
+
     if !input.mining {
         if mining.is_mining() {
             mining.reset();
@@ -170,13 +254,11 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
         return;
     }
 
-    // Get the block the player is looking at from the ECS resource (updated by the engine).
     let look_target = world
         .resource::<PlayerLookTarget>()
         .copied()
         .unwrap_or_default();
 
-    // If no target block, reset mining.
     let Some(target_pos) = look_target.block else {
         if mining.is_mining() {
             mining.reset();
@@ -185,16 +267,13 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
         return;
     };
 
-    // If target changed, reset progress.
     if mining.target_changed(target_pos) {
         mining = MiningProgress::start(target_pos, look_target.block_id);
     }
 
-    // Get the physics world for block queries.
     let physics = world.resource::<PhysicsWorldRes>().cloned();
     let Some(phys) = physics else { return };
 
-    // Check if the block still exists.
     let block_id = phys
         .0
         .get_block(target_pos[0], target_pos[1], target_pos[2]);
@@ -204,21 +283,32 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
         return;
     }
 
-    // Get block properties.
     let registry = phys.0.registry();
     let block_def = registry.get(block_id);
 
-    // Get the player's held item to check tool type and speed.
     let (held, held_tool_tier) = world
         .get::<SurvivalInventory>(player_entity)
-        .map(|inv| (inv.selected_block(), inv.selected_tool_tier()))
-        .unwrap_or((None, 0));
-    let held = held.unwrap_or(BlockId::AIR);
-    let has_correct_tool = held_is_correct_tool(held, block_def.required_tool, &registry);
-    let tool_speed =
-        tool_speed_for_block(registry.get(held).required_tool, block_def.required_tool);
+        .map(|inv| (inv.selected_block().unwrap_or(BlockId::AIR), inv.selected_tool_tier()))
+        .unwrap_or((BlockId::AIR, 0));
+    let (tool_speed, inferred_tier, tool_kind) = held_tool_speed(held, &registry);
+    let preferred = if block_def.required_tool != ToolType::None {
+        block_def.required_tool
+    } else {
+        preferred_tool_for_block(block_def.name.as_ref())
+    };
+    // A matching tool speeds the block up even when the block can be
+    // harvested by hand (vanilla preferred-tool behaviour).
+    let tool_speed = if preferred != ToolType::None && tool_kind == preferred {
+        tool_speed
+    } else {
+        1.0
+    };
+    // Per-slot tier metadata wins when present; otherwise the tool name
+    // determines its tier.
+    let held_tool_tier = held_tool_tier.max(inferred_tier);
+    let has_correct_tool = block_def.required_tool == ToolType::None
+        || held_tool_speed(held, &registry).2 == block_def.required_tool;
 
-    // Calculate break time.
     let break_time = calculate_break_time_with_tier(
         block_def.hardness,
         block_def.required_tool,
@@ -229,30 +319,19 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
     );
 
     if break_time < 0.0 {
-        // Unbreakable block.
+        // Unbreakable block (or insufficient tool tier).
         mining.reset();
         world.set(player_entity, mining);
         return;
     }
 
-    // Update progress.
     let should_break = mining.update(dt, break_time);
     world.set(player_entity, mining);
 
     if should_break {
-        // Break the block!
-        log::info!("Block broken at {:?}", target_pos);
+        log::debug!("Block broken at {:?}", target_pos);
 
-        // Evaluate drops. Enchantment state is not modeled yet, so the
-        // current player path supplies the baseline values; the pure drop
-        // evaluator already honors these arguments for future item support.
         let drops = evaluate_drops(block_def, false, 0);
-
-        // Get player position for spawning items.
-        let _player_pos = world
-            .get::<Transform>(player_entity)
-            .map(|t| t.pos)
-            .unwrap_or(glam::Vec3::ZERO);
 
         // Spawn item entities for each drop.
         for (item_id, count) in drops {
@@ -276,11 +355,20 @@ pub fn progressive_mining_system(world: &mut World, dt: f32) {
             world.spawn((item_entity, item_transform));
         }
 
-        // Set the block to air.
         phys.0
             .set_block(target_pos[0], target_pos[1], target_pos[2], BlockId::AIR);
 
-        // Reset mining progress.
+        // Tell the engine so it can rebuild the chunk mesh and spawn particles.
+        if let Some(mined) = world.resource_mut::<MinedBlocks>() {
+            mined.0.push((target_pos, block_id));
+        }
+
+        // Vanilla charges 0.005 exhaustion per block broken.
+        if let Some(mut hunger) = world.get::<Hunger>(player_entity).copied() {
+            hunger.add_exhaustion(MINE_BLOCK);
+            world.set(player_entity, hunger);
+        }
+
         mining.reset();
         world.set(player_entity, mining);
     }
@@ -340,11 +428,19 @@ mod tests {
     #[test]
     fn builtin_solid_blocks_drop_themselves() {
         let reg = voxel_world::BlockRegistry::with_builtins();
-        for name in ["stone", "dirt", "sand", "gravel", "planks", "coal_ore"] {
+        for name in ["dirt", "sand", "gravel", "planks", "coal_ore"] {
             let id = reg.id_of(name).unwrap();
             let drops = evaluate_drops(reg.get(id), false, 0);
             assert_eq!(drops, vec![(id, 1)], "{name} should drop itself once");
         }
+    }
+
+    #[test]
+    fn stone_drops_cobblestone_like_vanilla() {
+        let reg = voxel_world::BlockRegistry::with_builtins();
+        let stone = reg.id_of("stone").unwrap();
+        let cobble = reg.id_of("cobblestone").unwrap();
+        assert_eq!(evaluate_drops(reg.get(stone), false, 0), vec![(cobble, 1)]);
     }
 
     #[test]
@@ -381,5 +477,34 @@ mod tests {
             -1.0
         );
         assert!(calculate_break_time_with_tier(1.0, ToolType::Pickaxe, 2, true, 2, 2.0) > 0.0);
+    }
+
+    #[test]
+    fn break_times_match_vanilla() {
+        // Stone (1.5) by hand: 7.5 s. With a wooden pickaxe (speed 2): 1.125 s.
+        assert!(
+            (calculate_break_time_with_tier(1.5, ToolType::Pickaxe, 0, false, 0, 1.0) - 7.5).abs()
+                < 1e-4
+        );
+        assert!(
+            (calculate_break_time_with_tier(1.5, ToolType::Pickaxe, 0, true, 1, 2.0) - 1.125)
+                .abs()
+                < 1e-4
+        );
+        // Dirt (0.5) by hand: 0.75 s.
+        assert!(
+            (calculate_break_time_with_tier(0.5, ToolType::None, 0, true, 0, 1.0) - 0.75).abs()
+                < 1e-4
+        );
+        // Instant-break blocks.
+        assert_eq!(
+            calculate_break_time_with_tier(0.0, ToolType::None, 0, true, 0, 1.0),
+            0.0
+        );
+        // Bedrock.
+        assert_eq!(
+            calculate_break_time_with_tier(-1.0, ToolType::None, 0, true, 0, 1.0),
+            -1.0
+        );
     }
 }

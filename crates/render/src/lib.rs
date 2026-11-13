@@ -49,10 +49,13 @@ use bytemuck::{Pod, Zeroable};
 /// to pick the correct sub-tile from the 2D atlas via the shader-side
 /// `(tile_origin + fract(uv)) / 16` calculation.
 ///
-/// The `light_color` field carries a packed RGBA color for tinted lighting.
-/// It is passed `flat` from the vertex shader to the fragment shader.
-/// Mirror changes here in `crates/render/src/renderer.rs` `create_graphics_pipeline`
-/// + `create_shadow_pipeline` `vertex_attributes` arrays.
+/// The `light_color` field carries a packed RGBA color for tinted lighting:
+/// RGB is the torch light tint and A is the block-light level (0..255). The
+/// mesher keeps `light` for sky/sun visibility so the shader can light the two
+/// independently — that split is what makes nights dark while torches still
+/// illuminate. It is passed `flat` to the fragment shader.
+/// Mirror changes here in `crates/render/src/renderer/pipeline.rs`
+/// `create_graphics_pipeline` + `create_shadow_pipeline` `vertex_attributes` arrays.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct Vertex {

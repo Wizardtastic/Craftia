@@ -54,6 +54,11 @@ void main() {
     frag_world_pos = world;
     frag_light_color = in_light_color;
 
+    // Fog starts at 55% of the view distance and saturates at the far plane.
+    // The old `1 - exp(-3 d / maxdist)` curve was already ~60% fogged at a
+    // third of the render distance, which washed out the whole scene.
     float dist = length(world - cam.cam_pos_and_maxdist.xyz);
-    frag_fog = clamp(1.0 - exp(-3.0 * dist / cam.cam_pos_and_maxdist.w), 0.0, 1.0);
+    float maxdist = max(cam.cam_pos_and_maxdist.w, 1.0);
+    float fog_t = clamp((dist - maxdist * 0.55) / (maxdist * 0.45), 0.0, 1.0);
+    frag_fog = fog_t * fog_t * (3.0 - 2.0 * fog_t);
 }

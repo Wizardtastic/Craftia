@@ -71,14 +71,28 @@ pub(crate) enum GameState {
     SettingsMenu,
 }
 
-/// Computed day/night parameters for the current game time.
+/// Computed physical lighting parameters for the current game time.
+///
+/// These feed the renderer's `set_lighting` and drive both the sky shader's
+/// atmospheric model and the chunk shader's sun/sky/torch split. Colours are
+/// linear HDR — the renderer's offscreen target is RGBA16F and the post pass
+/// applies exposure + ACES tone mapping.
 struct DayParams {
-    horizon: [f32; 3],
-    zenith: [f32; 3],
+    /// Normalised direction towards the sun.
+    sun_dir: [f32; 3],
+    /// Direct sun radiance (tint * intensity), zero once the sun sets.
+    sun_color: [f32; 3],
+    /// Smooth 0..1 term: 0 at night, 1 in full daylight. Gates direct sun,
+    /// shadow rays and the sky shader's sun disc.
+    sun_visibility: f32,
+    /// Hemispherical sky irradiance (blue by day, deep navy by night).
+    sky_ambient: [f32; 3],
+    /// Horizon/fog colour.
     fog: [f32; 3],
-    daylight: f32,
-    sun_altitude: f32,
-    sun_angle: f32,
+    /// 0 at day, 1 at night. Drives stars/moon and the auto-exposure lift.
+    night: f32,
+    /// Auto-exposure multiplier applied on top of the user's exposure slider.
+    exposure: f32,
 }
 
 /// Rolling profiler state for the debug overlay.
@@ -384,7 +398,7 @@ impl GamePlayState {
         Self {
             spawn_pos,
             game_state: GameState::TitleScreen,
-            game_time: 300.0, // start at dawn
+            game_time: 380.0, // TEMPTEST
             day_length,
             mouse_pos: Point::default(),
             chat: ChatState::default(),
@@ -925,17 +939,21 @@ impl EngineApp {
         let t = (self.gameplay.game_time % self.gameplay.day_length) / self.gameplay.day_length; // 0..1
         let sun_angle = (t as f32) * std::f32::consts::TAU;
         let sun_altitude = (sun_angle - std::f32::consts::FRAC_PI_2).sin(); // -1..1
-        let daylight = (sun_altitude * 1.2 + 0.6).clamp(0.0, 1.0);
 
-        // Day sky colours.
-        let day_horizon = [0.62, 0.78, 0.95];
-        let day_zenith = [0.35, 0.55, 0.90];
-        let day_fog = [0.62, 0.80, 0.96];
-        // Night sky colours.
-        let night_horizon = [0.05, 0.06, 0.12];
-        let night_zenith = [0.01, 0.02, 0.05];
-        let night_fog = [0.04, 0.05, 0.10];
+        // Slight azimuth tilt so the sun (and its shadows) never travels
+        // exactly along a world axis.
+        let sun_dir = glam::Vec3::new(
+            sun_angle.cos() * 0.3,
+            sun_altitude,
+            sun_angle.sin() * 0.3,
+        )
+        .normalize()
+        .to_array();
 
+        let smoothstep = |edge0: f32, edge1: f32, x: f32| {
+            let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
         let lerp = |a: [f32; 3], b: [f32; 3], t: f32| {
             [
                 a[0] + (b[0] - a[0]) * t,
@@ -944,13 +962,63 @@ impl EngineApp {
             ]
         };
 
+        // Two independent ramps:
+        //  - `sun_visibility` reaches zero as the disc dips below the
+        //    horizon and controls direct sunlight / shadow rays / sun disc.
+        //  - `day` is slightly softer and drives the sky palette so twilight
+        //    lingers a little after sunset.
+        let sun_visibility = smoothstep(-0.06, 0.12, sun_altitude);
+        let day = smoothstep(-0.12, 0.28, sun_altitude);
+        let night = 1.0 - smoothstep(-0.22, 0.02, sun_altitude);
+
+        // Direct sun radiance. 3.3 in linear HDR reads as a bright but not
+        // clipped noon after the default 0.6 exposure and ACES curve; it
+        // falls to exactly zero at night, which is what makes nights dark
+        // instead of a dimmed copy of day.
+        let intensity = 3.3 * day.powf(0.85);
+        let horizon_tint = [1.0, 0.42, 0.16];
+        let noon_tint = [1.0, 0.96, 0.90];
+        let tint = lerp(horizon_tint, noon_tint, smoothstep(0.0, 0.55, sun_altitude));
+        let sun_color = [
+            tint[0] * intensity,
+            tint[1] * intensity,
+            tint[2] * intensity,
+        ];
+
+        // Sky irradiance: warm-ish at the horizon, blue overhead, and a
+        // deep navy moonlight floor at night.
+        let day_ambient = [0.30, 0.42, 0.64];
+        let dusk_ambient = [0.26, 0.20, 0.28];
+        let night_ambient = [0.026, 0.034, 0.062];
+        let twilight = (1.0 - day) * sun_visibility;
+        let mut sky_ambient = lerp(night_ambient, day_ambient, day);
+        for c in 0..3 {
+            sky_ambient[c] += dusk_ambient[c] * twilight * 0.30;
+        }
+
+        // Fog follows the sky's horizon: pale blue by day, warm at dusk,
+        // near-black at night.
+        let day_fog = [0.62, 0.78, 0.96];
+        let dusk_fog = [0.78, 0.44, 0.28];
+        let night_fog = [0.010, 0.014, 0.030];
+        let fog = lerp(
+            night_fog,
+            lerp(dusk_fog, day_fog, day),
+            sun_visibility,
+        );
+
+        // Auto-exposure: lift slightly at night so the moonlit world stays
+        // readable, never enough to make night look like day.
+        let exposure = 1.0 + night * 1.10;
+
         DayParams {
-            horizon: lerp(night_horizon, day_horizon, daylight),
-            zenith: lerp(night_zenith, day_zenith, daylight),
-            fog: lerp(night_fog, day_fog, daylight),
-            daylight,
-            sun_altitude,
-            sun_angle,
+            sun_dir,
+            sun_color,
+            sun_visibility,
+            sky_ambient,
+            fog,
+            night,
+            exposure,
         }
     }
 

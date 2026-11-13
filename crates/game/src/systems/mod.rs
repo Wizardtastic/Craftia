@@ -26,18 +26,18 @@ pub use animation_system::{
 };
 pub use armor_system::armor_system;
 pub use drowning_system::{drowning_system, DrowningState};
-pub use environmental_system::environmental_damage_system;
+pub use environmental_system::{environmental_damage_system, HazardTimers};
 pub use health_system::health_system;
 pub use held_item_system::held_item_system;
 pub use hierarchy_system::{hierarchy_system, ChildMap, ChildMapResource};
 pub use hunger_system::{hunger_system, DifficultyResource, GameTimeResource};
 pub use input_system::{input_system, InputResource, InputSnapshot};
 pub use lifecycle_system::lifecycle_system;
-pub use mining_system::progressive_mining_system;
+pub use mining_system::{progressive_mining_system, MinedBlocks};
 pub use movement_system::{
     movement_system, CameraResource, PhysicsWorldRes, EYE_HEIGHT, EYE_HEIGHT_SNEAK, FLY_SPEED,
-    GRAVITY, JUMP_SPEED, MOUSE_SENSITIVITY, SNEAK_SPEED, SPRINT_SPEED, SWIM_BASE_FRACTION,
-    SWIM_UP_SPEED, TERMINAL_VELOCITY, WALK_SPEED, WATER_DRAG,
+    GRAVITY, JUMP_SPEED, MOUSE_SENSITIVITY, SNEAK_SPEED, SPRINT_SPEED, TERMINAL_VELOCITY,
+    WALK_SPEED,
 };
 pub use pickup_system::item_pickup_system;
 pub use property_animation_system::property_animation_system;

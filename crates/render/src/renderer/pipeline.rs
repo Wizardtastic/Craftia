@@ -16,17 +16,28 @@ pub(super) struct CameraUbo {
 pub(super) struct FogUbo {
     /// rgb = fog colour, a = unused.
     pub(super) color_and_density: [f32; 4],
-    /// x = ambient brightness (day/night), yzw = sun direction (for future use).
-    pub(super) ambient_and_sun: [f32; 4],
+    /// rgb = direct sun radiance in linear HDR units, a = sun visibility 0..1
+    /// (0 at night, 1 in full day — also gates the shadow ray cast).
+    pub(super) sun_color: [f32; 4],
+    /// rgb = sky ambient irradiance, a = night factor 0..1 (drives the sky
+    /// shader's stars/moon and night-side effects).
+    pub(super) sky_ambient: [f32; 4],
+    /// xyz = sun direction, w = unused.
+    pub(super) sun_dir_pad: [f32; 4],
 }
 
-/// Per-frame sky uniform: horizon colour, zenith colour, sun direction.
+/// Per-frame sky uniform: sun state + ambient + fog, consumed by `sky.frag`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub(super) struct SkyUbo {
-    pub(super) horizon: [f32; 4],
-    pub(super) zenith: [f32; 4],
-    pub(super) sun_dir: [f32; 4],
+    /// xyz = sun direction, w = visibility 0..1.
+    pub(super) sun_dir_vis: [f32; 4],
+    /// rgb = sun tint * intensity (HDR), a = unused.
+    pub(super) sun_color: [f32; 4],
+    /// rgb = sky ambient irradiance, a = night factor 0..1.
+    pub(super) sky_ambient: [f32; 4],
+    /// rgb = fog colour, a = game time in seconds (star twinkle).
+    pub(super) fog_time: [f32; 4],
 }
 
 /// Per-frame shadow uniform for cascaded shadow maps (binding 4 of the chunk set).
@@ -810,6 +821,8 @@ pub(super) struct GraphicsPipelineConfig<'a> {
     pub fs_spirv: &'a [u8],
     pub msaa_samples: vk::SampleCountFlags,
     pub depth_write: bool,
+    /// Bakes `SHADOW_ENABLED` (constant_id 0) into the fragment shader.
+    pub shadow_enabled: bool,
 }
 
 pub(super) fn create_graphics_pipeline(
@@ -825,6 +838,7 @@ pub(super) fn create_graphics_pipeline(
         fs_spirv,
         msaa_samples,
         depth_write,
+        shadow_enabled,
     } = config;
     let vert_spv: &[u8] = vs_spirv;
     let frag_spv: &[u8] = fs_spirv;
@@ -845,7 +859,10 @@ pub(super) fn create_graphics_pipeline(
     }
     .map_err(|e| anyhow!("frag shader module: {e:?}"))?;
 
-    let shadow_enabled = [0u32];
+    // `SHADOW_ENABLED` gates the whole PCSS shadow path in chunk.frag. It was
+    // previously hard-coded to 0, which silently disabled shadow sampling for
+    // every chunk even though the shadow pass kept running.
+    let shadow_enabled = [u32::from(shadow_enabled)];
     let spec_map = [vk::SpecializationMapEntry::default()
         .constant_id(0)
         .size(std::mem::size_of::<u32>())
@@ -1791,7 +1808,10 @@ pub(super) fn create_shadow_pipeline(
         .depth_clamp_enable(false)
         .rasterizer_discard_enable(false)
         .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::FRONT)
+        // No culling: voxel faces are single-sided quads, so culling either
+        // side drops real casters from the depth map and lets light leak
+        // through them. The depth test already keeps the nearest surface.
+        .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0)
         .depth_bias_enable(true)

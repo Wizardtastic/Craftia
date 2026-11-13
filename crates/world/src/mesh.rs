@@ -8,14 +8,19 @@
 //! light level, and AO pattern into larger quads. Water, foliage, and cactus
 //! use per-block emission.
 //!
-//! Vertex layout (28 bytes):
+//! Vertex layout (32 bytes):
 //!   pos: [f32; 3]   — local block corner in [0, 16]
 //!   uv:  [f32; 2]   — pre-baked LOCAL tile UV in [0, w] × [0, h]
 //!                       (the fragment shader applies `fract()` per-tile
 //!                       so multi-block merges repeat the same tile instead
 //!                       of bleeding into neighbouring atlas tiles).
-//!   light: f32       — baked face shading in [0, 1]
+//!   light: f32       — baked *sky/sun* visibility in [0, 1]: sunlight level
+//!                       × per-face directional shade × AO. Values > 1
+//!                       encode the water surface level.
 //!   tile: u32        — atlas tile index (carried `flat`; not interpolated)
+//!   light_color: u32 — RGB = light tint, A = block (torch) level 0..255.
+//!                       Keeping torch light in the alpha byte lets the chunk
+//!                       shader light sun and block light independently.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec3, Vec2, Vec3 as GVec3};
@@ -130,7 +135,13 @@ const S: usize = CHUNK_SIZE as usize;
 struct MaskCell {
     block_id: BlockId,
     ao: [f32; 4],
-    block_light: u8,
+    /// Sunlight level 0..15 at this cell — the sky/sun visibility channel
+    /// consumed by `frag_light` in the chunk shader.
+    sun_light: u8,
+    /// Block (torch) light level 0..15 at this cell. Packed into the alpha
+    /// byte of `light_color` so the shader can light torches independently
+    /// of the sun (this is what keeps caves and night interiors readable).
+    torch_light: u8,
     /// Packed RGBA8 light tint (same layout as `ChunkVertex.light_color`).
     light_color: u32,
 }
@@ -138,7 +149,8 @@ struct MaskCell {
 const EMPTY_CELL: MaskCell = MaskCell {
     block_id: BlockId::AIR,
     ao: [1.0; 4],
-    block_light: 0,
+    sun_light: 0,
+    torch_light: 0,
     light_color: 0,
 };
 
@@ -380,12 +392,14 @@ fn build_mask_cell(
             reg,
         ),
     ];
-    let bl = chunk.get_combined_light(lx, ly, lz);
+    let sl = chunk.get_sunlight(lx, ly, lz);
+    let tl = chunk.get_torchlight(lx, ly, lz);
     let lc = chunk.get_combined_light_color(lx, ly, lz);
     MaskCell {
         block_id: id,
         ao,
-        block_light: bl,
+        sun_light: sl,
+        torch_light: tl,
         light_color: lc,
     }
 }
@@ -499,7 +513,8 @@ const CORNER_AO_MAP: [[(usize, usize); 4]; 6] = [
 
 fn can_merge(a: &MaskCell, b: &MaskCell, pairs: &[(usize, usize); 2]) -> bool {
     a.block_id == b.block_id
-        && a.block_light == b.block_light
+        && a.sun_light == b.sun_light
+        && a.torch_light == b.torch_light
         && a.light_color == b.light_color
         && a.ao[pairs[0].0] == b.ao[pairs[0].1]
         && a.ao[pairs[1].0] == b.ao[pairs[1].1]
@@ -516,7 +531,8 @@ fn can_merge_down(
         let a = &top[u + i];
         let b = &bot[u + i];
         if a.block_id != b.block_id
-            || a.block_light != b.block_light
+            || a.sun_light != b.sun_light
+            || a.torch_light != b.torch_light
             || a.light_color != b.light_color
         {
             return false;
@@ -640,7 +656,7 @@ fn greedy_emit(
                 continue;
             }
 
-            let block_light = cell.block_light;
+            let sun_light = cell.sun_light;
             let tile = reg.get(cell.block_id).textures.tile(face);
 
             let mut w = 1usize;
@@ -676,10 +692,14 @@ fn greedy_emit(
                 mask[v + dv][u + du].ao[ao_idx]
             });
 
-            let light = directional * (block_light as f32 / 15.0).max(MIN_FACE_LIGHT);
+            let light = directional * (sun_light as f32 / 15.0).max(MIN_FACE_LIGHT);
             let positions = merged_positions(face, u as i32, v as i32, w as i32, h as i32, slice);
             let uvs = merged_uvs(face, w as u32, h as u32);
-            let packed_color = cell.light_color;
+            // RGB = light tint, A = torch level. The alpha channel used to be
+            // an unused 255; carrying the block-light level there lets the
+            // shader separate sun and torch light without growing the vertex.
+            let packed_color =
+                (cell.light_color & 0x00FF_FFFF) | ((cell.torch_light as u32) << 24);
 
             let target = match reg.get(cell.block_id).kind {
                 BlockKind::Transparent => &mut bundle.transparent,
@@ -737,8 +757,8 @@ fn emit_foliage_cross(
     def: &BlockDef,
 ) {
     let tile = def.textures.tile(Face::PosY);
-    let block_light = chunk.get_combined_light(lx, ly, lz) as f32 / 15.0;
-    let light = block_light.max(MIN_FOLIAGE_LIGHT);
+    let sun_light = chunk.get_sunlight(lx, ly, lz) as f32 / 15.0;
+    let light = sun_light.max(MIN_FOLIAGE_LIGHT);
     let bx = lx as f32;
     let by = ly as f32;
     let bz = lz as f32;
@@ -772,7 +792,8 @@ fn emit_foliage_cross(
     ];
     let tgt = &mut bundle.transparent;
     let base = tgt.vertices.len() as u32;
-    let packed_color = chunk.get_combined_light_color(lx, ly, lz);
+    let packed_color = (chunk.get_combined_light_color(lx, ly, lz) & 0x00FF_FFFF)
+        | ((chunk.get_torchlight(lx, ly, lz) as u32) << 24);
     for i in 0..8 {
         // Local tile-repeat UVs `[0, 1] × [0, 1]`; the shader applies
         // `fract()` per tile so neighbouring atlas tiles are never sampled.
@@ -1454,6 +1475,43 @@ mod tests {
                 (p[1] - 0.0).abs() < 1e-5 || (p[1] - 1.0).abs() < 1e-5,
                 "foliage vertex {:?} has tilted y (expected 0 or 1 exactly)",
                 p,
+            );
+        }
+    }
+
+    #[test]
+    fn torch_level_packed_into_light_color_alpha() {
+        // The lighting overhaul keeps `light` for sky/sun visibility and
+        // stores the block-light level in the alpha byte of `light_color`.
+        // That separation is what lets the shader darken unlit night scenes
+        // while torch-lit areas stay bright.
+        let reg = BlockRegistry::with_builtins();
+        let stone = reg.id_of("stone").unwrap();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0));
+        chunk.set(7, 7, 7, stone);
+        chunk.set_sunlight(7, 7, 7, 0);
+        chunk.set_torchlight(7, 7, 7, 12);
+        chunk.set_torchlight_color(7, 7, 7, 0xFF_A0_60_FF);
+
+        let bundle = ChunkMesher.build(
+            &chunk,
+            &reg,
+            air_sample,
+            air_water_sample,
+            air_loaded_sample,
+            Vec3::new(0.0, -1.0, 0.0),
+        );
+        assert!(!bundle.opaque.vertices.is_empty());
+        for v in &bundle.opaque.vertices {
+            assert_eq!(
+                (v.light_color >> 24) & 0xFF,
+                12,
+                "torch level must be packed into the light_color alpha byte"
+            );
+            assert!(
+                v.light <= 1.0,
+                "sky/sun visibility must stay in [0, 1], got {}",
+                v.light
             );
         }
     }

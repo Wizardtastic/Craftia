@@ -12,8 +12,13 @@ pub struct Hunger {
     pub food: f32,
     /// Saturation (0..food). Hidden buffer that decays before food.
     pub saturation: f32,
-    /// Exhaustion accumulator (0..4). Resets on reaching 4.
+    /// Exhaustion accumulator. Every 4 points consume one saturation (or
+    /// one food point when saturation is empty). Overflow is preserved.
     pub exhaustion: f32,
+    /// Seconds spent starving at food level 0. Used to apply vanilla's
+    /// one-damage-per-four-seconds cadence.
+    #[serde(default)]
+    pub starvation_timer: f32,
 }
 
 impl Default for Hunger {
@@ -22,6 +27,7 @@ impl Default for Hunger {
             food: 20.0,
             saturation: 5.0,
             exhaustion: 0.0,
+            starvation_timer: 0.0,
         }
     }
 }
@@ -33,23 +39,30 @@ impl Hunger {
             food: food.clamp(0.0, 20.0),
             saturation: saturation.clamp(0.0, food),
             exhaustion: 0.0,
+            starvation_timer: 0.0,
         }
     }
 
-    /// Add exhaustion from an action. When exhaustion reaches 4.0,
-    /// it triggers saturation/food decay.
+    /// Add exhaustion from an action. Vanilla accumulates exhaustion past 4
+    /// and spends it in whole points, so overflow is intentionally kept.
     pub fn add_exhaustion(&mut self, amount: f32) {
-        self.exhaustion = (self.exhaustion + amount).min(4.0);
+        self.exhaustion += amount.max(0.0);
     }
 
-    /// Tick the hunger system. Returns true if starvation damage should be dealt.
+    /// Tick the hunger system. Returns true while the player is starving.
     pub fn tick(&mut self) -> bool {
-        if self.exhaustion >= 4.0 {
+        // Every 4 exhaustion points consume one saturation point, then one
+        // food point once saturation is gone. Spend all accumulated points.
+        while self.exhaustion >= 4.0 {
             self.exhaustion -= 4.0;
             if self.saturation > 0.0 {
                 self.saturation = (self.saturation - 1.0).max(0.0);
             } else if self.food > 0.0 {
                 self.food = (self.food - 1.0).max(0.0);
+            } else {
+                // Nothing left to consume; stop accumulating hoarded debt.
+                self.exhaustion = 0.0;
+                break;
             }
         }
 
@@ -65,7 +78,7 @@ impl Hunger {
         self.saturation = (self.saturation + sat_restore).min(self.food);
     }
 
-    /// Whether the player can sprint (food > 6).
+    /// Whether the player can sprint (vanilla requires food > 6).
     pub fn can_sprint(&self) -> bool {
         self.food > 6.0
     }
@@ -80,23 +93,30 @@ impl Hunger {
         self.food = 20.0;
         self.saturation = 5.0;
         self.exhaustion = 0.0;
+        self.starvation_timer = 0.0;
     }
 }
 
-/// Exhaustion costs for various actions.
+/// Exhaustion costs, in vanilla points per action.
 pub mod exhaustion {
-    /// Per meter traveled while sprinting.
-    pub const SPRINT_PER_METER: f32 = 0.01;
-    /// Per jump.
+    /// Per block traveled while walking (0.01).
+    pub const WALK_PER_METER: f32 = 0.01;
+    /// Per block traveled while sprinting (0.1).
+    pub const SPRINT_PER_METER: f32 = 0.1;
+    /// Per jump (0.05).
     pub const JUMP: f32 = 0.05;
-    /// Per sprint-jump.
+    /// Per sprint-jump (0.2).
     pub const SPRINT_JUMP: f32 = 0.2;
-    /// Per block mined.
+    /// Per block broken (0.005).
     pub const MINE_BLOCK: f32 = 0.005;
-    /// Per half-heart of damage taken.
+    /// Per damage point taken (0.1).
     pub const DAMAGE_TAKEN: f32 = 0.1;
-    /// Per meter swum.
+    /// Per block swum (0.01).
     pub const SWIM_PER_METER: f32 = 0.01;
+    /// Per melee attack (0.1).
+    pub const ATTACK: f32 = 0.1;
+    /// Per health point regenerated (6.0).
+    pub const REGEN: f32 = 6.0;
 }
 
 /// Food properties for edible items.

@@ -50,6 +50,36 @@ pub(crate) fn load_shader_blobs() -> ShaderBlobs {
     }
 }
 
+/// Pick the offscreen scene colour format.
+///
+/// RGBA16F gives the lighting pipeline real HDR headroom: the sun disc, emissive
+/// tiles and direct sunlight can exceed 1.0 and are tone-mapped once in the post
+/// pass, instead of clipping in an 8-bit sRGB target. Falls back to the
+/// swapchain format on the (very rare) device that cannot blend into it.
+pub(crate) fn scene_color_format(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    fallback: vk::Format,
+) -> vk::Format {
+    let props = unsafe {
+        instance.get_physical_device_format_properties(
+            physical_device,
+            vk::Format::R16G16B16A16_SFLOAT,
+        )
+    };
+    let required = vk::FormatFeatureFlags::COLOR_ATTACHMENT
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE;
+    if props.optimal_tiling_features.contains(required) {
+        vk::Format::R16G16B16A16_SFLOAT
+    } else {
+        log::warn!(
+            "RGBA16F colour attachment unsupported; using swapchain format for the scene pass"
+        );
+        fallback
+    }
+}
+
 /// Resolve the requested MSAA sample count against what the physical device
 /// actually supports, clamping down to the next lower power of two.
 pub(crate) fn resolve_msaa_samples(

@@ -1226,7 +1226,7 @@ impl crate::EngineApp {
         // Show red vignette when recently damaged.
         if health.invulnerability_ticks > 0 {
             // Fade out over the invulnerability period.
-            let alpha = (health.invulnerability_ticks as f32 / 20.0 * 80.0) as u8;
+            let alpha = (health.invulnerability_ticks as f32 / 10.0 * 80.0) as u8;
             // Draw red overlay at screen edges.
             ui.quad(0.0, 0.0, w, h, [200, 0, 0, alpha]);
         }

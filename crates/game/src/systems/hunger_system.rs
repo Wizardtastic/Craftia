@@ -1,11 +1,13 @@
 //! Hunger system: exhaustion → saturation → food decay, starvation damage.
 //!
-//! This system runs each tick and:
-//! 1. Accumulates exhaustion from player actions
-//! 2. When exhaustion reaches 4, decays saturation then food
-//! 3. Deals starvation damage when food == 0
+//! Vanilla accounting:
+//! * Every 4 exhaustion points consume 1 saturation, then 1 food point.
+//! * Walking costs 0.01 per block, sprinting 0.1, swimming 0.01, jumping 0.05
+//!   (sprint-jumping 0.2), mining 0.005, taking damage 0.1 per point.
+//! * Sprinting is disabled at food ≤ 6 (enforced by the movement system).
+//! * Starvation deals 1 HP every 4 s (2 s on Hard); Easy stops at 10 HP.
 
-use voxel_combat::{DamageEvent, DamageQueue, DamageSource};
+use voxel_combat::{DamageEvent, DamageQueue, DamageSource, Health};
 use voxel_ecs::World;
 use voxel_gamemode::GameMode;
 use voxel_hunger::{exhaustion, Difficulty, Hunger};
@@ -21,7 +23,7 @@ pub struct DifficultyResource(pub Difficulty);
 pub struct GameTimeResource(pub f64);
 
 /// Hunger system entry point. Called each fixed timestep.
-pub fn hunger_system(world: &mut World, _dt: f32) {
+pub fn hunger_system(world: &mut World, dt: f32) {
     let player_entity = match world.resource::<PlayerEntity>().and_then(|p| p.0) {
         Some(e) => e,
         None => return,
@@ -42,7 +44,6 @@ pub fn hunger_system(world: &mut World, _dt: f32) {
         .map(|d| d.0)
         .unwrap_or(Difficulty::Normal);
 
-    // Get player state for movement tracking.
     let input = world
         .get::<PlayerInput>(player_entity)
         .copied()
@@ -56,61 +57,64 @@ pub fn hunger_system(world: &mut World, _dt: f32) {
         .copied()
         .unwrap_or_default();
 
-    // Get or create hunger component.
     let mut hunger = world
         .get::<Hunger>(player_entity)
         .copied()
         .unwrap_or_default();
 
-    // Accumulate exhaustion from movement.
-    if input.sprinting && state.on_ground {
-        // Sprint exhaustion per meter (approximate from velocity)
-        let speed = velocity.lin.length();
-        if speed > 0.1 {
-            hunger.add_exhaustion(exhaustion::SPRINT_PER_METER * speed * _dt);
-        }
-    }
+    // Distance travelled this step drives movement exhaustion.
+    let horizontal_speed = glam::Vec3::new(velocity.lin.x, 0.0, velocity.lin.z).length();
+    let distance = horizontal_speed * dt;
 
-    // Jump exhaustion
-    if input.jump && state.on_ground {
-        if input.sprinting {
-            hunger.add_exhaustion(exhaustion::SPRINT_JUMP);
-        } else {
-            hunger.add_exhaustion(exhaustion::JUMP);
-        }
-    }
-
-    // Swimming exhaustion
     if state.in_water {
-        let speed = velocity.lin.length();
-        if speed > 0.1 {
-            hunger.add_exhaustion(exhaustion::SWIM_PER_METER * speed * _dt);
-        }
+        hunger.add_exhaustion(exhaustion::SWIM_PER_METER * distance);
+    } else if state.on_ground && horizontal_speed > 0.05 {
+        let sprinting = input.sprinting && input.wish.z < -0.1 && hunger.can_sprint();
+        let rate = if sprinting {
+            exhaustion::SPRINT_PER_METER
+        } else {
+            exhaustion::WALK_PER_METER
+        };
+        hunger.add_exhaustion(rate * distance);
     }
 
-    // Tick hunger (exhaustion → saturation → food decay)
-    let should_starve = if difficulty.has_hunger_depletion() {
-        hunger.tick()
-    } else {
-        false
-    };
+    // Spend accumulated exhaustion. Peaceful never drains hunger.
+    if difficulty.has_hunger_depletion() {
+        hunger.tick();
+    }
 
-    // Sprint gating note: sprint is not force-disabled here because systems
-    // share the same `PlayerInput` component; `movement_system` consults
-    // `Hunger::can_sprint()` when computing its speed instead.
+    // --- starvation --------------------------------------------------------
+    if difficulty.has_starvation() && hunger.food <= 0.0 {
+        hunger.starvation_timer += dt;
+        let interval = if difficulty == Difficulty::Hard {
+            2.0
+        } else {
+            4.0
+        };
+        if hunger.starvation_timer >= interval {
+            hunger.starvation_timer = 0.0;
 
-    // Starvation damage: applied as a small per-tick amount (0.5 hearts per
-    // second at 20 tps), bypassing the 1-heart-per-4-seconds vanilla cadence.
-    if should_starve && difficulty.has_starvation() {
-        if let Some(dq) = world.resource_mut::<DamageQueue>() {
-            dq.push(
-                player_entity,
-                DamageEvent {
-                    source: DamageSource::Starvation,
-                    amount: 0.025, // 0.5 hearts per second / 20 ticks
-                },
-            );
+            let health = world
+                .get::<Health>(player_entity)
+                .copied()
+                .unwrap_or_default();
+            // Vanilla Easy difficulty stops starvation at 10 HP.
+            let may_damage = !health.dead
+                && (difficulty != Difficulty::Easy || health.current > 10.0);
+            if may_damage {
+                if let Some(dq) = world.resource_mut::<DamageQueue>() {
+                    dq.push(
+                        player_entity,
+                        DamageEvent {
+                            source: DamageSource::Starvation,
+                            amount: 1.0,
+                        },
+                    );
+                }
+            }
         }
+    } else {
+        hunger.starvation_timer = 0.0;
     }
 
     world.set(player_entity, hunger);

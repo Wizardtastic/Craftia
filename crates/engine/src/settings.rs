@@ -835,6 +835,8 @@ impl GameSettings {
 
             ssao_enabled: self.graphics.ssao_enabled,
 
+            shadow_enabled: self.graphics.shadow_enabled,
+
             // Phase-2 meshing implies Phase-1 rendering; auto-enable so a
             // `gpu_meshing`/`gpu_mesh_distance` config never silently no-ops.
             gpu_driven: self.graphics.gpu_driven || self.graphics.gpu_meshing,
@@ -1016,7 +1018,7 @@ mod tests {
 
         assert!((s.player.fly_speed - 50.0).abs() < f32::EPSILON);
 
-        assert!((s.player.sprint_speed - 5.6).abs() < f32::EPSILON); // default
+        assert!((s.player.sprint_speed - 5.612).abs() < f32::EPSILON); // vanilla default
     }
 
     #[test]
@@ -1106,7 +1108,7 @@ mod tests {
 
         assert!((pc.walk_speed - 4.317).abs() < f32::EPSILON);
 
-        assert!((pc.fly_speed - 20.0).abs() < f32::EPSILON);
+        assert!((pc.fly_speed - 10.92).abs() < f32::EPSILON);
     }
 
     #[test]

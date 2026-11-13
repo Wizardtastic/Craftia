@@ -1,10 +1,8 @@
 //! Item pickup system: handles picking up item entities.
 //!
-//! This system:
-//! 1. Checks for item entities near the player
-//! 2. If within vacuum range and pickup delay is 0, inserts the item into
-//!    the player's [`SurvivalInventory`]
-//! 3. If the inventory is full, the item stays on the ground
+//! Vanilla-like ranges: items within one block of the player are collected,
+//! and nearby stacks drift toward the player. The full stack count is
+//! inserted, and leftovers stay on the ground.
 
 use glam::Vec3;
 use voxel_ecs::{Entity, World};
@@ -16,10 +14,10 @@ use crate::item_entity::ItemEntity;
 /// Vacuum range in blocks (items within this range are attracted to the player).
 const VACUUM_RANGE: f32 = 1.5;
 /// Pickup range in blocks (items within this range are picked up).
-const PICKUP_RANGE: f32 = 0.8;
+const PICKUP_RANGE: f32 = 1.2;
 
 /// Item pickup system entry point. Called each fixed timestep.
-pub fn item_pickup_system(world: &mut World, _dt: f32) {
+pub fn item_pickup_system(world: &mut World, dt: f32) {
     let player_entity = match world.resource::<PlayerEntity>().and_then(|p| p.0) {
         Some(e) => e,
         None => return,
@@ -45,19 +43,18 @@ pub fn item_pickup_system(world: &mut World, _dt: f32) {
         result
     };
 
-    // Process each item.
     let mut to_pickup = Vec::new();
     let mut to_attract = Vec::new();
 
     for (entity, item, item_pos) in items {
         let distance = (item_pos - player_pos).length();
-
-        // Check if within pickup range and can be picked up.
-        if distance <= PICKUP_RANGE && item.can_pickup() {
-            to_pickup.push((entity, item));
+        if !item.can_pickup() {
+            continue;
         }
-        // Check if within vacuum range (attract towards player).
-        else if distance <= VACUUM_RANGE && item.can_pickup() {
+
+        if distance <= PICKUP_RANGE {
+            to_pickup.push((entity, item));
+        } else if distance <= VACUUM_RANGE {
             to_attract.push((entity, item_pos));
         }
     }
@@ -65,8 +62,8 @@ pub fn item_pickup_system(world: &mut World, _dt: f32) {
     // Attract items towards player.
     for (entity, item_pos) in to_attract {
         let direction = (player_pos - item_pos).normalize_or_zero();
-        let speed = 5.0; // Attraction speed.
-        let new_pos = item_pos + direction * speed * _dt;
+        let speed = 5.0;
+        let new_pos = item_pos + direction * speed * dt;
 
         if let Some(mut transform) = world.get::<Transform>(entity).copied() {
             transform.pos = new_pos;
@@ -76,20 +73,13 @@ pub fn item_pickup_system(world: &mut World, _dt: f32) {
 
     // Pick up items.
     for (entity, item) in to_pickup {
-        // Try to add to the player's inventory.
         if let Some(inventory) = world.get_mut::<SurvivalInventory>(player_entity) {
-            let block_id = item.block_id();
-            let stack = crate::items::ItemStack::single(block_id);
-
-            // Merge into an existing stack or take the first empty slot;
-            // if nothing fits, the item stays on the ground.
-            let remainder = inventory.insert(stack);
-            if remainder.is_some() {
+            let stack = crate::items::ItemStack::new(item.block_id(), item.count.max(1));
+            if inventory.insert(stack).is_some() {
+                // Inventory full: leave the item on the ground.
                 continue;
             }
         }
-
-        // Remove the item entity.
         world.despawn(entity);
     }
 }

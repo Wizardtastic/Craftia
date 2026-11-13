@@ -1,7 +1,8 @@
 #version 450
 
 // Entity fragment shader. Samples the texture atlas at the per-tile UV.
-// Identical to chunk.frag but without shadow mapping or water animation.
+// Uses the same physically-based sun/sky/torch lighting model as chunk.frag
+// (without shadow maps — entities are small and self-contained).
 
 const float ATLAS_TILES = 16.0;
 
@@ -20,8 +21,10 @@ layout(set = 0, binding = 0) uniform Camera {
 layout(set = 0, binding = 1) uniform sampler2D atlas;
 
 layout(set = 0, binding = 2) uniform Fog {
-    vec4 color_and_density;
-    vec4 ambient_and_sun;
+    vec4 color_and_density;   // rgb = fog colour
+    vec4 sun_color;           // rgb = direct sun radiance, a = visibility
+    vec4 sky_ambient;         // rgb = sky ambient irradiance, a = night factor
+    vec4 sun_dir_pad;         // xyz = sun direction
 } fog;
 
 void main() {
@@ -33,13 +36,14 @@ void main() {
         discard;
     }
 
-    float ambient = fog.ambient_and_sun.x;
-    vec3 lit = tex.rgb * frag_light * ambient;
-    // Same pure-multiplicative tint as chunk.frag (see comment there).
-    // Additive emissive term scales with `lit` so dark-textured entities
-    // don't falsely glow in torch color near a coloured light source.
-    vec3 emissive_contribution = lit * frag_light_color.rgb * (frag_light * 0.18);
-    vec3 tinted = lit * frag_light_color.rgb + emissive_contribution;
-    vec3 final_color = mix(tinted, fog.color_and_density.rgb, frag_fog);
+    // `frag_light` is sky visibility; torch level rides in the tint's alpha.
+    float sky_vis = clamp(frag_light, 0.0, 1.0);
+    float torch_level = frag_light_color.a;
+
+    vec3 lighting = (fog.sun_color.rgb * fog.sun_color.a + fog.sky_ambient.rgb) * sky_vis
+                  + frag_light_color.rgb * (torch_level * torch_level) * 2.4;
+    // Same sRGB → linear albedo conversion as chunk.frag.
+    vec3 albedo = pow(tex.rgb, vec3(2.2));
+    vec3 final_color = mix(albedo * lighting, fog.color_and_density.rgb, frag_fog);
     out_color = vec4(final_color, tex.a);
 }

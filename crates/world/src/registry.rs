@@ -1069,7 +1069,83 @@ impl BlockRegistry {
             },
         );
 
+        reg.apply_vanilla_block_properties();
         reg
+    }
+
+    /// Replace the placeholder builtin hardness/drop data with vanilla
+    /// Minecraft values. The mining system derives break times from hardness,
+    /// so these numbers are what make mining feel like vanilla: stone takes
+    /// 7.5 s by hand, dirt 0.75 s, a log 3 s, and ores 4.5 s.
+    ///
+    /// Tool *requirements* are only set where vanilla gates drops (stone and
+    /// ores need a pickaxe). Tool items are not part of the content set yet,
+    /// so the mining system still drops these blocks by hand; the requirement
+    /// metadata is already correct for when tools arrive.
+    fn apply_vanilla_block_properties(&mut self) {
+        // (name, hardness, required tool, drop)
+        // `Drop::SelfBlock` drops the block itself, `Drop::Named` another
+        // block, `Drop::None` drops nothing.
+        enum Drop {
+            SelfBlock,
+            Named(&'static str),
+            None,
+        }
+        use Drop::*;
+
+        let table: &[(&str, f32, ToolType, Drop)] = &[
+            ("stone", 1.5, ToolType::Pickaxe, Named("cobblestone")),
+            ("cobblestone", 2.0, ToolType::Pickaxe, SelfBlock),
+            ("mossy_cobblestone", 2.0, ToolType::Pickaxe, SelfBlock),
+            ("coal_ore", 3.0, ToolType::Pickaxe, SelfBlock),
+            ("iron_ore", 3.0, ToolType::Pickaxe, SelfBlock),
+            ("gold_ore", 3.0, ToolType::Pickaxe, SelfBlock),
+            ("diamond_ore", 3.0, ToolType::Pickaxe, SelfBlock),
+            ("dirt", 0.5, ToolType::None, SelfBlock),
+            ("grass", 0.6, ToolType::None, Named("dirt")),
+            ("sand", 0.5, ToolType::None, SelfBlock),
+            ("gravel", 0.6, ToolType::None, SelfBlock),
+            ("snow", 0.1, ToolType::None, SelfBlock),
+            ("wood", 2.0, ToolType::None, SelfBlock),
+            ("birch_log", 2.0, ToolType::None, SelfBlock),
+            ("spruce_log", 2.0, ToolType::None, SelfBlock),
+            ("planks", 2.0, ToolType::None, SelfBlock),
+            ("leaves", 0.2, ToolType::None, Drop::None),
+            ("birch_leaves", 0.2, ToolType::None, Drop::None),
+            ("spruce_leaves", 0.2, ToolType::None, Drop::None),
+            ("glass", 0.3, ToolType::None, Drop::None),
+            ("torch", 0.0, ToolType::None, SelfBlock),
+            ("tall_grass", 0.0, ToolType::None, Drop::None),
+            ("poppy", 0.0, ToolType::None, SelfBlock),
+            ("dandelion", 0.0, ToolType::None, SelfBlock),
+            ("mushroom_red", 0.0, ToolType::None, SelfBlock),
+            ("mushroom_brown", 0.0, ToolType::None, SelfBlock),
+            ("cactus", 0.4, ToolType::None, SelfBlock),
+            ("chest", 2.5, ToolType::None, SelfBlock),
+            ("bedrock", -1.0, ToolType::None, Drop::None),
+        ];
+
+        for (name, hardness, tool, drop) in table {
+            let Some(id) = self.by_name.get(*name).copied() else {
+                continue;
+            };
+            let def = &mut self.defs[id.0 as usize];
+            def.hardness = *hardness;
+            def.required_tool = *tool;
+            def.required_tier = 0;
+            def.drops = match drop {
+                Drop::SelfBlock => vec![BlockDrop::self_drop()],
+                Drop::Named(target) => self
+                    .by_name
+                    .get(*target)
+                    .copied()
+                    .map(|item| vec![BlockDrop::simple(item)])
+                    .unwrap_or_default(),
+                Drop::None => Vec::new(),
+            };
+            // Resolve self-drops now that the final registry ID exists.
+            Self::resolve_self_drops(def);
+        }
     }
 
     /// Build a registry from asset-loaded block definitions.
@@ -1190,6 +1266,10 @@ impl BlockRegistry {
                 },
             );
         }
+        // JSON assets only carry visual/geometry data. Apply the vanilla
+        // hardness and drop tables by block name so the asset path behaves
+        // exactly like the builtin registry.
+        reg.apply_vanilla_block_properties();
         log::info!("built registry with {} blocks from assets", reg.defs.len());
         reg
     }
@@ -1521,6 +1601,47 @@ mod tests {
         let reg = BlockRegistry::with_builtins();
         let stone = reg.id_of("stone").unwrap();
         assert!(reg.get(stone).is_rendered());
+    }
+
+    #[test]
+    fn asset_registry_applies_vanilla_hardness_and_drops() {
+        fn asset_block(name: &str) -> voxel_assets::BlockData {
+            voxel_assets::BlockData {
+                name: name.to_string(),
+                kind: "solid".to_string(),
+                solid: true,
+                opaque: true,
+                breakable: true,
+                replaceable: false,
+                textures: voxel_assets::BlockTexturesData::Same { same: 1 },
+                emission: 0,
+                emission_color: None,
+                light_absorption: 15,
+                map_color: None,
+                hardness: None,
+                blast_resistance: None,
+                required_tool: None,
+                required_tier: None,
+            }
+        }
+
+        let blocks = vec![
+            asset_block("stone"),
+            asset_block("cobblestone"),
+            asset_block("glass"),
+        ];
+        let reg = BlockRegistry::from_assets(&blocks);
+        let stone = reg.id_of("stone").unwrap();
+        let cobble = reg.id_of("cobblestone").unwrap();
+        let glass = reg.id_of("glass").unwrap();
+
+        assert_eq!(reg.get(stone).hardness, 1.5);
+        assert_eq!(reg.get(stone).required_tool, ToolType::Pickaxe);
+        assert_eq!(reg.get(stone).drops.len(), 1);
+        assert_eq!(reg.get(stone).drops[0].item, cobble);
+
+        assert_eq!(reg.get(glass).hardness, 0.3);
+        assert!(reg.get(glass).drops.is_empty());
     }
 
     #[test]

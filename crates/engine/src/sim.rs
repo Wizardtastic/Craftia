@@ -63,6 +63,7 @@ use voxel_game::{
     Experience,
     GameMode,
     GameTimeResource,
+    HazardTimers,
     // Survival mode components
     Health,
     HeldBlock,
@@ -70,6 +71,7 @@ use voxel_game::{
     InputResource,
     InputSnapshot,
     Mesh,
+    MinedBlocks,
     MiningProgress,
     ModelRef,
     Parent,
@@ -189,6 +191,7 @@ impl Simulation {
         ecs_world.register_debug_formatter::<EatingState>();
         ecs_world.register_debug_formatter::<Experience>();
         ecs_world.register_debug_formatter::<DrowningState>();
+        ecs_world.register_debug_formatter::<HazardTimers>();
         ecs_world.insert_resource(AnimationDataResource::default());
         ecs_world.insert_resource(ViewMode::default());
 
@@ -197,6 +200,7 @@ impl Simulation {
         ecs_world.insert_resource(DifficultyResource::default());
         ecs_world.insert_resource(GameTimeResource::default());
         ecs_world.insert_resource(PlayerLookTarget::default());
+        ecs_world.insert_resource(MinedBlocks::default());
 
         // Spawn the player with the full component set the gameplay
         // systems expect.
@@ -208,7 +212,11 @@ impl Simulation {
             Velocity::default(),
             Aabb::default(),
             PlayerInput::default(),
-            PlayerState::default(),
+            PlayerState {
+                eye_offset: voxel_game::EYE_HEIGHT,
+                prev_eye_pos: spawn_pos + Vec3::new(0.0, voxel_game::EYE_HEIGHT, 0.0),
+                ..Default::default()
+            },
             CameraOwner,
             HeldBlock::default(),
         ));
@@ -222,6 +230,7 @@ impl Simulation {
         ecs_world.set(player_entity, EatingState::default());
         ecs_world.set(player_entity, Experience::default());
         ecs_world.set(player_entity, DrowningState::default());
+        ecs_world.set(player_entity, HazardTimers::default());
         // The consolidated inventory lives on the player entity; populate the
         // default creative palette so the hotbar starts non-empty.
         let mut inventory = SurvivalInventory::new();
@@ -244,12 +253,18 @@ impl Simulation {
                 "EnvironmentalDamageSystem",
                 environmental_damage_system,
             ))
+            // Armor must reduce pending damage before the health system
+            // drains the queue.
+            .add_system(FnSystem::new("ArmorSystem", armor_system))
             .add_system(FnSystem::new("HealthSystem", health_system))
             .add_system(FnSystem::new("RegenerationSystem", regeneration_system))
-            .add_system(FnSystem::new("ArmorSystem", armor_system))
             .add_system(FnSystem::new(
                 "ProgressiveMiningSystem",
                 progressive_mining_system,
+            ))
+            .add_system(FnSystem::new(
+                "ItemEntitySystem",
+                voxel_game::item_entity::item_entity_system,
             ))
             .add_system(FnSystem::new("ItemPickupSystem", item_pickup_system))
             .add_system(FnSystem::new("XpCollectionSystem", xp_collection_system))

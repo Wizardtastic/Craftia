@@ -147,6 +147,17 @@ impl TestSim {
         }
     }
 
+    /// Advance by `frames` display frames of `frame_dt` seconds through the
+    /// normal accumulator. Used to verify behaviour does not depend on the
+    /// refresh rate.
+    pub fn tick_frame(&mut self, frame_dt: f64, frames: u32) {
+        for _ in 0..frames.min(TICK_CAP) {
+            let snap = build_snapshot(&self.held, self.sim.player_flying());
+            self.sim.set_player_input(snap);
+            self.sim.tick_fixed(frame_dt);
+        }
+    }
+
     // -----------------------------------------------------------------
     // Player state accessors
     // -----------------------------------------------------------------

@@ -121,6 +121,11 @@ pub struct RendererConfig {
     pub occlusion_culling: bool,
     /// Enable screen-space ambient occlusion (SSAO). Requires MSAA disabled.
     pub ssao_enabled: bool,
+
+    /// Evaluate cascaded shadow maps in the chunk shader (baked into the
+    /// `SHADOW_ENABLED` specialization constant). The engine still skips
+    /// uploading shadow data when this is false.
+    pub shadow_enabled: bool,
     /// Enable the Phase-1 GPU-driven chunk rendering pipeline: indirect
     /// multi-draw + compute-shader frustum culling + bindless origins SSBO.
     /// When `true`, the per-chunk `vkCmdDrawIndexed` loop is replaced by one
@@ -149,6 +154,7 @@ impl Default for RendererConfig {
             msaa_samples: 4,
             occlusion_culling: true,
             ssao_enabled: true,
+            shadow_enabled: true,
             gpu_driven: false,
             gpu_meshing: false,
         }
@@ -349,6 +355,10 @@ pub struct Renderer {
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
     swapchain_format: vk::Format,
+    /// Format of the offscreen scene target (RGBA16F when supported). The main
+    /// pass writes linear HDR here; the post pass applies exposure + ACES and
+    /// writes sRGB to the swapchain.
+    scene_color_format: vk::Format,
     swapchain_extent: vk::Extent2D,
     /// The window's current physical size in pixels. Used as the swapchain
     /// extent fallback when the surface reports `current_extent` as
@@ -600,11 +610,14 @@ pub struct Renderer {
     /// Set when the window was resized; swapchain is recreated next draw.
     needs_resize: bool,
     frame_counter: usize,
-    /// Dynamic sky params set by the engine each frame for day/night.
-    sky_horizon: [f32; 3],
-    sky_zenith: [f32; 3],
+    /// Dynamic lighting params set by the engine each frame for the
+    /// physically-based day/night cycle.
     sky_fog: [f32; 3],
-    sky_ambient: f32,
+    sky_ambient_color: [f32; 3],
+    sun_color: [f32; 3],
+    sun_visibility: f32,
+    night_factor: f32,
+    game_time: f32,
     sky_underwater: bool,
     sun_dir: [f32; 3],
     /// Metadata about loaded texture packs (for engine UI).
@@ -820,7 +833,9 @@ impl Renderer {
                     config.fog_color[2],
                     1.0,
                 ],
-                ambient_and_sun: [1.0, 0.0, 1.0, 0.0], // full daylight, sun straight up
+                sun_color: [1.0, 0.97, 0.92, 1.0],
+                sky_ambient: [0.34, 0.44, 0.62, 0.0],
+                sun_dir_pad: [0.0, 1.0, 0.0, 0.0],
             };
             let slice = fog_ubo.mapped_slice_mut()?;
             let bytes: &[u8] = bytemuck::bytes_of(&fog);
@@ -865,6 +880,10 @@ impl Renderer {
         let swapchain_image_views =
             swapchain::create_image_views(&device, &swapchain_images, swapchain_format)?;
 
+        // HDR scene target for the lighting pipeline.
+        let scene_color_format =
+            init::scene_color_format(&instance, physical_device, swapchain_format);
+
         let depth_format = device::find_depth_format(&instance, physical_device);
 
         // Resolve the requested MSAA sample count against what the device supports.
@@ -885,7 +904,7 @@ impl Renderer {
 
         let render_pass = pipeline::create_render_pass(
             &device,
-            swapchain_format,
+            scene_color_format,
             depth_format,
             msaa_samples,
             depth_resolve_mode,
@@ -897,7 +916,7 @@ impl Renderer {
         // attachment).
         let transparent_render_pass = pipeline::create_transparent_render_pass(
             &device,
-            swapchain_format,
+            scene_color_format,
             depth_format,
             vk::SampleCountFlags::TYPE_1,
         )?;
@@ -917,6 +936,7 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples,
                 depth_write: true,
+                shadow_enabled: config.shadow_enabled,
             },
         )?;
         let wireframe_pipeline = pipeline::create_graphics_pipeline(
@@ -930,6 +950,7 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples,
                 depth_write: true,
+                shadow_enabled: config.shadow_enabled,
             },
         )?;
         // The transparent pipeline is created against the TRANSPARENT render
@@ -955,6 +976,7 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples: vk::SampleCountFlags::TYPE_1,
                 depth_write: false,
+                shadow_enabled: config.shadow_enabled,
             },
         )?;
 
@@ -977,7 +999,7 @@ impl Renderer {
                 &device,
                 &alloc,
                 swapchain_extent,
-                swapchain_format,
+                scene_color_format,
                 msaa_samples,
                 "msaa_color",
             )?;
@@ -1030,7 +1052,7 @@ impl Renderer {
                 &device,
                 &alloc,
                 swapchain_extent,
-                swapchain_format,
+                scene_color_format,
                 "offscreen",
             )?;
             let cmd_init = begin_one_time(&device, command_pool)?;
@@ -1119,11 +1141,13 @@ impl Renderer {
             .collect::<Result<Vec<_>>>()?;
         let shadow_sampler = unsafe {
             device.create_sampler(
+                // Plain (non-compare) sampler: the chunk fragment shader does
+                // its own depth compare so it can run a multi-tap Poisson
+                // kernel instead of the hardware's single compare fetch.
                 &vk::SamplerCreateInfo::default()
-                    .compare_enable(true)
-                    .compare_op(vk::CompareOp::LESS_OR_EQUAL)
-                    .mag_filter(vk::Filter::LINEAR)
-                    .min_filter(vk::Filter::LINEAR)
+                    .compare_enable(false)
+                    .mag_filter(vk::Filter::NEAREST)
+                    .min_filter(vk::Filter::NEAREST)
                     .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
                     .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER)
                     .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER)
@@ -1180,7 +1204,7 @@ impl Renderer {
             &device,
             &alloc,
             swapchain_extent,
-            swapchain_format,
+            scene_color_format,
             "scene_opaque_color",
         )?;
         let scene_opaque_sampler = unsafe {
@@ -1935,6 +1959,7 @@ impl Renderer {
                     chunk_set_layout: descriptor_set_layout,
                     msaa_samples,
                     gpu_meshing: config.gpu_meshing,
+                    shadow_enabled: config.shadow_enabled,
                     hiz_view: h.sampled_view(),
                     hiz_sampler: h.sampler(),
                     hiz_params: h.params(),
@@ -1966,6 +1991,7 @@ impl Renderer {
             swapchain_images,
             swapchain_image_views,
             swapchain_format,
+            scene_color_format,
             swapchain_extent,
             window_size,
             depth: Some(depth),
@@ -2099,10 +2125,12 @@ impl Renderer {
             chunk_record_cpu_ms: 0.0,
             needs_resize: false,
             frame_counter: 0,
-            sky_horizon: [0.52, 0.72, 0.95],
-            sky_zenith: [0.35, 0.55, 0.90],
             sky_fog: [0.62, 0.80, 0.96],
-            sky_ambient: 1.0,
+            sky_ambient_color: [0.34, 0.44, 0.62],
+            sun_color: [1.0, 0.97, 0.92],
+            sun_visibility: 1.0,
+            night_factor: 0.0,
+            game_time: 0.0,
             sky_underwater: false,
             sun_dir: [0.0, 1.0, 0.0],
             pending_destruction: Vec::new(),
@@ -2381,6 +2409,7 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: self.msaa_samples,
                 depth_write: true,
+                shadow_enabled: self.config.shadow_enabled,
             },
         )?;
         self.wireframe_pipeline = pipeline::create_graphics_pipeline(
@@ -2394,6 +2423,7 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: self.msaa_samples,
                 depth_write: true,
+                shadow_enabled: self.config.shadow_enabled,
             },
         )?;
         self.transparent_pipeline = pipeline::create_graphics_pipeline(
@@ -2407,6 +2437,7 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: vk::SampleCountFlags::TYPE_1,
                 depth_write: false,
+                shadow_enabled: self.config.shadow_enabled,
             },
         )?;
         Ok(())
@@ -2559,39 +2590,49 @@ impl Renderer {
         Ok(())
     }
 
-    /// Set dynamic sky parameters for the day/night cycle. Called each frame
-    /// by the engine. Updates the fog UBO's colour + ambient brightness, and
-    /// the clear colour used for the sky.
-    pub fn set_sky(
+    /// Set the dynamic lighting state for the day/night cycle. Called each
+    /// frame by the engine.
+    ///
+    /// * `sun_dir` — direction *towards* the sun (normalised).
+    /// * `sun_color` — direct sun radiance in linear HDR units; goes to zero
+    ///   as the sun sets, which is what makes night genuinely dark.
+    /// * `sun_visibility` — smooth 0..1 term used to gate direct sun, shadow
+    ///   rays and the sky shader's sun disc.
+    /// * `sky_ambient` — hemispherical sky irradiance (blue by day, deep
+    ///   navy by night).
+    /// * `fog_color` — horizon/fog colour, also used for the clear colour.
+    /// * `night` — 0 at day, 1 at night (drives stars/moon and the ambient
+    ///   luminance floor).
+    /// * `time` — game time in seconds, for star twinkle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_lighting(
         &mut self,
-        horizon: [f32; 3],
-        zenith: [f32; 3],
-        fog: [f32; 3],
-        ambient: f32,
+        sun_dir: [f32; 3],
+        sun_color: [f32; 3],
+        sun_visibility: f32,
+        sky_ambient: [f32; 3],
+        fog_color: [f32; 3],
+        night: f32,
+        time: f32,
         underwater: bool,
     ) {
-        self.sky_horizon = horizon;
-        self.sky_zenith = zenith;
-        self.sky_fog = fog;
-        self.sky_ambient = ambient;
+        self.sun_dir = sun_dir;
+        self.sun_color = sun_color;
+        self.sun_visibility = sun_visibility.clamp(0.0, 1.0);
+        self.sky_ambient_color = sky_ambient;
+        self.sky_fog = fog_color;
+        self.night_factor = night.clamp(0.0, 1.0);
+        self.game_time = time;
         self.sky_underwater = underwater;
 
-        // Update the clear colour to match the horizon sky colour, dimmed by ambient.
+        // The sky pass paints the whole background, so the clear colour is
+        // only visible for a frame after a resize. Keep it in the same
+        // colour family as the fog to avoid a flash.
         if underwater {
             self.config.clear_color = [0.01, 0.05, 0.15, 1.0];
         } else {
-            self.config.clear_color = [
-                horizon[0] * ambient.max(0.05),
-                horizon[1] * ambient.max(0.05),
-                horizon[2] * ambient.max(0.05),
-                1.0,
-            ];
+            self.config.clear_color = [fog_color[0], fog_color[1], fog_color[2], 1.0];
         }
-    }
-
-    /// Set the sun direction explicitly (called by the engine with the day params).
-    pub fn set_sun_dir(&mut self, dir: [f32; 3]) {
-        self.sun_dir = dir;
     }
 
     /// Set cascaded shadow map data (4 light-space VP matrices + cascade splits).
@@ -2606,6 +2647,96 @@ impl Renderer {
             cascade_splits,
             light_dir_and_bias,
         };
+    }
+
+    /// Diagnostic: read back a 64x64 window from the centre of shadow
+    /// cascade 0 and report (min, max, mean) depth. `1.0` everywhere means the
+    /// shadow pass wrote nothing; a spread of values means casters are present.
+    pub fn debug_shadow_map_dump(&self) -> Result<Vec<f32>> {
+        let extent = 2048u32;
+        let sample = extent;
+        let size = (sample * sample * 4) as vk::DeviceSize;
+        let buffer = GpuBuffer::host_visible(
+            &self.device,
+            &self.alloc,
+            size,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            "shadow_debug_readback",
+        )?;
+        let cmd = begin_one_time(&self.device, self.command_pool)?;
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.shadow_image.image)
+            .subresource_range(range);
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer],
+            );
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                        .mip_level(0)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D {
+                    width: sample,
+                    height: sample,
+                    depth: 1,
+                });
+            self.device.cmd_copy_image_to_buffer(
+                cmd,
+                self.shadow_image.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer.buffer,
+                &[region],
+            );
+            let to_sample = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(self.shadow_image.image)
+                .subresource_range(range);
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_sample],
+            );
+        }
+        end_and_submit(&self.device, self.command_pool, self.graphics_queue, cmd)?;
+        let mut buffer = buffer;
+        let bytes = buffer.mapped_slice_mut()?;
+        let values: &[f32] = bytemuck::cast_slice(&bytes[..(sample * sample * 4) as usize]);
+        Ok(values.to_vec())
     }
 
     /// Set post-processing parameters (exposure, vignette strength, time, underwater).
@@ -2627,6 +2758,14 @@ impl Renderer {
     /// concerns. The actual GPU upload happens in `flush_pending_ubos` so
     /// callers can drop their reference to the table immediately.
     pub fn set_tile_material_table(&mut self, table: MaterialTable) {
+        // In the steady state the engine rebuilds an identical table every
+        // frame. Compare before marking dirty so we skip the mapped-memory
+        // write + flush (and the `vmaFlushAllocation` behind it) entirely.
+        if !self.material_table_dirty
+            && bytemuck::bytes_of(&self.pending_material_table) == bytemuck::bytes_of(&table)
+        {
+            return;
+        }
         self.pending_material_table = table;
         self.material_table_dirty = true;
     }
@@ -2661,15 +2800,28 @@ impl Renderer {
             self.material_table_dirty = false;
         }
 
-        // Fog UBO
-        let (fog_color, ambient_val) = if self.sky_underwater {
-            ([0.05, 0.15, 0.35], self.sky_ambient * 0.6)
+        // Fog UBO. Underwater keeps a blue-tinted fog/ambient so submerged
+        // shots read as water rather than murky daylight.
+        let (fog_color, ambient_color) = if self.sky_underwater {
+            ([0.05, 0.15, 0.35], [0.06, 0.14, 0.22])
         } else {
-            (self.sky_fog, self.sky_ambient)
+            (self.sky_fog, self.sky_ambient_color)
         };
         let fog_data = FogUbo {
             color_and_density: [fog_color[0], fog_color[1], fog_color[2], 1.0],
-            ambient_and_sun: [ambient_val, 0.0, 1.0, 0.0],
+            sun_color: [
+                self.sun_color[0],
+                self.sun_color[1],
+                self.sun_color[2],
+                self.sun_visibility,
+            ],
+            sky_ambient: [
+                ambient_color[0],
+                ambient_color[1],
+                ambient_color[2],
+                self.night_factor,
+            ],
+            sun_dir_pad: [self.sun_dir[0], self.sun_dir[1], self.sun_dir[2], 0.0],
         };
         if let Ok(slice) = self.fog_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&fog_data);
@@ -2681,19 +2833,25 @@ impl Renderer {
 
         // Sky UBO
         let data = SkyUbo {
-            horizon: [
-                self.sky_horizon[0],
-                self.sky_horizon[1],
-                self.sky_horizon[2],
+            sun_dir_vis: [
+                self.sun_dir[0],
+                self.sun_dir[1],
+                self.sun_dir[2],
+                self.sun_visibility,
+            ],
+            sun_color: [
+                self.sun_color[0],
+                self.sun_color[1],
+                self.sun_color[2],
                 1.0,
             ],
-            zenith: [
-                self.sky_zenith[0],
-                self.sky_zenith[1],
-                self.sky_zenith[2],
-                1.0,
+            sky_ambient: [
+                self.sky_ambient_color[0],
+                self.sky_ambient_color[1],
+                self.sky_ambient_color[2],
+                self.night_factor,
             ],
-            sun_dir: [self.sun_dir[0], self.sun_dir[1], self.sun_dir[2], 0.0],
+            fog_time: [self.sky_fog[0], self.sky_fog[1], self.sky_fog[2], self.game_time],
         };
         if let Ok(slice) = self.sky_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&data);
@@ -2709,15 +2867,15 @@ impl Renderer {
         // `set_proj_params` each frame by the engine).
         let refl_data = pipeline::ReflectionUbo {
             sky_horizon: [
-                self.sky_horizon[0],
-                self.sky_horizon[1],
-                self.sky_horizon[2],
+                self.sky_fog[0],
+                self.sky_fog[1],
+                self.sky_fog[2],
                 1.0,
             ],
             sky_zenith: [
-                self.sky_zenith[0],
-                self.sky_zenith[1],
-                self.sky_zenith[2],
+                self.sky_ambient_color[0] * 1.15,
+                self.sky_ambient_color[1] * 1.15,
+                self.sky_ambient_color[2] * 1.15,
                 1.0,
             ],
             sun_dir_str: [
@@ -4617,6 +4775,40 @@ impl Renderer {
         }
         drop(chunks);
 
+        // Make the depth writes visible to the chunk fragment shader that
+        // samples the map this frame. The render pass's final layout keeps
+        // the image SHADER_READ_ONLY_OPTIMAL, but the layout transition alone
+        // does not publish the LATE_FRAGMENT_TESTS writes to FRAGMENT_SHADER:
+        // without this barrier the sampler reads stale (usually zero) depth
+        // and every fragment comes out shadowed.
+        let read_barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.shadow_image.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(4),
+            );
+        unsafe {
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[read_barrier],
+            );
+        }
+
         if let Some(q) = shadow_end_timestamp_query {
             unsafe {
                 device.cmd_write_timestamp(
@@ -5171,7 +5363,7 @@ impl Renderer {
                 &self.device,
                 &self.alloc,
                 swapchain_extent,
-                swapchain_format,
+                self.scene_color_format,
                 self.msaa_samples,
                 "msaa_color",
             )?);
@@ -5191,7 +5383,7 @@ impl Renderer {
                 &self.device,
                 &self.alloc,
                 swapchain_extent,
-                self.swapchain_format,
+                self.scene_color_format,
                 "offscreen",
             )?;
             let cmd_init = begin_one_time(&self.device, self.command_pool)?;
@@ -5257,7 +5449,7 @@ impl Renderer {
             &self.device,
             &self.alloc,
             swapchain_extent,
-            self.swapchain_format,
+            self.scene_color_format,
             "scene_opaque_color",
         )?;
         let scene_opaque_depth = GpuImage::scene_opaque_depth(
