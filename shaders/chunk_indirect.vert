@@ -22,6 +22,7 @@ layout(location = 2) out float frag_fog;
 layout(location = 3) out vec3 frag_world_pos;
 layout(location = 4) flat out uint frag_tile;
 layout(location = 5) flat out vec4 frag_light_color;
+layout(location = 6) flat out float frag_sun;
 
 layout(push_constant) uniform Push {
     mat4 view_proj;     // offset 0  (64 bytes)
@@ -48,7 +49,10 @@ void main() {
     gl_Position = push.view_proj * vec4(world, 1.0);
     frag_uv = in_uv;
     frag_light = in_light;
-    frag_tile = in_tile;
+    // Unpack the mesher's per-quad words: low byte = atlas tile index,
+    // second byte = ray-traced sun visibility (0 = shadowed, 255 = lit).
+    frag_tile = in_tile & 0xFFu;
+    frag_sun = float((in_tile >> 8u) & 0xFu) / 15.0;
     frag_world_pos = world;
     frag_light_color = in_light_color;
 

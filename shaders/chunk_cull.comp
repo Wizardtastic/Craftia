@@ -11,10 +11,11 @@
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform CullUbo {
-    mat4 view_proj;     // world -> clip (column-major, same as the vertex shader)
-    vec4 cam_pos;       // xyz = camera position, w unused
-    vec4 lod_dist;      // xyz = LOD switch distances, w = LOD count
-    vec4 hiz;           // xy = pyramid mip-0 size, z = mip count, w = depth bias
+    mat4 view_proj;      // current frame: frustum culling only
+    mat4 prev_view_proj; // previous frame: matches the depth pyramid
+    vec4 cam_pos;        // xyz = camera position, w unused
+    vec4 lod_dist;       // xyz = LOD switch distances, w = LOD count
+    vec4 hiz;            // xy = pyramid mip-0 size, z = mip count, w = depth bias
 };
 
 struct DrawCmd {
@@ -66,31 +67,52 @@ bool occluded_by_hiz(Aabb box) {
     if (hiz.z < 1.0) return false; // Hi-Z disabled (no pyramid)
     vec3 mn = box.mn.xyz;
     vec3 mx = box.mx.xyz;
-    vec2 s_min = vec2(1e30);
-    vec2 s_max = vec2(-1e30);
-    float z_max = -1e30; // Vulkan NDC z in [0,1]: 0 = near, 1 = far
+    vec2 uv_min = vec2(1e30);
+    vec2 uv_max = vec2(-1e30);
+    float z_min = 1e30; // Vulkan NDC z in [0,1]: 0 = near, 1 = far
     for (int c = 0; c < 8; c++) {
         vec3 corner = vec3(
             (c & 1) != 0 ? mx.x : mn.x,
             (c & 2) != 0 ? mx.y : mn.y,
             (c & 4) != 0 ? mx.z : mn.z
         );
-        vec4 clip = view_proj * vec4(corner, 1.0);
+        // The pyramid was built with the PREVIOUS frame's camera. Testing
+        // current-frame chunk corners against it is wrong as soon as the
+        // camera moves: a visible chunk can land on an unrelated occluder.
+        vec4 clip = prev_view_proj * vec4(corner, 1.0);
         if (clip.w <= 0.0) return false; // crosses the near plane -> visible
         vec3 ndc = clip.xyz / clip.w;
-        s_min = min(s_min, ndc.xy);
-        s_max = max(s_max, ndc.xy);
-        z_max = max(z_max, ndc.z);
+        // A chunk that was not fully on screen last frame has no usable
+        // depth history; keep it rather than sampling clamped border texels.
+        if (any(lessThan(ndc.xy, vec2(-1.0))) || any(greaterThan(ndc.xy, vec2(1.0)))) {
+            return false;
+        }
+        vec2 uv = ndc.xy * 0.5 + 0.5;
+        uv_min = min(uv_min, uv);
+        uv_max = max(uv_max, uv);
+        z_min = min(z_min, ndc.z);
     }
-    vec2 uv_min = clamp(s_min * 0.5 + 0.5, 0.0, 1.0);
-    vec2 uv_max = clamp(s_max * 0.5 + 0.5, 0.0, 1.0);
     // Rect size in pyramid mip-0 texels (mip 0 is half framebuffer res).
     vec2 size_px = (uv_max - uv_min) * hiz.xy;
     float rect_max = max(size_px.x, size_px.y);
     if (rect_max <= 1.0) return false; // sub-texel / degenerate -> visible
-    float mip = clamp(ceil(log2(rect_max)), 0.0, max(hiz.z - 1.0, 0.0));
-    float occluder = textureLod(depth_pyramid, (uv_min + uv_max) * 0.5, mip).x;
-    return z_max > occluder + hiz.w;
+    int mip = int(clamp(ceil(log2(rect_max)), 0.0, max(hiz.z - 1.0, 0.0)));
+    // The pyramid stores MAX depth (the farthest scene point in the tile).
+    // A chunk is occluded only when even its NEAREST corner is farther than
+    // that farthest scene depth. Take the max over a 3x3 texel neighbourhood:
+    // one texel at the rect centre can miss the piece of sky or terrain that
+    // covers the rest of the chunk's screen footprint, which would cull a
+    // partially visible chunk.
+    ivec2 mip_size = textureSize(depth_pyramid, mip);
+    ivec2 center = ivec2((uv_min + uv_max) * 0.5 * vec2(mip_size));
+    float occluder = 0.0;
+    for (int oy = -1; oy <= 1; oy++) {
+        for (int ox = -1; ox <= 1; ox++) {
+            ivec2 t = clamp(center + ivec2(ox, oy), ivec2(0), mip_size - ivec2(1));
+            occluder = max(occluder, texelFetch(depth_pyramid, t, mip).x);
+        }
+    }
+    return z_min > occluder + hiz.w;
 }
 
 // Conservative AABB-vs-frustum test (the "p-vertex" test). A box is culled only
@@ -126,8 +148,8 @@ void main() {
     }
 
     // Hi-Z occlusion test: cull chunks fully hidden behind the previous
-    // frame's depth. Conservative-ish: a chunk is culled only when its
-    // FARTHEST corner is behind the NEAREST occluder sampled from the pyramid
+    // frame's depth. Conservative: a chunk is culled only when its NEAREST
+    // corner is behind the farthest occluder sampled from the MAX pyramid
     // (plus a bias), so a chunk that even partially pokes out is kept.
     if (occluded_by_hiz(box)) {
         cmds[i].instanceCount = 0u;

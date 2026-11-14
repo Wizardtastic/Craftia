@@ -36,8 +36,10 @@ pub fn update_camera_from_transform(
 
     // Compute bob offset (figure-8 pattern: up/down + slight left/right).
     // Vanilla view bobbing is roughly 5cm at the extreme; use a slightly
-    // gentler 3cm so it reads the same without becoming distracting.
-    let bob_amp = 0.03;
+    // gentler 3cm so it reads the same without becoming distracting. The
+    // envelope fades to zero on a stop, so the offset shrinks smoothly along
+    // the current sine instead of vibrating through a decaying phase.
+    let bob_amp = 0.03 * state.bob_amplitude.clamp(0.0, 1.0);
     let y_bob = state.bob_phase.sin() * bob_amp;
     let x_bob = (state.bob_phase * 2.0 + std::f32::consts::PI).sin() * bob_amp * 0.3;
 

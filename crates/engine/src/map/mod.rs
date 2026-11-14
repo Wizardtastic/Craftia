@@ -90,9 +90,9 @@ impl Default for MapState {
 impl MapState {
     /// Check if the player has moved far enough to need a rebuild.
     pub fn check_dirty(&mut self, player_x: i32, player_z: i32) {
-        let dx = (player_x - self.last_player_x).abs();
-        let dz = (player_z - self.last_player_z).abs();
-        let threshold = self.blocks_per_pixel.max(4) as i32;
+        let dx = (i64::from(player_x) - i64::from(self.last_player_x)).abs();
+        let dz = (i64::from(player_z) - i64::from(self.last_player_z)).abs();
+        let threshold = i64::from(self.blocks_per_pixel.max(4));
         if dx > threshold || dz > threshold {
             self.center_x = player_x;
             self.center_z = player_z;

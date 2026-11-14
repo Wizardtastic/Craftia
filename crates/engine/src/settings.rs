@@ -69,12 +69,7 @@ pub struct GraphicsSettings {
     /// Enable screen-space ambient occlusion (SSAO).
     pub ssao_enabled: bool,
 
-    /// Enable the Phase-1 GPU-driven chunk rendering pipeline (indirect
-    /// multi-draw + compute-shader frustum culling + bindless origins).
-    pub gpu_driven: bool,
-
-    /// Enable the Phase-2 GPU compute chunk mesher (requires `gpu_driven`,
-    /// which is auto-enabled when this is on).
+    /// Enable the Phase-2 GPU compute chunk mesher.
     pub gpu_meshing: bool,
 
     /// SSAO sampling radius (world-space distance).
@@ -601,9 +596,8 @@ impl Default for GraphicsSettings {
             textures_dir: Some("assets/textures".into()),
             texture_packs_dir: None,
             msaa_samples: 4,
-            occlusion_culling: true,
+            occlusion_culling: false,
             ssao_enabled: true,
-            gpu_driven: false,
             gpu_meshing: false,
             ssao_radius: 1.5,
             ssao_bias: 0.025,
@@ -753,6 +747,7 @@ macro_rules! graphics_fields {
             exit_after_capture: false,
             capture_cam_pos: None,
             capture_cam_rot: None,
+            capture_time: None,
             spawn: None,
             day_length: 0.0,
             keybinds: KeybindSettings::default(),
@@ -839,7 +834,6 @@ impl GameSettings {
 
             // Phase-2 meshing implies Phase-1 rendering; auto-enable so a
             // `gpu_meshing`/`gpu_mesh_distance` config never silently no-ops.
-            gpu_driven: self.graphics.gpu_driven || self.graphics.gpu_meshing,
 
             gpu_meshing: self.graphics.gpu_meshing,
         }
@@ -918,6 +912,7 @@ impl GameSettings {
         cfg.exit_after_capture = false;
         cfg.capture_cam_pos = None;
         cfg.capture_cam_rot = None;
+        cfg.capture_time = None;
         cfg.spawn = None;
         cfg.day_length = self.world.day_length;
         cfg.keybinds = keybinds;

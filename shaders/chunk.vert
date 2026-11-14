@@ -7,8 +7,10 @@
 //                              adds the tile origin before sampling).
 //   location 2: float light  — baked face shading in [0, 1]
 //                              (values > 1.0 signal water: 1.0 + (level/8)*0.5)
-//   location 3: uint  tile   — atlas tile index (passed `flat` so the
-//                              fragment shader can pick the per-quad tile).
+//   location 3: uint  tile   — bits 0..7 atlas tile index, bits 8..15
+//                              ray-traced sun visibility (passed `flat` so
+//                              the fragment shader can use the per-quad
+//                              values).
 //   location 4: vec4  light_color — packed RGBA light tint (passed `flat`)
 //
 // Push constants (offset 0): vec4 chunk_origin_and_pad = (originX, originY, originZ, _)
@@ -29,6 +31,7 @@ layout(location = 2) out float frag_fog;
 layout(location = 3) out vec3 frag_world_pos;
 layout(location = 4) flat out uint frag_tile;
 layout(location = 5) flat out vec4 frag_light_color;
+layout(location = 6) flat out float frag_sun;
 
 layout(push_constant) uniform Push {
     vec4 origin_pad;   // xyz = chunk world origin, w unused
@@ -50,7 +53,10 @@ void main() {
     gl_Position = push.view_proj * vec4(world, 1.0);
     frag_uv = in_uv;
     frag_light = in_light;
-    frag_tile = in_tile;
+    // Unpack the mesher's per-quad words: low byte = atlas tile index,
+    // second byte = ray-traced sun visibility (0 = shadowed, 255 = lit).
+    frag_tile = in_tile & 0xFFu;
+    frag_sun = float((in_tile >> 8u) & 0xFu) / 15.0;
     frag_world_pos = world;
     frag_light_color = in_light_color;
 

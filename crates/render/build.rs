@@ -44,8 +44,6 @@ fn main() {
         ("panorama.frag", "panorama.frag.spv"),
         ("particle.vert", "particle.vert.spv"),
         ("particle.frag", "particle.frag.spv"),
-        ("aabb_occlusion.vert", "aabb_occlusion.vert.spv"),
-        ("aabb_occlusion.frag", "aabb_occlusion.frag.spv"),
         // Phase 1 — GPU-driven rendering: compute frustum cull + indirect vertex.
         ("chunk_cull.comp", "chunk_cull.comp.spv"),
         ("chunk_indirect.vert", "chunk_indirect.vert.spv"),

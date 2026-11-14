@@ -225,7 +225,23 @@ fn run_worker(
                     focus_changed = true;
                 }
                 Cmd::SunDir(d) => {
-                    sun_dir = d;
+                    let new_dir = d.normalize_or_zero();
+                    // Sun shadows are ray-traced while meshing, so a cached
+                    // chunk mesh is only valid for the sun direction it was
+                    // built with. Once the sun has swung far enough for the
+                    // shadow direction / length to change visibly, demote every
+                    // meshed chunk back to `Structured`: the normal mesh phase
+                    // rebuilds them (nearest first, a batch per iteration) and
+                    // re-traces the sun rays for the new direction.
+                    const SUN_RELIGHT_COS: f32 = 0.9996; // ~1.6 degrees
+                    if sun_dir.dot(new_dir) < SUN_RELIGHT_COS {
+                        for s in state.values_mut() {
+                            if *s == State::Meshed {
+                                *s = State::Structured;
+                            }
+                        }
+                    }
+                    sun_dir = new_dir;
                 }
                 Cmd::Frustum(f) => {
                     frustum = Some(f);
@@ -518,22 +534,28 @@ fn run_worker(
         // --- meshing phase: chunks that are structured and have structured
         // neighbours (so border face culling is correct enough).
         // If a frustum is available, skip chunks entirely outside it. ---
-        let mesh_todo: Vec<ChunkPos> = desired
+        // Mesh every structured chunk, not only the ones currently inside
+        // the view frustum. The old frustum filter left chunks unmeshed
+        // until the player turned toward them, so rotating the camera
+        // revealed holes that popped in a few frames later. Visible chunks
+        // are still processed first, so the near field fills immediately.
+        let mut mesh_todo: Vec<ChunkPos> = desired
             .iter()
             .filter(|p| matches!(state.get(p), Some(State::Structured)))
             .copied()
-            .filter(|p| {
-                if let Some(ref f) = frustum {
-                    let origin = chunk_origin(*p);
-                    let min = origin.as_vec3();
-                    let max = origin.as_vec3() + Vec3::splat(CHUNK_SIZE as f32);
-                    f.intersects_aabb(min, max)
-                } else {
-                    true
-                }
-            })
             .collect();
-        let mesh_todo = sort_by_distance(mesh_todo, focus_chunk);
+        mesh_todo.sort_by_key(|p| {
+            let origin = chunk_origin(*p);
+            let min = origin.as_vec3();
+            let max = min + Vec3::splat(CHUNK_SIZE as f32);
+            let visible = frustum
+                .as_ref()
+                .map_or(true, |f| f.intersects_aabb(min, max));
+            let dx = p.x() - focus_chunk.x();
+            let dy = p.y() - focus_chunk.y();
+            let dz = p.z() - focus_chunk.z();
+            (u8::from(!visible), dx * dx + dy * dy + dz * dz)
+        });
         let mesh_batch: Vec<ChunkPos> = mesh_todo
             .into_iter()
             .take(config.mesh_batch)

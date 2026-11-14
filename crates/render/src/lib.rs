@@ -51,9 +51,13 @@ use bytemuck::{Pod, Zeroable};
 ///
 /// The `light_color` field carries a packed RGBA color for tinted lighting:
 /// RGB is the torch light tint and A is the block-light level (0..255). The
-/// mesher keeps `light` for sky/sun visibility so the shader can light the two
+/// mesher keeps `light` for sky visibility so the shader can light the two
 /// independently — that split is what makes nights dark while torches still
 /// illuminate. It is passed `flat` to the fragment shader.
+///
+/// The `tile` word is packed: bits 0..7 are the atlas tile index and bits
+/// 8..11 are the mesher's ray-traced sun visibility (0..15), which the shader
+/// unpacks into `frag_sun` and uses as the cast-shadow term.
 /// Mirror changes here in `crates/render/src/renderer/pipeline.rs`
 /// `create_graphics_pipeline` + `create_shadow_pipeline` `vertex_attributes` arrays.
 #[repr(C)]

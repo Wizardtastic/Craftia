@@ -2,9 +2,11 @@
 // Phase 3 — Hi-Z depth pyramid builder for GPU occlusion culling.
 //
 // One dispatch per mip level. Mip 0 downsamples the full-res resolved scene
-// depth (2x2 MIN = nearest occluder), each subsequent mip downsamples the
-// previous one. `chunk_cull.comp` samples the finished pyramid to reject
-// chunks fully hidden behind the previous frame's geometry.
+// depth (2x2 MAX = farthest occluder), each subsequent mip downsamples the
+// previous one. MAX is what makes the cull test conservative: a tile is only
+// treated as an occluder when *every* texel in it is at least as near as the
+// chunk being tested. MIN would let one foreground pixel cull a whole visible
+// chunk (the bug that hid terrain behind water edges and leaves).
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -32,15 +34,15 @@ void main() {
 
     float d;
     if (pc.from_scene == 1u) {
-        d = min(min(textureLod(scene_depth, uv00, 0.0).x,
+        d = max(max(textureLod(scene_depth, uv00, 0.0).x,
                     textureLod(scene_depth, uv10, 0.0).x),
-                min(textureLod(scene_depth, uv01, 0.0).x,
+                max(textureLod(scene_depth, uv01, 0.0).x,
                     textureLod(scene_depth, uv11, 0.0).x));
     } else {
         float src_mip = float(pc.dst_mip - 1u);
-        d = min(min(textureLod(pyramid, uv00, src_mip).x,
+        d = max(max(textureLod(pyramid, uv00, src_mip).x,
                     textureLod(pyramid, uv10, src_mip).x),
-                min(textureLod(pyramid, uv01, src_mip).x,
+                max(textureLod(pyramid, uv01, src_mip).x,
                     textureLod(pyramid, uv11, src_mip).x));
     }
     imageStore(dst_mip, gid, vec4(d, 0.0, 0.0, 0.0));

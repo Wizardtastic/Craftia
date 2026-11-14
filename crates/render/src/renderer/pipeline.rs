@@ -859,10 +859,13 @@ pub(super) fn create_graphics_pipeline(
     }
     .map_err(|e| anyhow!("frag shader module: {e:?}"))?;
 
-    // `SHADOW_ENABLED` gates the whole PCSS shadow path in chunk.frag. It was
-    // previously hard-coded to 0, which silently disabled shadow sampling for
-    // every chunk even though the shadow pass kept running.
-    let shadow_enabled = [u32::from(shadow_enabled)];
+    // `SHADOW_ENABLED` gates the sun-shadow term in chunk.frag. Cast shadows
+    // are ray-traced into the vertex data by the chunk mesher, so the shader
+    // samples no shadow map at all — the constant only exists so the shading
+    // path stays identical across pipeline variants. The user-facing toggle
+    // travels in `FogUbo::sun_dir_pad.w` and needs no pipeline rebuild.
+    let _ = shadow_enabled;
+    let shadow_enabled = [1u32];
     let spec_map = [vk::SpecializationMapEntry::default()
         .constant_id(0)
         .size(std::mem::size_of::<u32>())
@@ -2286,187 +2289,6 @@ pub(super) fn update_particle_descriptor_set(
 /// Uses the shared `pipeline_layout` (96-byte push constants). No vertex
 /// input (procedural cube from `gl_VertexIndex`), no colour writes, depth
 /// test + write enabled. The fragment shader is a no-op.
-pub(super) fn create_occlusion_pipeline(
-    device: &ash::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-    vs_spirv: &[u8],
-    fs_spirv: &[u8],
-    msaa_samples: vk::SampleCountFlags,
-) -> Result<vk::Pipeline> {
-    let vert_code = spirv_to_u32(vs_spirv);
-    let frag_code = spirv_to_u32(fs_spirv);
-    let vert_module = unsafe {
-        device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(&vert_code),
-            None,
-        )
-    }
-    .map_err(|e| anyhow!("occlusion vert shader: {e:?}"))?;
-    let frag_module = unsafe {
-        device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(&frag_code),
-            None,
-        )
-    }
-    .map_err(|e| anyhow!("occlusion frag shader: {e:?}"))?;
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_module)
-            .name(c"main"),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(frag_module)
-            .name(c"main"),
-    ];
-
-    // No vertex input — the AABB shader generates cube vertices procedurally.
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-
-    // 8 vertices → 12 triangles (36 indices implicit via TRIANGLE_LIST +
-    // gl_VertexIndex-based index buffer of 36 entries, OR 8 unique vertices
-    // with an index buffer). We use an index buffer approach: 36 u16 indices.
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-        .viewport_count(1)
-        .scissor_count(1);
-
-    // No backface culling — the AABB is a box, and we want all faces tested.
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-        .depth_clamp_enable(false)
-        .rasterizer_discard_enable(false)
-        .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .line_width(1.0);
-
-    let multisampling =
-        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(msaa_samples);
-
-    // Depth TEST only — occlusion proxies must NOT write depth. This is an
-    // invisible bounding-box drawn purely to count, via an occlusion query,
-    // how many of its fragments pass the depth test against the already-drawn
-    // scene. If it also *wrote* depth, the box's front face (at the chunk's
-    // AABB boundary, nearer than the actual terrain surface inside) would
-    // stamp a false, closer depth into the scene buffer. That corrupts every
-    // later draw and creates a 2-frame limit cycle: the proxy writes near
-    // depth -> the chunk's real mesh then fails the LESS test next frame and
-    // its query reads 0 samples -> marked invisible -> proxy again -> passes
-    // -> marked visible -> mesh -> occluded... i.e. whole chunks flashing on
-    // and off every frame (and SSAO turning the phantom depth into ghost
-    // wireframe boxes). Depth-test-only breaks the loop.
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(true)
-        .depth_write_enable(false)
-        .depth_compare_op(vk::CompareOp::LESS)
-        .depth_bounds_test_enable(false)
-        .stencil_test_enable(false);
-
-    // No colour writes — only the depth test matters for occlusion queries.
-    let attachment = vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(false)
-        .color_write_mask(vk::ColorComponentFlags::empty());
-
-    let blend_attachments = [attachment];
-    let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-        .attachments(&blend_attachments)
-        .logic_op_enable(false);
-
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-
-    let create_info = vk::GraphicsPipelineCreateInfo::default()
-        .stages(&stages)
-        .vertex_input_state(&vertex_input)
-        .input_assembly_state(&input_assembly)
-        .viewport_state(&viewport_state)
-        .rasterization_state(&rasterizer)
-        .multisample_state(&multisampling)
-        .depth_stencil_state(&depth_stencil)
-        .color_blend_state(&color_blend)
-        .dynamic_state(&dynamic)
-        .layout(layout)
-        .render_pass(render_pass)
-        .subpass(0);
-
-    let result = unsafe {
-        device.create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
-    };
-    unsafe {
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(frag_module, None);
-    }
-    let pipelines = result.map_err(|(_p, e)| anyhow!("create_occlusion_pipeline: {e:?}"))?;
-    Ok(pipelines.into_iter().next().unwrap())
-}
-
-/// 36-index buffer for a unit cube (12 triangles). Used to draw AABB proxies
-/// for occlusion queries via `cmd_draw_indexed`. The vertex shader generates
-/// the 8 cube corners procedurally from `gl_VertexIndex`, so the index buffer
-/// just selects which 3 of the 8 vertices form each triangle.
-pub(super) fn create_aabb_index_buffer(
-    device: &ash::Device,
-    alloc: &crate::alloc::Alloc,
-) -> Result<crate::buffer::GpuBuffer> {
-    // 12 triangles (2 per face), each triangle referencing 3 of the 8 cube
-    // corners. The vertex shader maps gl_VertexIndex 0..7 to cube corners
-    // via bit fields. We define the 12 triangles with winding order such
-    // that front faces are counter-clockwise (matching the pipeline).
-    #[rustfmt::skip]
-    let indices: [u16; 36] = [
-        // +X face
-        1, 3, 5,   5, 3, 7,
-        // -X face
-        0, 4, 2,   2, 4, 6,
-        // +Y face
-        2, 6, 3,   3, 6, 7,
-        // -Y face
-        0, 1, 4,   4, 1, 5,
-        // +Z face
-        4, 5, 6,   6, 5, 7,
-        // -Z face
-        0, 2, 1,   1, 2, 3,
-    ];
-    let bytes: &[u8] = bytemuck::cast_slice(&indices);
-    use crate::buffer::GpuBuffer;
-    use ash::vk;
-
-    // Upload via staging (small buffer, not worth a separate function).
-    let size = bytes.len() as vk::DeviceSize;
-    let staging = GpuBuffer::host_visible(
-        device,
-        alloc,
-        size,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-        "aabb_idx_staging",
-    )?;
-    let mut staging = staging;
-    staging.upload(device, bytes)?;
-
-    // 72 bytes is small enough to keep the index buffer host-visible
-    // (no need for the device_local + staging copy dance). The earlier
-    // `_ibo` device_local attempt was dead-code leaking because the
-    // variable was bound to `_` and never destroyed — its `GpuBuffer`
-    // Drop emitted a leak warning and the `gpu_allocator` allocation
-    // reported "aabb_idx" as leaked on shutdown.
-    staging.destroy(device, alloc);
-
-    let ibo = GpuBuffer::host_visible(
-        device,
-        alloc,
-        size,
-        vk::BufferUsageFlags::INDEX_BUFFER,
-        "aabb_idx",
-    )?;
-    let mut ibo = ibo;
-    ibo.upload(device, bytes)?;
-    Ok(ibo)
-}
-
 pub(super) fn create_shadow_layer_view(
     device: &ash::Device,
     image: vk::Image,

@@ -23,6 +23,10 @@ pub struct PlayerState {
     /// Accumulated bob phase (radians), driven by horizontal speed.
     /// Used for camera bobbing and held-item bob.
     pub bob_phase: f32,
+    /// Bob envelope in `0..=1`. Fades to zero when the player stops so the
+    /// phase can freeze instead of being dragged backwards through the sine.
+    #[serde(default)]
+    pub bob_amplitude: f32,
     /// Mining swing progress (1.0 = just started, 0.0 = finished).
     /// Decremented each frame over ~400ms.
     pub mining_swing: f32,

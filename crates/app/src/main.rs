@@ -70,9 +70,6 @@ struct Cli {
     /// Disable hardware occlusion culling.
     #[arg(long)]
     no_occlusion_culling: bool,
-    /// Enable the GPU-driven chunk rendering pipeline (indirect multi-draw).
-    #[arg(long)]
-    gpu_driven: bool,
     /// Enable the GPU compute chunk mesher (implies --gpu-driven).
     #[arg(long)]
     gpu_meshing: bool,
@@ -88,6 +85,9 @@ struct Cli {
     /// Capture-run camera yaw/pitch override "yaw,pitch" in radians.
     #[arg(long, value_name = "yaw,pitch")]
     camrot: Option<String>,
+    /// Capture-run world time in seconds (e.g. 300 noon, 600 dusk, 900 night).
+    #[arg(long, value_name = "seconds")]
+    time: Option<f64>,
 }
 
 /// Parse a comma-separated list of f32 values, e.g. "10.5,64,-3.25".
@@ -305,6 +305,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(rot) = cli.camrot.as_deref().and_then(|s| parse_float_list(s, 2)) {
         config.capture_cam_rot = Some((rot[0], rot[1]));
     }
+    config.capture_time = cli.time;
     config.fullscreen = cli.fullscreen;
     // Track the config file so the file-watcher can react to edits.
     config.config_path = PathBuf::from(&cli.config);
@@ -322,17 +323,12 @@ fn main() -> anyhow::Result<()> {
     if cli.no_occlusion_culling {
         config.render.occlusion_culling = false;
     }
-    if cli.gpu_driven {
-        config.render.gpu_driven = true;
-    }
     if cli.gpu_meshing {
         config.render.gpu_meshing = true;
-        config.render.gpu_driven = true;
     }
     if let Some(d) = cli.gpu_mesh_distance {
         config.stream.gpu_mesh_distance = d;
         config.render.gpu_meshing = true;
-        config.render.gpu_driven = true;
     }
     if let Some(r) = cli.load_radius {
         config.stream.load_radius = r.max(1);

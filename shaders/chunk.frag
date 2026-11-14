@@ -16,7 +16,7 @@
 
 const float ATLAS_TILES = 16.0;
 
-layout(constant_id = 0) const bool SHADOW_ENABLED = false;
+layout(constant_id = 0) const bool SHADOW_ENABLED = true;
 layout(constant_id = 1) const bool TILE_REMAP_ENABLED = false;
 
 // ── Tile material lookup table (binding 5) ────────────────────────────────
@@ -76,6 +76,10 @@ layout(location = 2) in float frag_fog;
 layout(location = 3) in vec3 frag_world_pos;
 layout(location = 4) flat in uint frag_tile;
 layout(location = 5) flat in vec4 frag_light_color;
+// Ray-traced sun visibility baked by the chunk mesher (0 = shadowed,
+// 1 = fully lit). The mesher casts real DDA rays through the voxel world
+// toward the current sun, so this is world-space occlusion, not a projection.
+layout(location = 6) flat in float frag_sun;
 
 layout(location = 0) out vec4 out_color;
 
@@ -92,14 +96,6 @@ layout(set = 0, binding = 2) uniform Fog {
     vec4 sun_dir_pad;         // xyz = sun direction, w unused
 } fog;
 
-layout(set = 0, binding = 3) uniform sampler2DArray shadow_map;
-
-layout(set = 0, binding = 4) uniform ShadowData {
-    mat4 cascade_vps[4];      // 4 light-space view-projection matrices (256 bytes)
-    vec4 cascade_splits;       // far-plane distance per cascade
-    vec4 light_dir_and_bias;   // xyz = light direction, w = shadow bias
-} shadow;
-
 // ── Scene opaque color copy (binding 6, slice 2) ────────────────────────
 // Populated by a `vkCmdCopyImage` from the main render pass's offscreen color
 // attachment into a side-car image at the same extent. Both glass tinted
@@ -115,104 +111,16 @@ layout(set = 1, binding = 0) uniform TileRemap {
     uint map[256];
 } tile_remap;
 
-// ── Ray-traced soft shadows (Poisson PCF) ───────────────────────────────
+// ── Ray-traced sun shadows ──────────────────────────────────────────────
 //
-// The depth map is sampled as a PLAIN sampler2DArray (raw depth compare in
-// shader) rather than a hardware-compare sampler: the hardware path costs one
-// tap and gives a hard, aliased edge with no control over the penumbra.
-//
-// Here:
-//   1. Slope-scaled normal offset bias keeps contact points free of acne.
-//   2. 8-tap rotated Poisson PCF, radius scaled by the cascade's texel
-//      footprint, resolves the sun as an area light -> contact-hardening
-//      soft shadows instead of a stair-stepped edge.
-//   3. Taps outside the cascade footprint return "lit" so the map edge does
-//      not darken the world.
-//
-// Returns 1.0 for fully lit and 0.0 for fully occluded fragments.
-// Interleaved gradient noise (Jimenez 2014): cheap per-pixel rotation source.
-float interleaved_gradient_noise(vec2 p) {
-    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
-}
-
-const vec2 POISSON_8[8] = vec2[](
-    vec2(-0.613, 0.617), vec2(0.170, -0.040), vec2(-0.299, -0.792),
-    vec2(0.645, 0.493), vec2(-0.651, -0.176), vec2(0.401, -0.598),
-    vec2(-0.106, 0.937), vec2(0.918, 0.140)
-);
-
-// Map a world-space receiver into a cascade's light-space depth-map space.
-// Returns (uv, depth) where depth is the raw [0,1] depth-buffer value.
-//
-// The depth must NOT be rescaled by *0.5+0.5: glam's `orthographic_lh`
-// already emits NDC z in [0,1] (Vulkan's clip depth range). Remapping it
-// pushed every receiver about half a unit of depth past its own surface —
-// i.e. behind every caster — so the entire world came out shadowed. Verified
-// against a readback of the depth map: receiver 0.4334 vs stored 0.4432 at the
-// same texel (the difference is exactly the bias).
-vec3 shadow_project(mat4 vp, vec3 world_pos) {
-    vec4 clip = vp * vec4(world_pos, 1.0);
-    vec3 ndc = clip.xyz / clip.w;
-    return vec3(ndc.xy * 0.5 + 0.5, ndc.z);
-}
-
-float compute_shadow_factor(vec3 world_pos, float view_depth) {
-    int cascade_idx = 0;
-    if (view_depth < shadow.cascade_splits.x) cascade_idx = 0;
-    else if (view_depth < shadow.cascade_splits.y) cascade_idx = 1;
-    else if (view_depth < shadow.cascade_splits.z) cascade_idx = 2;
-    else cascade_idx = 3;
-
-    mat4 vp = shadow.cascade_vps[cascade_idx];
-    vec3 proj = shadow_project(vp, world_pos);
-    if (any(lessThan(proj, vec3(0.0))) || any(greaterThan(proj, vec3(1.0)))) {
-        return 1.0;
-    }
-
-    // Normal-offset bias: nudge the receiver along the sun direction by a
-    // fraction of the cascade's world-per-texel footprint. A pure depth bias
-    // cannot fix acne on grazing surfaces; a normal offset can, because it
-    // moves the sample off the surface instead of past it.
-    vec3 sun_dir = normalize(shadow.light_dir_and_bias.xyz);
-    float texel_world = max(view_depth, 1.0) * 0.0035;
-    vec3 geo_n = cross(dFdx(world_pos), dFdy(world_pos));
-    float geo_len = length(geo_n);
-    float slope = geo_len > 1e-8
-        ? clamp(1.0 - abs(dot(sun_dir, geo_n / geo_len)), 0.0, 1.0)
-        : 1.0;
-    vec3 offset_pos = world_pos + sun_dir * (texel_world * (0.75 + 2.5 * slope));
-    vec3 off_proj = shadow_project(vp, offset_pos);
-
-    // Slope-scaled depth bias for the residual (occluder thickness, bilinear
-    // footprint). Scaled by distance because a cascade texel covers more
-    // world units the further the slice is.
-    float bias = shadow.light_dir_and_bias.w * (1.0 + view_depth * 0.02);
-    float receiver = off_proj.z - bias;
-
-    // Rotate an 8-tap Poisson disk per pixel (interleaved gradient noise) so
-    // the kernel resolves the sun as an area light instead of a hard, aliased
-    // single-tap edge, and the fixed pattern never reads as a grid.
-    float ang = interleaved_gradient_noise(gl_FragCoord.xy) * 6.2831853;
-    mat2 rot = mat2(cos(ang), sin(ang), -sin(ang), cos(ang));
-    float radius = 0.55 + min(view_depth * 0.014, 2.2);
-    ivec2 texel_count = ivec2(textureSize(shadow_map, 0).xy);
-    ivec2 base = ivec2(clamp(off_proj.xy, vec2(0.0), vec2(1.0)) * vec2(texel_count));
-
-    float lit = 0.0;
-    for (int i = 0; i < 8; i++) {
-        ivec2 tap = clamp(base + ivec2(rot * POISSON_8[i] * radius),
-                          ivec2(0), texel_count - ivec2(1));
-        float stored = texelFetch(shadow_map, ivec3(tap, cascade_idx), 0).r;
-        lit += (receiver <= stored) ? 1.0 : 0.0;
-    }
-    float factor = lit / 8.0;
-
-    // Fade the outer edge of each cascade back to "lit" so the handover
-    // between cascades is invisible.
-    vec2 edge = min(off_proj.xy, 1.0 - off_proj.xy);
-    float edge_fade = smoothstep(0.0, 0.06, min(edge.x, edge.y));
-    return mix(1.0, factor, edge_fade);
-}
+// Cast shadows are NOT sampled from a rasterised shadow map any more. The
+// chunk mesher traces DDA rays from every exposed block toward the sun through
+// the real voxel grid (see `voxel_world::light::trace_sun_visibility`) and
+// bakes the result into bits 8..15 of the vertex `tile` word, which arrives
+// here as `frag_sun`. Because both the occluders and the receivers are voxels
+// at fixed world positions, the shadows are anchored in world space: moving or
+// turning the camera cannot shift them, and the cascade-footprint, texel-
+// snapping and map-edge problems of the old projection simply do not exist.
 
 // ── Reflection helpers (slice 3) ──────────────────────────────────────────
 
@@ -266,7 +174,10 @@ vec3 water_wave_normal(vec3 wp, float t) {
 // caller flips it toward the camera. Used by glass + opaque reflective tiles.
 vec3 face_normal(vec3 view_dir) {
     vec3 n = normalize(cross(dFdx(frag_world_pos), dFdy(frag_world_pos)));
-    return (dot(n, view_dir) > 0.0) ? -n : n;
+    // Flip toward the camera. The scene viewport has a negative height, so
+    // the derivative cross product faces away from the viewer; this makes
+    // the returned normal point toward the eye (the surface side we see).
+    return (dot(n, view_dir) < 0.0) ? -n : n;
 }
 
 // Screen-space reflection ray-march against the binding-7 scene depth copy.
@@ -350,26 +261,38 @@ void main() {
     float leaves_amount   = material_table.world_params.w;
 
     // ── Physically-based lighting ────────────────────────────────────────
-    // `frag_light` is baked sky/sun visibility (sunlight level * face shade
-    // * AO), values > 1 encode the water surface level. The block-light
-    // level rides in the alpha byte of the flat `frag_light_color` tint, so
-    // the mesher no longer has to collapse sun and torch into one number.
+    // `frag_light` is baked sky access * AO (no directional term), values
+    // above 1 encode the water surface level. The block-light level rides in
+    // the alpha byte of the flat `frag_light_color` tint, so the mesher does
+    // not have to collapse sun and torch into one number.
     float sky_vis = clamp(frag_light, 0.0, 1.0);
     float torch_level = frag_light_color.a;
     vec3 torch_rgb = frag_light_color.rgb;
     float sun_vis = fog.sun_color.a;
 
-    float shadow_factor = 1.0;
-    // Skip shadow rays when the sun cannot contribute: at night (zero direct
-    // light) and on surfaces with no baked sky visibility (deep interiors).
-    // This removes the whole shadow filter from a large fraction of pixels.
-    if (SHADOW_ENABLED && sun_vis > 0.001 && sky_vis > 0.01) {
-        float view_depth = length(cam.cam_pos_and_maxdist.xyz - frag_world_pos);
-        shadow_factor = compute_shadow_factor(frag_world_pos, view_depth);
-    }
+    // Geometric face normal, flipped toward the camera. Vertex light holds
+    // sky access × AO only; the sun's normal term is evaluated per pixel so
+    // it always matches the current sun direction.
+    vec3 camera_dir = normalize(cam.cam_pos_and_maxdist.xyz - frag_world_pos);
+    vec3 surface_normal = face_normal(camera_dir);
+    float ndotl = max(dot(surface_normal, sun_dir), 0.0);
 
-    vec3 direct = fog.sun_color.rgb * (sky_vis * sun_vis * shadow_factor);
-    vec3 ambient_light = fog.sky_ambient.rgb * sky_vis;
+    // `frag_sun` is the mesher's ray-traced visibility: 1 where the block can
+    // see the sun, 0 where terrain/leaves/overhangs block it. The `Shadows`
+    // setting arrives as `fog.sun_dir_pad.w` (1 = on, 0 = fully lit) so it can
+    // be toggled without rebuilding any chunk mesh.
+    float shadow_factor = SHADOW_ENABLED
+        ? mix(1.0, frag_sun, fog.sun_dir_pad.w)
+        : 1.0;
+
+    vec3 direct = fog.sun_color.rgb * (sky_vis * sun_vis * shadow_factor * ndotl);
+    // Hemisphere ambient keeps upward faces brighter without baking the sun
+    // direction into the mesh. The visibility curve deliberately keeps a
+    // large floor: `sky_vis` already contains baked AO, and using it raw
+    // would turn ground under a dense canopy pitch black even at noon.
+    float hemi = 0.60 + 0.40 * max(surface_normal.y, 0.0);
+    float ambient_vis = 0.35 + 0.65 * sky_vis;
+    vec3 ambient_light = fog.sky_ambient.rgb * (ambient_vis * hemi);
     // Torch falloff is quadratic in the stored 0..1 level so a level-15
     // source is bright while level 8 is already noticeably dimmer.
     vec3 torch_light = torch_rgb * (torch_level * torch_level) * 2.4;

@@ -1,10 +1,14 @@
 //! Lighting engine: DDA ray-marching sunlight + BFS torchlight with ray
 //! validation, ambient occlusion, and dirty-region incremental updates.
 //!
-//! Sunlight: for each exposed surface block, cast a ray toward the sun. If
-//! the ray reaches the sky unoccluded, the block gets full sunlight (15).
-//! Directional shadows emerge naturally — blocks at angles can shadow
-//! neighbours.
+//! Skylight: a vertical column pass plus a horizontal BFS spread, giving the
+//! ambient sky access used for ambient lighting and AO.
+//!
+//! Directional sun shadows are **ray traced**: [`trace_sun_visibility`] casts a
+//! DDA ray per exposed block toward the sun and reports how much of the sun the
+//! block can see. The chunk mesher bakes that into the vertex stream, so cast
+//! shadows are derived from the real voxel geometry, live in world space, and
+//! cannot slide around with the camera.
 //!
 //! Torchlight: BFS from every emitting block. Each step is validated by a
 //! short ray from the emitter to confirm the path is clear. Cross-chunk
@@ -196,7 +200,101 @@ pub fn ray_march(
 }
 
 // ---------------------------------------------------------------------------
-// Sunlight: directional ray-based
+// Ray-traced sun visibility (per block, consumed by the chunk mesher)
+// ---------------------------------------------------------------------------
+
+/// Maximum distance, in blocks, a sun ray is traced. Longer rays only matter at
+/// very low sun elevations; capping keeps the per-chunk ray budget bounded.
+pub const SUN_RAY_MAX_DIST: f32 = 96.0;
+
+/// Rays per sampled block. Three rays resolve the sun as a small area light and
+/// give a soft penumbra instead of a hard, aliased silhouette.
+const SUN_RAY_COUNT: u32 = 3;
+
+/// Half-angle (radians) of the cone the extra rays are spread over. The real
+/// sun disc is ~0.0047 rad; a slightly wider cone reads better at block
+/// resolution without turning the shadow into a blur.
+const SUN_RAY_CONE: f32 = 0.014;
+
+/// Distance along `dir` from a point inside a unit cube until the ray leaves
+/// that cube. Axis-parallel rays report `INFINITY` on the unused axes.
+fn axis_exit(fract: f32, dir: f32) -> f32 {
+    if dir > 1e-6 {
+        (1.0 - fract) / dir
+    } else if dir < -1e-6 {
+        -fract / dir
+    } else {
+        f32::INFINITY
+    }
+}
+
+/// Ray-trace the sun from a block centre, returning visibility in `0..=15`
+/// (`15` = fully lit, `0` = fully shadowed).
+///
+/// The rays run through [`ray_march`], i.e. the same DDA voxel marcher used for
+/// every other lighting query, so occlusion comes from the actual world
+/// geometry: a hillside, a tree canopy or an overhang casts a real shadow.
+/// Because the result depends only on world positions, it is stable in world
+/// space regardless of where the camera is or which way it faces.
+pub fn trace_sun_visibility(
+    block_center: Vec3,
+    sun_dir: Vec3,
+    sample_block: &dyn Fn(i32, i32, i32) -> BlockId,
+    reg: &BlockRegistry,
+) -> u8 {
+    let sun = sun_dir.normalize_or_zero();
+    // Below the horizon there is no direct sun to occlude.
+    if sun.y <= 1e-4 {
+        return 0;
+    }
+
+    // Two axes spanning the plane perpendicular to the sun, used to fan the
+    // sample rays out around the centre ray.
+    let helper = if sun.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let perp1 = sun.cross(helper).normalize();
+    let perp2 = sun.cross(perp1).normalize();
+    let offsets = [
+        Vec3::ZERO,
+        perp1 * SUN_RAY_CONE + perp2 * (SUN_RAY_CONE * 0.5),
+        -perp1 * (SUN_RAY_CONE * 0.5) - perp2 * SUN_RAY_CONE,
+    ];
+
+    let mut lit = 0u32;
+    for off in offsets {
+        let dir = (sun + off).normalize();
+        if !sun_ray_blocked(block_center, dir, sample_block, reg) {
+            lit += 1;
+        }
+    }
+    ((lit * 15 + SUN_RAY_COUNT / 2) / SUN_RAY_COUNT) as u8
+}
+
+/// True when a ray from `block_center` along `dir` hits an opaque voxel within
+/// [`SUN_RAY_MAX_DIST`].
+///
+/// The ray starts just past the source block's own boundary: `ray_march` tests
+/// the cell it starts in, so beginning at the centre would make every block
+/// shadow itself and no voxel could ever be lit.
+fn sun_ray_blocked(
+    block_center: Vec3,
+    dir: Vec3,
+    sample_block: &dyn Fn(i32, i32, i32) -> BlockId,
+    reg: &BlockRegistry,
+) -> bool {
+    let fract = block_center - block_center.floor();
+    let t_exit = axis_exit(fract.x, dir.x)
+        .min(axis_exit(fract.y, dir.y))
+        .min(axis_exit(fract.z, dir.z))
+        + 1e-3;
+    if !t_exit.is_finite() || t_exit >= SUN_RAY_MAX_DIST {
+        return false;
+    }
+    let origin = block_center + dir * t_exit;
+    ray_march(origin, dir, SUN_RAY_MAX_DIST - t_exit, sample_block, reg).hit
+}
+
+// ---------------------------------------------------------------------------
+// Skylight: ambient sky access
 // ---------------------------------------------------------------------------
 
 /// Compute sunlight for a chunk by casting rays toward the sun from each
@@ -205,119 +303,27 @@ pub fn ray_march(
 pub fn compute_sunlight(
     chunk: &mut Chunk,
     reg: &BlockRegistry,
-    sun_dir: Vec3,
-    sample_block: &dyn Fn(i32, i32, i32) -> BlockId,
+    _sun_dir: Vec3,
+    _sample_block: &dyn Fn(i32, i32, i32) -> BlockId,
 ) {
-    let origin = chunk_origin(chunk.pos);
-
-    // Ensure sun_dir has a nonzero vertical component for stable rays.
-    let sun_dir = if sun_dir.y.abs() < 0.001 {
-        let y_fix = if sun_dir.y >= 0.0 { 0.001 } else { -0.001 };
-        Vec3::new(sun_dir.x, y_fix, sun_dir.z)
-    } else {
-        sun_dir
-    };
-    let ray_dir = -sun_dir; // toward the sky
-
-    // Compute two perpendicular vectors in the plane orthogonal to sun_dir
-    // for scattering shadow sample offsets (PCF-like penumbra).
-    let perp1 = if sun_dir.x.abs() < 0.9 {
-        sun_dir.cross(Vec3::X).normalize()
-    } else {
-        sun_dir.cross(Vec3::Y).normalize()
-    };
-    let perp2 = sun_dir.cross(perp1).normalize();
-    let shadow_radius = 0.35;
-    // 3 shadow rays: center + two diagonals. The 0.707 factor keeps the
-    // diagonals at the same radial distance as the original 5-ray pattern.
-    let shadow_offsets = [
-        Vec3::ZERO,
-        (perp1 + perp2) * (shadow_radius * 0.707),
-        (-perp1 - perp2) * (shadow_radius * 0.707),
-    ];
-    const SHADOW_RAYS: usize = 3;
-
     for lx in 0..CHUNK_SIZE {
         for lz in 0..CHUNK_SIZE {
-            let wx = origin.x + lx;
-            let wz = origin.z + lz;
-
-            // Walk top-down. Track sunlight propagating through transparent
-            // blocks below the surface.
+            // Sky access: 15 under open sky, falling with block absorption.
+            // This is the *ambient* term only — directional sun shadows are
+            // ray-traced per block by the mesher, so they stay out of here and
+            // the chunk can be relit cheaply when terrain changes.
             let mut column_light: i32 = 15;
 
             for ly in (0..CHUNK_SIZE).rev() {
                 let idx = local_index(lx, ly, lz);
                 let block = chunk.get(lx, ly, lz);
+                chunk.sunlight[idx] = column_light.clamp(0, 15) as u8;
 
                 if block.is_air() {
-                    chunk.sunlight[idx] = 15;
-                    column_light = 15;
                     continue;
                 }
-
                 let absorption = reg.light_absorption(block) as i32;
-
-                // Soft shadow: cast multiple rays with slight offsets and
-                // average the hit results for a smooth penumbra.
-                // Early-exit: if the center ray is shadowed, count all rays
-                // as hits (block is fully in shadow) without further work.
-                let center = Vec3::new(
-                    wx as f32 + 0.5,
-                    (origin.y + ly) as f32 + 0.5,
-                    wz as f32 + 0.5,
-                );
-                let mut hit_count = 0u32;
-                let center_hit = ray_march(
-                    center,
-                    ray_dir,
-                    WORLD_HEIGHT_BLOCKS as f32,
-                    sample_block,
-                    reg,
-                );
-                if center_hit.hit {
-                    hit_count += 1;
-                } else {
-                    for &off in &shadow_offsets[1..] {
-                        let ray_origin = center + off;
-                        let hit = ray_march(
-                            ray_origin,
-                            ray_dir,
-                            WORLD_HEIGHT_BLOCKS as f32,
-                            sample_block,
-                            reg,
-                        );
-                        if hit.hit {
-                            hit_count += 1;
-                        }
-                    }
-                }
-                // Shadow factor: 0 = fully shadowed, 1 = fully lit.
-                let shadow_factor = 1.0 - (hit_count as f32 / SHADOW_RAYS as f32);
-                let sun_level = (shadow_factor * 15.0).round() as i32;
-
-                if sun_level >= 15 {
-                    chunk.sunlight[idx] = 15;
-                    column_light = 15;
-                } else if sun_level > 0 {
-                    // Partial sunlight: take the higher of ray-based and
-                    // column-propagated light for a smooth transition.
-                    let propagated = column_light.clamp(0, 15) as u8;
-                    chunk.sunlight[idx] = propagated.max(sun_level as u8);
-                } else {
-                    // Fully shadowed: use column-propagated light from above.
-                    chunk.sunlight[idx] = column_light.clamp(0, 15) as u8;
-                }
-
-                // Propagate downward: absorb light through this block.
-                if absorption >= 15 {
-                    column_light = 0;
-                } else if absorption > 0 {
-                    column_light -= absorption;
-                    if column_light < 0 {
-                        column_light = 0;
-                    }
-                }
+                column_light = (column_light - absorption.max(0)).max(0);
             }
         }
     }
@@ -680,100 +686,24 @@ impl LightDirtyRegion {
 pub fn recompute_dirty(
     chunk: &mut Chunk,
     reg: &BlockRegistry,
-    sun_dir: Vec3,
+    _sun_dir: Vec3,
     dirty: &mut LightDirtyRegion,
     sample_block: &dyn Fn(i32, i32, i32) -> BlockId,
     sample_torchlight: &dyn Fn(i32, i32, i32) -> u8,
     cross_chunk_update: &mut dyn FnMut(BlockPos, u8, u32),
 ) {
-    let origin = chunk_origin(chunk.pos);
-
-    // Sunlight: recompute dirty columns with soft shadows.
-    let ray_dir = -sun_dir;
-    let perp1 = if sun_dir.x.abs() < 0.9 {
-        sun_dir.cross(Vec3::X).normalize()
-    } else {
-        sun_dir.cross(Vec3::Y).normalize()
-    };
-    let perp2 = sun_dir.cross(perp1).normalize();
-    let shadow_radius = 0.35;
-    // 3 shadow rays: center + two diagonals. The 0.707 factor keeps the
-    // diagonals at the same radial distance as the original 5-ray pattern.
-    let shadow_offsets = [
-        Vec3::ZERO,
-        (perp1 + perp2) * (shadow_radius * 0.707),
-        (-perp1 - perp2) * (shadow_radius * 0.707),
-    ];
-    const SHADOW_RAYS: usize = 3;
+    // Sky access only; directional shadows are ray-traced by the mesher.
     for &(lx, lz) in &dirty.sunlight_columns {
-        let wx = origin.x + lx;
-        let wz = origin.z + lz;
-
         let mut column_light: i32 = 15;
         for ly in (0..CHUNK_SIZE).rev() {
             let idx = local_index(lx, ly, lz);
             let block = chunk.get(lx, ly, lz);
-            let absorption = reg.light_absorption(block) as i32;
-
+            chunk.sunlight[idx] = column_light.clamp(0, 15) as u8;
             if block.is_air() {
-                chunk.sunlight[idx] = 15;
-                column_light = 15;
                 continue;
             }
-
-            let center = Vec3::new(
-                wx as f32 + 0.5,
-                (origin.y + ly) as f32 + 0.5,
-                wz as f32 + 0.5,
-            );
-            let mut hit_count = 0u32;
-            // Early-exit: if the center ray is shadowed, count all rays as
-            // hits (block is fully in shadow) without further work.
-            let center_hit = ray_march(
-                center,
-                ray_dir,
-                WORLD_HEIGHT_BLOCKS as f32,
-                sample_block,
-                reg,
-            );
-            if center_hit.hit {
-                hit_count += 1;
-            } else {
-                for &off in &shadow_offsets[1..] {
-                    let ray_origin = center + off;
-                    let hit = ray_march(
-                        ray_origin,
-                        ray_dir,
-                        WORLD_HEIGHT_BLOCKS as f32,
-                        sample_block,
-                        reg,
-                    );
-                    if hit.hit {
-                        hit_count += 1;
-                    }
-                }
-            }
-            let shadow_factor = 1.0 - (hit_count as f32 / SHADOW_RAYS as f32);
-            let sun_level = (shadow_factor * 15.0).round() as i32;
-
-            if sun_level >= 15 {
-                chunk.sunlight[idx] = 15;
-                column_light = 15;
-            } else if sun_level > 0 {
-                let propagated = column_light.clamp(0, 15) as u8;
-                chunk.sunlight[idx] = propagated.max(sun_level as u8);
-            } else {
-                chunk.sunlight[idx] = column_light.clamp(0, 15) as u8;
-            }
-
-            if absorption >= 15 {
-                column_light = 0;
-            } else if absorption > 0 {
-                column_light -= absorption;
-                if column_light < 0 {
-                    column_light = 0;
-                }
-            }
+            let absorption = reg.light_absorption(block) as i32;
+            column_light = (column_light - absorption.max(0)).max(0);
         }
     }
 
@@ -945,6 +875,63 @@ mod tests {
         // Torch is an emitter, so its block should have some light.
         let center_light = chunk.get_torchlight(8, 8, 8);
         assert!(center_light > 0, "torch center light = {center_light}");
+    }
+
+    #[test]
+    fn sun_rays_reach_open_sky() {
+        let reg = BlockRegistry::with_builtins();
+        let air = |_x: i32, _y: i32, _z: i32| BlockId::AIR;
+        let vis = trace_sun_visibility(Vec3::new(0.5, 20.5, 0.5), Vec3::Y, &air, &reg);
+        assert_eq!(vis, 15, "open sky must be fully lit");
+    }
+
+    #[test]
+    fn roof_blocks_the_sun() {
+        let reg = BlockRegistry::with_builtins();
+        let stone = reg.id_of("stone").unwrap();
+        // A one-column roof directly above the sample point.
+        let roof = move |x: i32, y: i32, z: i32| {
+            if x == 0 && z == 0 && y >= 21 {
+                stone
+            } else {
+                BlockId::AIR
+            }
+        };
+        assert_eq!(
+            trace_sun_visibility(Vec3::new(0.5, 20.5, 0.5), Vec3::Y, &roof, &reg),
+            0,
+            "block under the roof must be shadowed"
+        );
+        assert_eq!(
+            trace_sun_visibility(Vec3::new(1.5, 20.5, 0.5), Vec3::Y, &roof, &reg),
+            15,
+            "the neighbouring column is open, so it must stay lit"
+        );
+    }
+
+    #[test]
+    fn wall_shadows_only_the_side_the_sun_is_behind() {
+        let reg = BlockRegistry::with_builtins();
+        let stone = reg.id_of("stone").unwrap();
+        let wall = move |x: i32, y: i32, z: i32| {
+            if x == 3 && (18..22).contains(&y) && z == 0 {
+                stone
+            } else {
+                BlockId::AIR
+            }
+        };
+        // Nearly horizontal sun along +X.
+        let sun = Vec3::new(1.0, 0.05, 0.0).normalize();
+        assert_eq!(
+            trace_sun_visibility(Vec3::new(0.5, 18.5, 0.5), sun, &wall, &reg),
+            0,
+            "ray hits the wall"
+        );
+        assert_eq!(
+            trace_sun_visibility(Vec3::new(0.5, 24.5, 0.5), sun, &wall, &reg),
+            15,
+            "ray passes above the wall"
+        );
     }
 
     #[test]

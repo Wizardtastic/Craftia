@@ -14,17 +14,23 @@
 //!                       (the fragment shader applies `fract()` per-tile
 //!                       so multi-block merges repeat the same tile instead
 //!                       of bleeding into neighbouring atlas tiles).
-//!   light: f32       — baked *sky/sun* visibility in [0, 1]: sunlight level
-//!                       × per-face directional shade × AO. Values > 1
-//!                       encode the water surface level.
-//!   tile: u32        — atlas tile index (carried `flat`; not interpolated)
+//!   light: f32       — baked sky access in [0, 1]: column skylight × AO.
+//!                       Values > 1 encode the water surface level.
+//!   tile: u32        — bits 0..7: atlas tile index.
+//!                       bits 8..15: ray-traced sun visibility for this face
+//!                       (0 = shadowed, 255 = fully lit), produced here by
+//!                       casting DDA sun rays through the voxel world.
+//!                       Carried `flat`; not interpolated.
 //!   light_color: u32 — RGB = light tint, A = block (torch) level 0..255.
 //!                       Keeping torch light in the alpha byte lets the chunk
 //!                       shader light sun and block light independently.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec3, Vec2, Vec3 as GVec3};
-use voxel_core::{math::chunk_origin, BlockId, CHUNK_SIZE};
+use voxel_core::{
+    math::{chunk_origin, local_index},
+    BlockId, CHUNK_SIZE,
+};
 
 use crate::chunk::Chunk;
 use crate::registry::{BlockDef, BlockKind, BlockRegistry, Face};
@@ -41,7 +47,8 @@ pub struct ChunkVertex {
     pub pos: [f32; 3],
     pub uv: [f32; 2],
     pub light: f32,
-    /// Atlas tile index used to select this quad's texture in the shader.
+    /// Bits 0..7 = atlas tile index used to select this quad's texture.
+    /// Bits 8..15 = ray-traced sun visibility (0 = shadowed, 255 = lit).
     /// The shader treats this as a `flat uint`; never interpolated.
     pub tile: u32,
     /// Packed RGBA light color. R,G,B in [0,255], A unused (255).
@@ -71,24 +78,23 @@ impl ChunkMesh {
 pub struct ChunkMeshBundle {
     pub opaque: ChunkMesh,
     pub transparent: ChunkMesh,
+    /// Cutout geometry that casts shadows but is not drawn in the opaque
+    /// pass: leaves and foliage crosses. Water and glass stay out of this
+    /// mesh so they do not cast solid shadows.
+    pub shadow: ChunkMesh,
 }
 
 impl ChunkMeshBundle {
     pub fn is_empty(&self) -> bool {
-        self.opaque.is_empty() && self.transparent.is_empty()
+        self.opaque.is_empty() && self.transparent.is_empty() && self.shadow.is_empty()
     }
 }
 
 // ── Baked lighting / geometry constants ──────────────────────────────────
-// Per-face lambert term: `diffuse * SUN_SHADE_SCALE + SUN_SHADE_BIAS`,
-// clamped to [0, 1]. Keeps shadow-side faces from going fully black.
-const SUN_SHADE_SCALE: f32 = 0.65;
-const SUN_SHADE_BIAS: f32 = 0.35;
-// Minimum light a solid face receives regardless of block light.
-const MIN_FACE_LIGHT: f32 = 0.15;
-// Foliage planes carry no AO; use a slightly higher floor so they stay
-// readable against the sky.
-const MIN_FOLIAGE_LIGHT: f32 = 0.2;
+// Vertex light stores sky access × AO; the `tile` word's second byte stores
+// ray-traced sun visibility. Because the sun rays are cast at mesh time, a
+// chunk mesh is only valid for the sun direction it was built with — the
+// streamer re-meshes chunks when the sun has moved far enough.
 // Half-width of the foliage cross planes, in blocks.
 const FOLIAGE_PLANE_WIDTH: f32 = 0.45;
 // Extra vertex light per unit of water level (0..8) — brightens water as it
@@ -96,6 +102,19 @@ const FOLIAGE_PLANE_WIDTH: f32 = 0.45;
 const WATER_LIGHT_BOOST: f32 = 0.5;
 // Cactus sides are pulled in from the block edge by this amount.
 const CACTUS_INSET: f32 = 3.0 / 16.0;
+
+/// `sun_vis` value for faces that carry no ray-traced sun occlusion (air,
+/// liquids, foliage and geometry the GPU mesher produces). 15 = fully lit, so
+/// the shader's sun term is unaffected.
+const SUN_UNSHADOWED: u8 = 15;
+
+/// Pack the atlas tile index and the ray-traced sun visibility into the single
+/// `tile` word of a vertex: bits 0..7 tile, bits 8..11 sun level (0..15, the
+/// same range as every other voxel light channel). Both chunk vertex shaders
+/// unpack it (`in_tile & 0xFF`, `(in_tile >> 8) & 0xF`).
+fn packed_tile(tile: u32, sun_vis: u8) -> u32 {
+    (tile & 0xFF) | ((sun_vis as u32 & 0xF) << 8)
+}
 
 // Base corner offsets and per-face UVs used by the block-shaped liquid and
 // cactus emitters. Keep geometry positions independent from texture data.
@@ -135,9 +154,12 @@ const S: usize = CHUNK_SIZE as usize;
 struct MaskCell {
     block_id: BlockId,
     ao: [f32; 4],
-    /// Sunlight level 0..15 at this cell — the sky/sun visibility channel
+    /// Sunlight level 0..15 at this cell — the ambient sky-access channel
     /// consumed by `frag_light` in the chunk shader.
     sun_light: u8,
+    /// Ray-traced sun visibility 0..=15 for this block's faces.
+    /// Becomes bits 8..11 of the vertex `tile` word.
+    sun_vis: u8,
     /// Block (torch) light level 0..15 at this cell. Packed into the alpha
     /// byte of `light_color` so the shader can light torches independently
     /// of the sun (this is what keeps caves and night interiors readable).
@@ -150,6 +172,7 @@ const EMPTY_CELL: MaskCell = MaskCell {
     block_id: BlockId::AIR,
     ao: [1.0; 4],
     sun_light: 0,
+    sun_vis: SUN_UNSHADOWED,
     torch_light: 0,
     light_color: 0,
 };
@@ -175,7 +198,32 @@ impl ChunkMesher {
         bundle.opaque.indices.reserve(nac * 6);
         bundle.transparent.vertices.reserve(nac);
         bundle.transparent.indices.reserve(nac * 2);
+        bundle.shadow.vertices.reserve(nac);
+        bundle.shadow.indices.reserve(nac * 2);
         let origin = chunk_origin(chunk.pos);
+
+        // Ray-trace the sun once per block, up front, so every face of a block
+        // shares the same occlusion result and the cast is paid once instead
+        // of six times. Prefers the local chunk copy over `sample` so the vast
+        // majority of ray steps never touch a world lock.
+        let sun_sample = |wx: i32, wy: i32, wz: i32| -> BlockId {
+            let lx = wx - origin.x;
+            let ly = wy - origin.y;
+            let lz = wz - origin.z;
+            if (0..CHUNK_SIZE).contains(&lx)
+                && (0..CHUNK_SIZE).contains(&ly)
+                && (0..CHUNK_SIZE).contains(&lz)
+            {
+                chunk.get(lx, ly, lz)
+            } else if sample_loaded(wx, wy, wz) {
+                sample(wx, wy, wz)
+            } else {
+                // Unloaded neighbours are air so rays escape the loaded region
+                // instead of casting phantom shadows along the load boundary.
+                BlockId::AIR
+            }
+        };
+        let sun_vis = sun_visibility_table(chunk, reg, sun_dir, &sun_sample);
 
         for ly in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
@@ -223,7 +271,6 @@ impl ChunkMesher {
                                 lz,
                                 def,
                                 origin,
-                                sun_dir,
                             );
                         }
                         _ => {}
@@ -236,10 +283,6 @@ impl ChunkMesher {
 
         for fi in 0..6usize {
             let face = Face::ALL[fi];
-            let n = face.normal();
-            let fn_f = GVec3::new(n.x as f32, n.y as f32, n.z as f32);
-            let diffuse = fn_f.dot(-sun_dir).max(0.0);
-            let directional = (diffuse * SUN_SHADE_SCALE + SUN_SHADE_BIAS).clamp(0.0, 1.0);
 
             for slice in 0..CHUNK_SIZE {
                 for v in 0..S {
@@ -254,6 +297,7 @@ impl ChunkMesher {
                             &sample,
                             &sample_loaded,
                             origin,
+                            &sun_vis,
                         );
                     }
                 }
@@ -264,7 +308,6 @@ impl ChunkMesher {
                     slice,
                     chunk,
                     reg,
-                    directional,
                     origin,
                 );
                 for cell in mask.iter_mut().flat_map(|r| r.iter_mut()) {
@@ -295,6 +338,7 @@ fn build_mask_cell(
     sample: &impl Fn(i32, i32, i32) -> BlockId,
     sample_loaded: &impl Fn(i32, i32, i32) -> bool,
     origin: glam::IVec3,
+    sun_vis: &[u8],
 ) -> MaskCell {
     let (lx, ly, lz) = mask_to_block(face, slice, u, v);
     let id = chunk.get(lx, ly, lz);
@@ -399,9 +443,98 @@ fn build_mask_cell(
         block_id: id,
         ao,
         sun_light: sl,
+        sun_vis: sun_vis[local_index(lx, ly, lz)],
         torch_light: tl,
         light_color: lc,
     }
+}
+
+/// Ray-traced sun visibility for every block in `chunk`, indexed by
+/// [`local_index`]. Blocks that can never receive direct sun (air, liquids,
+/// fully enclosed or unexposed blocks) stay at [`SUN_UNSHADOWED`] and cost no
+/// ray casts at all.
+fn sun_visibility_table(
+    chunk: &Chunk,
+    reg: &BlockRegistry,
+    sun_dir: GVec3,
+    sample: &dyn Fn(i32, i32, i32) -> BlockId,
+) -> Vec<u8> {
+    let mut out = vec![SUN_UNSHADOWED; (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize];
+    let sun = sun_dir.normalize_or_zero();
+    // Below the horizon there is no direct sun to cast shadows from at all.
+    if sun.y <= 1e-4 {
+        return out;
+    }
+    let origin = chunk_origin(chunk.pos);
+    for ly in 0..CHUNK_SIZE {
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                let id = chunk.get(lx, ly, lz);
+                if id.is_air() {
+                    continue;
+                }
+                let def = reg.get(id);
+                if !def.is_rendered() || def.kind == BlockKind::Liquid {
+                    continue;
+                }
+                // `sunlight` is ambient sky access: zero means the block is
+                // fully enclosed, so it can never see the sun and the ray cast
+                // would be pure waste.
+                if chunk.get_sunlight(lx, ly, lz) == 0 {
+                    out[local_index(lx, ly, lz)] = 0;
+                    continue;
+                }
+                if !has_open_face(chunk, reg, sample, origin, lx, ly, lz) {
+                    continue;
+                }
+                let center = GVec3::new(
+                    (origin.x + lx) as f32 + 0.5,
+                    (origin.y + ly) as f32 + 0.5,
+                    (origin.z + lz) as f32 + 0.5,
+                );
+                out[local_index(lx, ly, lz)] =
+                    crate::light::trace_sun_visibility(center, sun, sample, reg);
+            }
+        }
+    }
+    out
+}
+
+/// True when any of the six neighbours is non-opaque, i.e. the block has at
+/// least one face exposed to the sky and is worth ray tracing.
+fn has_open_face(
+    chunk: &Chunk,
+    reg: &BlockRegistry,
+    sample: &dyn Fn(i32, i32, i32) -> BlockId,
+    origin: glam::IVec3,
+    lx: i32,
+    ly: i32,
+    lz: i32,
+) -> bool {
+    for (dx, dy, dz) in [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ] {
+        let nx = lx + dx;
+        let ny = ly + dy;
+        let nz = lz + dz;
+        let neighbour = if (0..CHUNK_SIZE).contains(&nx)
+            && (0..CHUNK_SIZE).contains(&ny)
+            && (0..CHUNK_SIZE).contains(&nz)
+        {
+            chunk.get(nx, ny, nz)
+        } else {
+            sample(origin.x + nx, origin.y + ny, origin.z + nz)
+        };
+        if !reg.get(neighbour).opaque {
+            return true;
+        }
+    }
+    false
 }
 
 fn iv3(v: GVec3) -> IVec3 {
@@ -514,6 +647,7 @@ const CORNER_AO_MAP: [[(usize, usize); 4]; 6] = [
 fn can_merge(a: &MaskCell, b: &MaskCell, pairs: &[(usize, usize); 2]) -> bool {
     a.block_id == b.block_id
         && a.sun_light == b.sun_light
+        && a.sun_vis == b.sun_vis
         && a.torch_light == b.torch_light
         && a.light_color == b.light_color
         && a.ao[pairs[0].0] == b.ao[pairs[0].1]
@@ -532,6 +666,7 @@ fn can_merge_down(
         let b = &bot[u + i];
         if a.block_id != b.block_id
             || a.sun_light != b.sun_light
+            || a.sun_vis != b.sun_vis
             || a.torch_light != b.torch_light
             || a.light_color != b.light_color
         {
@@ -637,7 +772,6 @@ fn greedy_emit(
     slice: i32,
     _chunk: &Chunk,
     reg: &BlockRegistry,
-    directional: f32,
     _origin: glam::IVec3,
 ) {
     let fi = fi_from_face(face);
@@ -692,7 +826,8 @@ fn greedy_emit(
                 mask[v + dv][u + du].ao[ao_idx]
             });
 
-            let light = directional * (sun_light as f32 / 15.0).max(MIN_FACE_LIGHT);
+            let light = sun_light as f32 / 15.0;
+            let tile_and_sun = packed_tile(tile as u32, cell.sun_vis);
             let positions = merged_positions(face, u as i32, v as i32, w as i32, h as i32, slice);
             let uvs = merged_uvs(face, w as u32, h as u32);
             // RGB = light tint, A = torch level. The alpha channel used to be
@@ -701,7 +836,8 @@ fn greedy_emit(
             let packed_color =
                 (cell.light_color & 0x00FF_FFFF) | ((cell.torch_light as u32) << 24);
 
-            let target = match reg.get(cell.block_id).kind {
+            let cell_def = reg.get(cell.block_id);
+            let target = match cell_def.kind {
                 BlockKind::Transparent => &mut bundle.transparent,
                 _ => &mut bundle.opaque,
             };
@@ -712,7 +848,7 @@ fn greedy_emit(
                     pos: positions[c],
                     uv: uvs[c],
                     light: light * corner_ao[c],
-                    tile: tile as u32,
+                    tile: tile_and_sun,
                     light_color: packed_color,
                 });
             }
@@ -738,6 +874,22 @@ fn greedy_emit(
                     vertex_base + 3,
                 ]);
             }
+
+            // Leaves are blended in the transparent pass, but trees must still
+            // shade the ground. Copy just the leaf quads into the cutout
+            // shadow mesh; water and glass never enter it.
+            if cell_def.material.flags & crate::registry::material_flag::LEAVES_SSS != 0 {
+                let src = &bundle.transparent;
+                let vstart = src.vertices.len() - 4;
+                let shadow_base = bundle.shadow.vertices.len() as u32;
+                bundle.shadow.vertices.extend_from_slice(&src.vertices[vstart..]);
+                let istart = src.indices.len() - 6;
+                bundle.shadow.indices.extend(
+                    src.indices[istart..]
+                        .iter()
+                        .map(|i| *i - vstart as u32 + shadow_base),
+                );
+            }
         }
     }
 }
@@ -758,7 +910,7 @@ fn emit_foliage_cross(
 ) {
     let tile = def.textures.tile(Face::PosY);
     let sun_light = chunk.get_sunlight(lx, ly, lz) as f32 / 15.0;
-    let light = sun_light.max(MIN_FOLIAGE_LIGHT);
+    let light = sun_light;
     let bx = lx as f32;
     let by = ly as f32;
     let bz = lz as f32;
@@ -790,35 +942,48 @@ fn emit_foliage_cross(
         [1.0, 0.0],
         [0.0, 0.0],
     ];
-    let tgt = &mut bundle.transparent;
-    let base = tgt.vertices.len() as u32;
     let packed_color = (chunk.get_combined_light_color(lx, ly, lz) & 0x00FF_FFFF)
         | ((chunk.get_torchlight(lx, ly, lz) as u32) << 24);
-    for i in 0..8 {
-        // Local tile-repeat UVs `[0, 1] × [0, 1]`; the shader applies
-        // `fract()` per tile so neighbouring atlas tiles are never sampled.
-        tgt.vertices.push(ChunkVertex {
-            pos: positions[i],
-            uv: [uvs[i][0], uvs[i][1]],
-            light,
-            tile: tile as u32,
-            light_color: packed_color,
-        });
-    }
-    tgt.indices.extend_from_slice(&[
-        base,
-        base + 1,
-        base + 2,
-        base,
-        base + 2,
-        base + 3,
-        base + 4,
-        base + 5,
-        base + 6,
-        base + 4,
-        base + 6,
-        base + 7,
-    ]);
+    let (base, idx_start) = {
+        let tgt = &mut bundle.transparent;
+        let base = tgt.vertices.len() as u32;
+        let idx_start = tgt.indices.len();
+        for i in 0..8 {
+            // Local tile-repeat UVs `[0, 1] × [0, 1]`; the shader applies
+            // `fract()` per tile so neighbouring atlas tiles are never sampled.
+            tgt.vertices.push(ChunkVertex {
+                pos: positions[i],
+                uv: [uvs[i][0], uvs[i][1]],
+                light,
+                tile: packed_tile(tile as u32, SUN_UNSHADOWED),
+                light_color: packed_color,
+            });
+        }
+        tgt.indices.extend_from_slice(&[
+            base,
+            base + 1,
+            base + 2,
+            base,
+            base + 2,
+            base + 3,
+            base + 4,
+            base + 5,
+            base + 6,
+            base + 4,
+            base + 6,
+            base + 7,
+        ]);
+        (base, idx_start)
+    };
+
+    // Foliage crosses also cast shadows (tall grass, flowers), matching their
+    // visible silhouettes rather than a solid block.
+    let src = &bundle.transparent;
+    let shadow_base = bundle.shadow.vertices.len() as u32;
+    bundle.shadow.vertices.extend_from_slice(&src.vertices[base as usize..]);
+    bundle.shadow
+        .indices
+        .extend(src.indices[idx_start..].iter().map(|i| *i - base + shadow_base));
 }
 
 fn emit_water_block(
@@ -917,8 +1082,8 @@ fn emit_water_block(
             bundle.transparent.vertices.push(ChunkVertex {
                 pos: [cp.x, cp.y, cp.z],
                 uv: [uvs[c].x, uvs[c].y],
-                light: vertex_light,
-                tile: tile as u32,
+                                    light: vertex_light,
+                    tile: packed_tile(tile as u32, SUN_UNSHADOWED),
                 light_color: packed_color,
             });
         }
@@ -936,7 +1101,6 @@ fn emit_cactus_block(
     lz: i32,
     def: &BlockDef,
     origin: glam::IVec3,
-    sun_dir: GVec3,
 ) {
     let wx = origin.x + lx;
     let wy = origin.y + ly;
@@ -954,10 +1118,7 @@ fn emit_cactus_block(
         }
 
         let base = FACE_BASE[fi];
-        let fn_f = GVec3::new(n.x as f32, n.y as f32, n.z as f32);
-        let diffuse = fn_f.dot(-sun_dir).max(0.0);
-        let directional = (diffuse * SUN_SHADE_SCALE + SUN_SHADE_BIAS).clamp(0.0, 1.0);
-        let light = directional * block_light.max(MIN_FACE_LIGHT);
+        let light = block_light;
 
         let tile = def.textures.tile(*face);
         let face_normal = IVec3::new(n.x, n.y, n.z);
@@ -1007,7 +1168,7 @@ fn emit_cactus_block(
                 pos: [cp.x, cp.y, cp.z],
                 uv: [u, v],
                 light: light * ao,
-                tile: tile as u32,
+                tile: packed_tile(tile as u32, SUN_UNSHADOWED),
                 light_color: packed_color,
             });
         }
@@ -1055,6 +1216,77 @@ mod tests {
             Vec3::new(0.0, -1.0, 0.0),
         );
         assert!(bundle.transparent.is_empty());
+    }
+
+    #[test]
+    fn mesher_bakes_ray_traced_sun_visibility() {
+        let reg = BlockRegistry::with_builtins();
+        let stone = reg.id_of("stone").unwrap();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0));
+        // A three-block pillar: only the top block can see an overhead sun.
+        for y in 3..6 {
+            chunk.set(7, y, 7, stone);
+        }
+        crate::light::compute_sunlight(&mut chunk, &reg, Vec3::Y, &air_sample);
+
+        let sun_of = |v: &ChunkVertex| ((v.tile >> 8) & 0xFF) as u8;
+        let bundle = ChunkMesher.build(
+            &chunk,
+            &reg,
+            air_sample,
+            air_water_sample,
+            air_loaded_sample,
+            Vec3::Y,
+        );
+        assert!(
+            bundle.opaque.vertices.iter().all(|v| v.tile & 0xFF != 0),
+            "the atlas tile index must survive the packing"
+        );
+        assert!(
+            bundle.opaque.vertices.iter().any(|v| sun_of(v) == 15),
+            "the block on top of the pillar must be lit"
+        );
+        assert!(
+            bundle.opaque.vertices.iter().any(|v| sun_of(v) == 0),
+            "blocks below the pillar top must be shadowed"
+        );
+
+        // With the sun below the horizon nothing can be shadowed by it.
+        let night = ChunkMesher.build(
+            &chunk,
+            &reg,
+            air_sample,
+            air_water_sample,
+            air_loaded_sample,
+            Vec3::new(0.0, -1.0, 0.0),
+        );
+        assert!(night.opaque.vertices.iter().all(|v| sun_of(v) == 15));
+    }
+
+    #[test]
+    fn leaves_cast_shadows_but_glass_does_not() {
+        let reg = BlockRegistry::with_builtins();
+        let leaves = reg.id_of("leaves").unwrap();
+        let glass = reg.id_of("glass").unwrap();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0));
+        chunk.set(7, 7, 7, leaves);
+        chunk.set(3, 3, 3, glass);
+
+        let bundle = ChunkMesher.build(
+            &chunk,
+            &reg,
+            air_sample,
+            air_water_sample,
+            air_loaded_sample,
+            Vec3::new(0.0, -1.0, 0.0),
+        );
+
+        assert_eq!(bundle.shadow.vertices.len(), 24, "one leaves block");
+        assert_eq!(bundle.shadow.indices.len(), 36);
+        assert!(
+            bundle.transparent.vertices.len() > bundle.shadow.vertices.len(),
+            "glass stays in the transparent pass only"
+        );
     }
 
     #[test]

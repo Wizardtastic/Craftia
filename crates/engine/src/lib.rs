@@ -622,6 +622,9 @@ pub struct EngineConfig {
     /// Optional camera yaw/pitch override (radians) for auto-capture runs.
     /// Set via `--camrot`.
     pub capture_cam_rot: Option<(f32, f32)>,
+    /// Optional world time in seconds for auto-capture runs (`--time`), so
+    /// noon, dusk and night screenshots are deterministic.
+    pub capture_time: Option<f64>,
     /// Spawn position (world space). If `None`, a surface height is found.
     pub spawn: Option<[f32; 3]>,
     /// Day length in seconds.
@@ -987,9 +990,15 @@ impl EngineApp {
 
         // Sky irradiance: warm-ish at the horizon, blue overhead, and a
         // deep navy moonlight floor at night.
-        let day_ambient = [0.30, 0.42, 0.64];
-        let dusk_ambient = [0.26, 0.20, 0.28];
-        let night_ambient = [0.026, 0.034, 0.062];
+        // Ambient irradiance is the only light reaching shadowed and
+        // overcast surfaces, so it carries most of the readability budget.
+        // Day values are tuned against the 3.3 sun radiance and 0.6 exposure:
+        // canopy shade lands near a third of full sun instead of black. Night
+        // keeps a cool moonlit floor that auto-exposure lifts just enough to
+        // see silhouettes.
+        let day_ambient = [1.35, 1.55, 1.95];
+        let dusk_ambient = [0.55, 0.40, 0.46];
+        let night_ambient = [0.085, 0.105, 0.17];
         let twilight = (1.0 - day) * sun_visibility;
         let mut sky_ambient = lerp(night_ambient, day_ambient, day);
         for c in 0..3 {

@@ -1,10 +1,8 @@
 //! Phase 1 — GPU-driven rendering pipeline.
 //!
-//! Replaces the per-chunk `vkCmdDrawIndexed` loop with GPU-driven primitives:
-//! mega geometry buffers, a compute-shader frustum cull writing into an indirect
-//! command buffer, and a bindless origins SSBO. The legacy per-chunk path
-//! remains the default; this subsystem is enabled via
-//! [`crate::renderer::RendererConfig::gpu_driven`].
+//! Every chunk draws through GPU-driven primitives: mega geometry buffers, a
+//! compute-shader frustum cull writing into an indirect command buffer, and a
+//! bindless origins SSBO. This is the only chunk rendering path.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -54,7 +52,11 @@ pub struct ChunkAabb {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CullUbo {
+    /// Current frame: used for the frustum test.
     pub view_proj: [f32; 16],
+    /// Previous frame: used for the Hi-Z test, because the pyramid is built
+    /// from the previous frame's depth buffer.
+    pub prev_view_proj: [f32; 16],
     pub cam_pos: [f32; 4],
     /// xyz = LOD switch distances (world units), w = LOD count.
     pub lod_dist: [f32; 4],
@@ -81,6 +83,8 @@ struct GpuChunk {
     /// Indexed by LOD level (0 = full detail, 1 = 2x downsample, ...).
     opaque: [Option<MegaSlot>; MAX_LODS],
     transparent: [Option<MegaSlot>; MAX_LODS],
+    /// Cutout shadow casters (leaves, foliage); not drawn in the main pass.
+    shadow: [Option<MegaSlot>; MAX_LODS],
 }
 
 /// A queued GPU-mesh job (Phase 2): one (chunk, pass, LOD) to compute + slot.
@@ -157,6 +161,10 @@ pub struct GpuDriven {
     gpu_mesher: Option<GpuMesher>,
     /// xy = Hi-Z pyramid mip-0 size, z = mip count, w = occlusion depth bias.
     hiz_params: [f32; 4],
+    /// Previous frame's camera view-projection, matching the depth pyramid.
+    /// `None` until the first cull (or after a resize), when occlusion is
+    /// skipped because there is no valid depth history yet.
+    prev_view_proj: Option<[f32; 16]>,
     /// Queued GPU-mesh jobs (Phase 2) waiting to be processed. Drained one
     /// job per frame by [`GpuDriven::drain_gpu_meshes`], which amortizes a
     /// burst of streaming chunks across frames instead of stalling on N×2
@@ -443,6 +451,7 @@ impl GpuDriven {
             indirect_descriptor_set: ind_set,
             gpu_mesher,
             hiz_params,
+            prev_view_proj: None,
             pending_meshes: VecDeque::new(),
             gpu_inflight: None,
             retired_buffers: Vec::new(),
@@ -455,6 +464,45 @@ impl GpuDriven {
     /// Number of transparent draw slots in the current indirect command buffer.
     pub fn transparent_slots(&self) -> usize {
         self.transparent_slots
+    }
+
+    /// Mega vertex/index buffers shared by every pass.
+    pub fn mega_buffers(&self) -> (vk::Buffer, vk::Buffer) {
+        (self.mega_vbo.buffer, self.mega_ibo.buffer)
+    }
+
+    /// Total live vertex and index counts across every pass and LOD.
+    pub fn buffer_stats(&self) -> (u32, u32) {
+        let mut verts = 0u32;
+        let mut indices = 0u32;
+        for ch in self.chunks.values() {
+            for pass in [&ch.opaque, &ch.transparent, &ch.shadow] {
+                for slot in pass.iter().flatten() {
+                    verts += slot.vertex_count;
+                    indices += slot.index_count;
+                }
+            }
+        }
+        (verts, indices)
+    }
+
+    /// Visit every chunk mesh that participates in the shadow map: opaque
+    /// geometry plus cutout casters (leaves/foliage). `cutout` is true for the
+    /// latter. The renderer culls these against each cascade and issues a
+    /// direct draw from the mega-buffers; the GPU-driven cull buffer is not
+    /// reused because shadow cascades see different geometry than the camera.
+    pub fn for_each_shadow_caster(
+        &self,
+        mut f: impl FnMut(ChunkPos, vk::DeviceSize, vk::DeviceSize, u32, bool),
+    ) {
+        for (&pos, ch) in &self.chunks {
+            for (pass, cutout) in [(&ch.opaque, false), (&ch.shadow, true)] {
+                let lod = lowest_lod(pass);
+                if let Some(slot) = lod_slot(pass, lod) {
+                    f(pos, slot.vbo_offset, slot.ibo_offset, slot.index_count, cutout);
+                }
+            }
+        }
     }
 
     /// Re-point the cull shader's Hi-Z binding at a (possibly resized) pyramid
@@ -477,6 +525,9 @@ impl GpuDriven {
             .image_info(&info);
         unsafe { device.update_descriptor_sets(&[write], &[]) };
         self.hiz_params = params;
+        // The new pyramid starts empty, so there is no depth history for the
+        // first cull after the resize.
+        self.prev_view_proj = None;
     }
 
     /// Update the block properties table used by the GPU compute mesher.
@@ -553,6 +604,7 @@ impl GpuDriven {
                         match inf.job.pass {
                             MeshPass::Opaque => entry.opaque[inf.job.lod as usize] = None,
                             MeshPass::Transparent => entry.transparent[inf.job.lod as usize] = None,
+                            MeshPass::Shadow => entry.shadow[inf.job.lod as usize] = None,
                         }
                         self.dirty = true;
                         unsafe { ctx.device.destroy_fence(inf.fence, None) };
@@ -620,6 +672,7 @@ impl GpuDriven {
                         MeshPass::Transparent => {
                             entry.transparent[inf.job.lod as usize] = Some(slot)
                         }
+                        MeshPass::Shadow => entry.shadow[inf.job.lod as usize] = Some(slot),
                     }
                     self.dirty = true;
                     unsafe { ctx.device.destroy_fence(inf.fence, None) };
@@ -635,7 +688,7 @@ impl GpuDriven {
             return;
         };
         let pass_mode = match job.pass {
-            MeshPass::Opaque => 0u32,
+            MeshPass::Opaque | MeshPass::Shadow => 0u32,
             MeshPass::Transparent => 1u32,
         };
         if self.mega_vbo_used + MESH_VERT_BYTES > self.mega_vbo_capacity
@@ -1059,6 +1112,7 @@ impl GpuDriven {
             match u.pass {
                 MeshPass::Opaque => entry.opaque[0] = Some(slot),
                 MeshPass::Transparent => entry.transparent[0] = Some(slot),
+                MeshPass::Shadow => entry.shadow[0] = Some(slot),
             }
             vc += vs;
             ic += is;
@@ -1110,6 +1164,11 @@ impl GpuDriven {
             for (lod, s) in chunk.transparent.iter().enumerate() {
                 if let Some(s) = s {
                     live.push((pos, MeshPass::Transparent, lod as u32, *s));
+                }
+            }
+            for (lod, s) in chunk.shadow.iter().enumerate() {
+                if let Some(s) = s {
+                    live.push((pos, MeshPass::Shadow, lod as u32, *s));
                 }
             }
         }
@@ -1176,6 +1235,7 @@ impl GpuDriven {
             match pass {
                 MeshPass::Opaque => ch.opaque[lod as usize] = Some(slot),
                 MeshPass::Transparent => ch.transparent[lod as usize] = Some(slot),
+                MeshPass::Shadow => ch.shadow[lod as usize] = Some(slot),
             }
         }
         self.dirty = true;
@@ -1192,7 +1252,7 @@ impl GpuDriven {
         let mut positions: Vec<ChunkPos> = self.chunks.keys().copied().collect();
         positions.sort_by_key(|p| (p.0.x, p.0.y, p.0.z));
         self.order = positions.clone();
-        let (mut oc, mut tc) = (0usize, 0usize);
+        let (mut oc, mut tc, mut sc) = (0usize, 0usize, 0usize);
         for pos in &self.order {
             let ch = &self.chunks[pos];
             if ch.opaque.iter().any(|s| s.is_some()) {
@@ -1201,15 +1261,18 @@ impl GpuDriven {
             if ch.transparent.iter().any(|s| s.is_some()) {
                 tc += 1;
             }
+            if ch.shadow.iter().any(|s| s.is_some()) {
+                sc += 1;
+            }
         }
         self.opaque_slots = oc;
         self.transparent_slots = tc;
-        let total = oc + tc;
+        let total = oc + tc + sc;
         let mut cmds = vec![DrawIndexedIndirectCommand::default(); total];
         let mut lod_cmds = vec![DrawIndexedIndirectCommand::default(); total * MAX_LODS];
         let mut aabbs = vec![ChunkAabb::default(); total];
         let mut origins = vec![ChunkOrigin::default(); total];
-        let (mut oi, mut ti) = (0usize, oc);
+        let (mut oi, mut ti, mut si) = (0usize, oc, oc + tc);
         for pos in &self.order {
             let ch = &self.chunks[pos];
             let org = chunk_origin(*pos);
@@ -1241,6 +1304,17 @@ impl GpuDriven {
                 aabbs[ti] = ab;
                 origins[ti] = ChunkOrigin { origin: o4 };
                 ti += 1;
+            }
+            if ch.shadow.iter().any(|s| s.is_some()) {
+                for lod in 0..MAX_LODS {
+                    if let Some(s) = lod_slot(&ch.shadow, lod) {
+                        lod_cmds[si * MAX_LODS + lod] = indirect_cmd(s, si as u32);
+                    }
+                }
+                cmds[si] = lod_cmds[si * MAX_LODS + lowest_lod(&ch.shadow)];
+                aabbs[si] = ab;
+                origins[si] = ChunkOrigin { origin: o4 };
+                si += 1;
             }
         }
         if let Ok(slice) = self.indirect_cmd_buf.mapped_slice_mut() {
@@ -1298,13 +1372,20 @@ impl GpuDriven {
         if let Ok(slice) = self.cull_ubo.mapped_slice_mut() {
             let mut a = [0f32; 16];
             a.copy_from_slice(vp_cols);
+            let mut hiz = self.hiz_params;
+            if self.prev_view_proj.is_none() {
+                // First frame after startup/resize: the pyramid has no valid
+                // history, so disable the occlusion test for this dispatch.
+                hiz[2] = 0.0;
+            }
             let ubo = CullUbo {
                 view_proj: a,
+                prev_view_proj: self.prev_view_proj.unwrap_or(a),
                 cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
                 // xyz = LOD switch distances, w = LOD count. With MAX_LODS
                 // levels there are MAX_LODS-1 thresholds; remaining slots 0.
                 lod_dist: [LOD0_DISTANCE, 0.0, 0.0, MAX_LODS as f32],
-                hiz: self.hiz_params,
+                hiz,
             };
             slice[..std::mem::size_of::<CullUbo>()].copy_from_slice(bytemuck::bytes_of(&ubo));
             if let Err(e) = self.cull_ubo.flush_whole(device) {
@@ -1361,6 +1442,13 @@ impl GpuDriven {
             );
             device.cmd_dispatch(cmd, dc.div_ceil(64), 1, 1);
         }
+        // The depth pyramid this dispatch just consumed was built from the
+        // current `a` matrix's frame; next frame's Hi-Z test must use it.
+        self.prev_view_proj = Some({
+            let mut a = [0f32; 16];
+            a.copy_from_slice(vp_cols);
+            a
+        });
         let barrier = vk::BufferMemoryBarrier::default()
             .buffer(self.indirect_cmd_buf.buffer)
             .offset(0)

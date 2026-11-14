@@ -42,6 +42,9 @@ const MAX_COLLISION_STEP: f32 = 0.45;
 /// How long a jump press stays queued, so taps shorter than a 50 ms tick are
 /// not dropped at high refresh rates.
 const JUMP_BUFFER_SECONDS: f32 = 0.15;
+/// How quickly the bob envelope follows the movement state. Fast enough to
+/// feel responsive, slow enough that stopping never snaps the camera.
+const BOB_FADE_RATE: f32 = 14.0;
 
 // --- Horizontal speeds (blocks per second) --------------------------------
 pub const WALK_SPEED: f32 = 4.317;
@@ -480,12 +483,23 @@ fn update_view_state(
     speed: f32,
 ) {
     let horiz_speed = Vec3::new(velocity.x, 0.0, velocity.z).length();
-    if state.on_ground && horiz_speed > 0.1 && !sneaking && !in_water {
+    let walking = state.on_ground && horiz_speed > 0.1 && !sneaking && !in_water;
+
+    // Advance the phase only while walking. Fading an *amplitude* envelope
+    // (rather than decaying the phase itself) keeps the sine continuous while
+    // it fades, which is what stops the camera from shaking at a stop.
+    if walking {
         let speed_factor = (horiz_speed / speed).min(1.0);
         let bob_freq = if sprinting { 18.0 } else { 12.0 };
         state.bob_phase += dt * speed_factor * bob_freq;
-    } else {
-        state.bob_phase *= 1.0 - 5.0 * dt;
+    }
+
+    let target = if walking { 1.0 } else { 0.0 };
+    let blend = 1.0 - (-dt * BOB_FADE_RATE).exp();
+    state.bob_amplitude += (target - state.bob_amplitude) * blend;
+    if state.bob_amplitude < 1e-3 && target == 0.0 {
+        state.bob_amplitude = 0.0;
+        state.bob_phase = 0.0;
     }
 
     if state.mining_swing > 0.0 {
@@ -522,6 +536,62 @@ mod tests {
             (height - 1.2522).abs() < 1e-3,
             "jump height should be 1.2522 blocks, got {height}"
         );
+    }
+
+    #[test]
+    fn bob_fades_out_without_dragging_the_phase_backwards() {
+        let mut state = PlayerState {
+            on_ground: true,
+            bob_phase: 2.7,
+            bob_amplitude: 1.0,
+            ..Default::default()
+        };
+        let walking = Vec3::new(0.0, 0.0, -WALK_SPEED);
+        for _ in 0..30 {
+            update_view_state(
+                &mut state,
+                &walking,
+                1.0 / 60.0,
+                false,
+                false,
+                false,
+                WALK_SPEED,
+            );
+        }
+        assert!(state.bob_amplitude > 0.9, "walking should hold the envelope");
+
+        let phase_at_stop = state.bob_phase;
+        let stopped = Vec3::ZERO;
+        for _ in 0..10 {
+            update_view_state(
+                &mut state,
+                &stopped,
+                1.0 / 60.0,
+                false,
+                false,
+                false,
+                WALK_SPEED,
+            );
+        }
+        assert_eq!(
+            state.bob_phase, phase_at_stop,
+            "the phase must freeze when walking stops"
+        );
+        assert!(state.bob_amplitude < 0.9, "the envelope should be fading");
+
+        for _ in 0..90 {
+            update_view_state(
+                &mut state,
+                &stopped,
+                1.0 / 60.0,
+                false,
+                false,
+                false,
+                WALK_SPEED,
+            );
+        }
+        assert_eq!(state.bob_amplitude, 0.0);
+        assert_eq!(state.bob_phase, 0.0, "a settled player restarts from zero");
     }
 
     #[test]

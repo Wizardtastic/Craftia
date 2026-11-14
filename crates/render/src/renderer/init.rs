@@ -22,8 +22,6 @@ pub(crate) struct ShaderBlobs {
     pub particle_frag: Vec<u8>,
     pub overlay_vert: Vec<u8>,
     pub overlay_frag: Vec<u8>,
-    pub aabb_vert: Vec<u8>,
-    pub aabb_frag: Vec<u8>,
 }
 
 /// Load all built-in shader SPIR-V blobs from the `build.rs` output directory.
@@ -45,8 +43,6 @@ pub(crate) fn load_shader_blobs() -> ShaderBlobs {
         particle_frag: include_bytes!(concat!(env!("OUT_DIR"), "/particle.frag.spv")).to_vec(),
         overlay_vert: include_bytes!(concat!(env!("OUT_DIR"), "/overlay.vert.spv")).to_vec(),
         overlay_frag: include_bytes!(concat!(env!("OUT_DIR"), "/overlay.frag.spv")).to_vec(),
-        aabb_vert: include_bytes!(concat!(env!("OUT_DIR"), "/aabb_occlusion.vert.spv")).to_vec(),
-        aabb_frag: include_bytes!(concat!(env!("OUT_DIR"), "/aabb_occlusion.frag.spv")).to_vec(),
     }
 }
 

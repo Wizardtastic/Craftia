@@ -27,7 +27,6 @@ use swapchain::create_framebuffer_with;
 
 use crate::MaterialTable;
 
-use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -35,13 +34,12 @@ use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use ash::{Entry, Instance as AshInstance};
 use glam::{Mat4, Vec3};
-use parking_lot::RwLock;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use std::path::Path;
 
 use voxel_core::{
-    math::{chunk_aabb, chunk_center, chunk_origin, ChunkPos},
+    math::{chunk_origin, ChunkPos},
     Camera, Frustum,
 };
 
@@ -75,6 +73,8 @@ pub struct GpuTimings {
 pub enum MeshPass {
     Opaque,
     Transparent,
+    /// Cutout geometry (leaves, foliage) rendered only into the shadow map.
+    Shadow,
 }
 
 /// Vertex + index data for one chunk pass, as raw bytes ready to upload.
@@ -122,18 +122,13 @@ pub struct RendererConfig {
     /// Enable screen-space ambient occlusion (SSAO). Requires MSAA disabled.
     pub ssao_enabled: bool,
 
-    /// Evaluate cascaded shadow maps in the chunk shader (baked into the
-    /// `SHADOW_ENABLED` specialization constant). The engine still skips
-    /// uploading shadow data when this is false.
+    /// Apply the chunk mesher's ray-traced sun visibility in the chunk
+    /// shader. Shadows are baked per vertex at mesh time, so this is a plain
+    /// lighting switch (uploaded as `FogUbo::sun_dir_pad.w`) and costs no
+    /// per-frame GPU work; toggling it never requires a re-mesh.
     pub shadow_enabled: bool,
-    /// Enable the Phase-1 GPU-driven chunk rendering pipeline: indirect
-    /// multi-draw + compute-shader frustum culling + bindless origins SSBO.
-    /// When `true`, the per-chunk `vkCmdDrawIndexed` loop is replaced by one
-    /// `vkCmdDrawIndexedIndirect` per pass. When `false` (default), the legacy
-    /// per-chunk path runs. Requires `multi_draw_indirect` +
-    /// `draw_indirect_first_instance` device features (auto-enabled).
-    pub gpu_driven: bool,
-    /// Enable the Phase-2 GPU compute chunk mesher. Requires `gpu_driven`.
+    /// Enable the Phase-2 GPU compute chunk mesher. The chunk renderer itself
+    /// is always GPU-driven (indirect multi-draw + Hi-Z culling).
     /// When `true`, distant chunks are meshed on the GPU via a compute shader
     /// (naive face extraction, no greedy merge) instead of the CPU mesher.
     pub gpu_meshing: bool,
@@ -152,81 +147,12 @@ impl Default for RendererConfig {
             shader_dir: None,
             particle_softness: 0.3,
             msaa_samples: 4,
-            occlusion_culling: true,
+            occlusion_culling: false,
             ssao_enabled: true,
             shadow_enabled: true,
-            gpu_driven: false,
             gpu_meshing: false,
         }
     }
-}
-
-/// Per-chunk GPU buffers for a single render pass.
-struct PassBuffers {
-    vbo: GpuBuffer,
-    ibo: GpuBuffer,
-    index_count: u32,
-}
-
-/// Per-chunk GPU buffers, split by render pass. A chunk at a water-land border
-/// has both; a purely inland chunk has only opaque.
-struct ChunkBuffers {
-    opaque: Option<PassBuffers>,
-    transparent: Option<PassBuffers>,
-}
-
-impl ChunkBuffers {
-    fn new() -> Self {
-        Self {
-            opaque: None,
-            transparent: None,
-        }
-    }
-
-    fn destroy(self, device: &ash::Device, alloc: &Alloc) {
-        if let Some(b) = self.opaque {
-            b.vbo.destroy(device, alloc);
-            b.ibo.destroy(device, alloc);
-        }
-        if let Some(b) = self.transparent {
-            b.vbo.destroy(device, alloc);
-            b.ibo.destroy(device, alloc);
-        }
-    }
-}
-
-/// Items that cannot be destroyed the moment we'd like to because the GPU
-/// may still be referencing them (in flight on the graphics queue). We
-/// tag each with the `frame_counter` value at submission time and drain
-/// them in `drain_pending_destructions` once the counter has advanced by
-/// at least `FRAMES_IN_FLIGHT` — by then the corresponding per-frame
-/// in-flight fence has signalled, so the GPU is past every resource that
-/// batch submitted.
-///
-/// This is the heart of the "two freezes + crash" fix:
-///  * No more `device.wait_for_fences(..., u64::MAX)` in `upload_chunks`
-///    (which previously stalled the main thread for many seconds during
-///    initial world streaming — perceived as freeze #2).
-///  * No more eager `vbo.destroy()` / `ibo.destroy()` /
-///    `staging.destroy()` immediately after submit (which previously
-///    released GPU-side memory mid-draw — Vulkan validation dropped
-///    the device and produced the crash).
-enum PendingDestroy {
-    ChunkValue(PassBuffers),
-    Staging(GpuBuffer),
-    /// Per-batch upload command buffer + its associated fence.
-    /// Allocated from `command_pool` + a fresh `vk::Fence`, submitted
-    /// once with `fence`, freed in `drain_pending_destructions` after
-    /// `wait_for_fences(fence)` returns signaled. The cmd buffer rule
-    /// (`VUID-vkFreeCommandBuffers-pCommandBuffers-00047` — "must not
-    /// be in pending state") is stricter than the buffer rule
-    /// (`vkDestroyBuffer` tolerates FIFO/FRAMES_IN_FLIGHT geographic
-    /// heuristics), so we cannot rely on the heap-ordering hint that
-    /// the ChunkValue/Staging defers use — we must observe the fence.
-    CommandBuffer {
-        cmd: vk::CommandBuffer,
-        fence: vk::Fence,
-    },
 }
 
 /// All per-frame scene inputs, bundled so `draw_frame` / `capture_frame`
@@ -240,15 +166,6 @@ pub struct FrameInput<'a> {
     pub held_items: &'a [crate::entity::EntityRenderData],
     pub show_panorama: bool,
     pub panorama_rotation: f32,
-}
-
-/// Per-frame camera/matrix state shared by the chunk-record helpers.
-/// Bundled so the record passes stay under the `too_many_arguments` threshold.
-struct ChunkPassFrame<'a> {
-    frustum: &'a voxel_core::Frustum,
-    vp_cols: &'a [f32],
-    game_time: f32,
-    cam_pos: glam::Vec3,
 }
 
 /// Particle camera parameters bundled for [`Renderer::record_particle_subpass`].
@@ -276,30 +193,6 @@ struct Frame {
     tile_remap_ubo: GpuBuffer,
     tile_remap_descriptor_set: vk::DescriptorSet,
 }
-
-/// Per-chunk occlusion query tracking.
-#[derive(Clone, Debug)]
-struct OcclusionState {
-    /// Index into the per-frame query pool.
-    query_index: u32,
-    /// Was this chunk visible in the last completed occlusion query?
-    was_visible: bool,
-    /// How many consecutive frames this chunk has been invisible.
-    consecutive_invisible: u32,
-}
-
-/// Per-frame-in-flight occlusion query data.
-struct OcclusionFrameData {
-    /// Query pool for this frame.
-    query_pool: vk::QueryPool,
-    /// Indices of queries written this frame (for reset + readback).
-    used_queries: Vec<u32>,
-}
-
-/// How many frames a chunk must be invisible before we switch to AABB proxy.
-const OCCLUSION_INVISIBLE_THRESHOLD: u32 = 2;
-/// Maximum occlusion queries per frame-in-flight.
-const MAX_OCCLUSION_QUERIES: u32 = 16384;
 
 /// Tiny 1×1×6 cubemap used as a placeholder when no
 /// `assets/textures/panorama/*.png` files are present.
@@ -483,18 +376,6 @@ pub struct Renderer {
     overlay_frag_spirv: Vec<u8>,
     overlay_data: crate::overlay::OverlayData,
 
-    // ── Occlusion culling (hardware occlusion queries) ──
-    occlusion_pipeline: vk::Pipeline,
-    aabb_index_buffer: GpuBuffer,
-    aabb_vert_spirv: Vec<u8>,
-    aabb_frag_spirv: Vec<u8>,
-    /// Per-chunk visibility state. Written by readback (draw_frame, &mut self)
-    /// and read during recording (record_chunk_passes, &self via interior mut).
-    occlusion_state: RwLock<std::collections::HashMap<ChunkPos, OcclusionState>>,
-    occlusion_frames: RwLock<Vec<OcclusionFrameData>>,
-    /// Config toggle.
-    occlusion_culling_enabled: bool,
-
     // Model registry: loaded glTF models indexed by model_id.
     models: Vec<crate::model::Model>,
 
@@ -507,6 +388,10 @@ pub struct Renderer {
     shadow_sampler: vk::Sampler,
     shadow_framebuffers: Vec<vk::Framebuffer>,
     shadow_ubo_data: ShadowUbo,
+    /// Whether the shadow pass should run this frame. Shadows are skipped
+    /// when disabled or when the sun is below the horizon (the shader already
+    /// ignores them there, so rendering four cascades would be pure waste).
+    shadow_active: bool,
 
     // â”€â”€ Offscreen color (for post-processing) â”€â”€
     offscreen_images: Vec<GpuImage>,
@@ -585,26 +470,19 @@ pub struct Renderer {
     depth_resolve_active: bool,
 
     frames: Vec<Frame>,
-    chunks: RwLock<HashMap<ChunkPos, ChunkBuffers>>,
-    /// Phase-1 GPU-driven chunk pipeline. `Some` when `config.gpu_driven`;
-    /// `None` otherwise (legacy per-chunk path). When present, `upload_chunks`,
-    /// `remove_chunk`, `chunk_count`, and `record_chunk_passes` route here.
-    gpu_driven: Option<indirect::GpuDriven>,
-    /// Phase-3 Hi-Z depth pyramid used by the GPU-driven cull shader for
-    /// occlusion culling. `Some` when `config.gpu_driven`.
+    /// GPU-driven chunk pipeline: every chunk draws from its mega-buffers via
+    /// indirect multi-draw, with Hi-Z occlusion culling. Always `Some`; kept
+    /// optional so `Drop` can take ownership and destroy its Vulkan handles.
+    gpu_driven: indirect::GpuDriven,
+    /// Hi-Z depth pyramid sampled by the cull shader.
     hiz: Option<hiz::HiZ>,
-    /// Per-frame deletion queue — buffers that `upload_chunks` could not
-    /// destroy immediately because the GPU was still mid-draw with them.
-    /// Drained at the start of `draw_frame` once they are at least
-    /// `FRAMES_IN_FLIGHT` frames old.
-    pending_destruction: Vec<(usize, PendingDestroy)>,
 
     // â”€â”€ GPU timers â”€â”€
     query_pool: vk::QueryPool,
     timestamp_period: f32,
     timings: GpuTimings,
-    /// CPU time (ms) spent recording the opaque chunk pass this frame
-    /// (`record_chunk_passes` legacy loop or `record_main` indirect dispatch).
+    /// CPU time (ms) spent recording the opaque chunk indirect dispatch this
+    /// frame.
     chunk_record_cpu_ms: f32,
 
     /// Set when the window was resized; swapchain is recreated next draw.
@@ -634,17 +512,6 @@ pub struct PackInfo {
     pub tile_count: usize,
     pub animation_count: usize,
     pub enabled: bool,
-}
-
-/// Fill the 24-float chunk-material push-constant block shared by the opaque
-/// and transparent chunk passes: chunk origin in xyz of the first vec4, the
-/// 16-float column-major VP matrix in floats 4..20, game time in float 20.
-/// Remaining slots stay zero. (The occlusion-proxy variant packs min/max AABB
-/// corners instead — see `record_chunk_passes`.)
-fn write_chunk_push_constants(pc: &mut [f32; 24], origin: Vec3, vp_cols: &[f32], game_time: f32) {
-    pc[..4].copy_from_slice(&[origin.x, origin.y, origin.z, 0.0]);
-    pc[4..20].copy_from_slice(&vp_cols[..16]);
-    pc[20..24].copy_from_slice(&[game_time, 0.0, 0.0, 0.0]);
 }
 
 /// Load texture pack tile mappings from `texture_packs_dir` (if configured)
@@ -799,8 +666,6 @@ impl Renderer {
         let particle_frag_spirv = spirv.particle_frag;
         let overlay_vert_spirv = spirv.overlay_vert;
         let overlay_frag_spirv = spirv.overlay_frag;
-        let aabb_vert_spirv = spirv.aabb_vert;
-        let aabb_frag_spirv = spirv.aabb_frag;
         let atlas =
             AtlasTexture::new(&device, &alloc, command_pool, graphics_queue, &atlas_pixels)?;
 
@@ -1174,7 +1039,10 @@ impl Renderer {
                 cmd_init,
                 shadow_image.image,
                 vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                // Start in the layout the chunk shader samples. The shadow
+                // pass transitions it per frame (initial layout UNDEFINED), so
+                // a frame with shadows disabled still binds a valid image.
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::ImageAspectFlags::DEPTH,
                 1,
                 4,
@@ -1766,39 +1634,6 @@ impl Renderer {
             "overlay_vbo",
         )?;
 
-        // -- Occlusion culling init --
-        let occlusion_pipeline = pipeline::create_occlusion_pipeline(
-            &device,
-            render_pass,
-            pipeline_layout,
-            &aabb_vert_spirv,
-            &aabb_frag_spirv,
-            msaa_samples,
-        )?;
-        let aabb_index_buffer = pipeline::create_aabb_index_buffer(&device, &alloc)?;
-
-        let mut occlusion_frames_vec = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        for _ in 0..FRAMES_IN_FLIGHT {
-            let pool_info = vk::QueryPoolCreateInfo::default()
-                .query_type(vk::QueryType::OCCLUSION)
-                .query_count(MAX_OCCLUSION_QUERIES);
-            let pool = unsafe { device.create_query_pool(&pool_info, None) }
-                .map_err(|e| anyhow!("create occlusion query_pool: {e:?}"))?;
-            // Initial reset: puts all queries in "unavailable" state, satisfying
-            // VUID-vkCmdBeginQuery-None-00807 ("query not reset") for the first
-            // frame. Per-frame resets in record_chunk_passes keep it valid
-            // thereafter.
-            unsafe { device.reset_query_pool(pool, 0, MAX_OCCLUSION_QUERIES) };
-            occlusion_frames_vec.push(OcclusionFrameData {
-                query_pool: pool,
-                used_queries: Vec::new(),
-            });
-        }
-        log::info!(
-            "occlusion culling: {} queries per frame",
-            MAX_OCCLUSION_QUERIES
-        );
-
         // â”€â”€ Post pass init â”€â”€
         let post_render_pass = pipeline::create_post_render_pass(&device, swapchain_format)?;
         let post_descriptor_set_layout = pipeline::create_post_descriptor_set_layout(&device)?;
@@ -1921,59 +1756,43 @@ impl Renderer {
         // Capture config fields referenced *after* the `config,` shorthand
         // in the struct literal below moves `config` into Self.
         let cfg_particle_softness = config.particle_softness;
-        let cfg_occlusion_culling = config.occlusion_culling;
-        // Phase-3 Hi-Z depth pyramid for GPU occlusion culling. Only built for
-        // the GPU-driven path (the legacy path uses HW occlusion queries).
-        let hiz = if config.gpu_driven {
-            match hiz::HiZ::new(
-                &device,
-                &alloc,
-                command_pool,
-                graphics_queue,
-                swapchain_extent,
-                scene_opaque_depth.view,
-                scene_depth_sampler,
-            ) {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    log::error!("HiZ init failed, disabling GPU-driven path: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // Phase-3 Hi-Z depth pyramid for GPU occlusion culling.
+        let hiz = Some(hiz::HiZ::new(
+            &device,
+            &alloc,
+            command_pool,
+            graphics_queue,
+            swapchain_extent,
+            scene_opaque_depth.view,
+            scene_depth_sampler,
+        )?);
         // Phase-1 GPU-driven pipeline: build before the struct literal so
         // `device`/`alloc` (moved into Self below) are still borrowable.
-        let gpu_driven = if let (true, Some(h)) = (config.gpu_driven, hiz.as_ref()) {
-            match indirect::GpuDriven::new(
-                indirect::GpuTransferCtx {
-                    device: &device,
-                    alloc: &alloc,
-                    command_pool,
-                    graphics_queue,
-                },
-                indirect::GpuDrivenConfig {
-                    render_pass,
-                    transparent_render_pass,
-                    chunk_set_layout: descriptor_set_layout,
-                    msaa_samples,
-                    gpu_meshing: config.gpu_meshing,
-                    shadow_enabled: config.shadow_enabled,
-                    hiz_view: h.sampled_view(),
-                    hiz_sampler: h.sampler(),
-                    hiz_params: h.params(),
-                },
-            ) {
-                Ok(g) => Some(g),
-                Err(e) => {
-                    log::error!("GPU-driven init failed, falling back to legacy path: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let hiz_ref = hiz.as_ref().expect("Hi-Z built above");
+        let mut hiz_params = hiz_ref.params();
+        if !config.occlusion_culling {
+            // The cull shader treats `hiz.z < 1` as "no pyramid".
+            hiz_params[2] = 0.0;
+        }
+        let gpu_driven = indirect::GpuDriven::new(
+            indirect::GpuTransferCtx {
+                device: &device,
+                alloc: &alloc,
+                command_pool,
+                graphics_queue,
+            },
+            indirect::GpuDrivenConfig {
+                render_pass,
+                transparent_render_pass,
+                chunk_set_layout: descriptor_set_layout,
+                msaa_samples,
+                gpu_meshing: config.gpu_meshing,
+                shadow_enabled: config.shadow_enabled,
+                hiz_view: hiz_ref.sampled_view(),
+                hiz_sampler: hiz_ref.sampler(),
+                hiz_params,
+            },
+        )?;
         Ok(Self {
             config,
             _entry: entry,
@@ -2073,13 +1892,6 @@ impl Renderer {
             overlay_vert_spirv,
             overlay_frag_spirv,
             overlay_data: crate::overlay::OverlayData::default(),
-            occlusion_pipeline,
-            aabb_index_buffer,
-            aabb_vert_spirv,
-            aabb_frag_spirv,
-            occlusion_state: RwLock::new(HashMap::new()),
-            occlusion_frames: RwLock::new(occlusion_frames_vec),
-            occlusion_culling_enabled: cfg_occlusion_culling,
             models: Vec::new(),
             shadow_render_pass,
             shadow_pipeline,
@@ -2089,6 +1901,7 @@ impl Renderer {
             shadow_sampler,
             shadow_framebuffers,
             shadow_ubo_data: ShadowUbo::default(),
+            shadow_active: true,
             offscreen_images,
             post_render_pass,
             post_pipeline,
@@ -2116,7 +1929,6 @@ impl Renderer {
             depth_resolve_active: msaa_samples != vk::SampleCountFlags::TYPE_1
                 && depth_resolve_mode.is_some(),
             frames,
-            chunks: RwLock::new(HashMap::new()),
             gpu_driven,
             hiz,
             query_pool,
@@ -2133,7 +1945,6 @@ impl Renderer {
             game_time: 0.0,
             sky_underwater: false,
             sun_dir: [0.0, 1.0, 0.0],
-            pending_destruction: Vec::new(),
             loaded_pack_infos: initial_pack_infos,
         })
     }
@@ -2365,14 +2176,6 @@ impl Renderer {
                 self.overlay_frag_spirv = bytes;
                 self.recreate_overlay_pipeline()
             }
-            "aabb_occlusion.vert" => {
-                self.aabb_vert_spirv = bytes;
-                self.recreate_occlusion_pipeline()
-            }
-            "aabb_occlusion.frag" => {
-                self.aabb_frag_spirv = bytes;
-                self.recreate_occlusion_pipeline()
-            }
             "post.vert" => {
                 self.post_vert_spirv = bytes;
                 self.recreate_post_pipeline()
@@ -2527,23 +2330,6 @@ impl Renderer {
         Ok(())
     }
 
-    /// Rebuild the AABB occlusion pipeline from the stored SPIR-V.
-    fn recreate_occlusion_pipeline(&mut self) -> Result<()> {
-        unsafe {
-            self.device.destroy_pipeline(self.occlusion_pipeline, None);
-        }
-        self.occlusion_pipeline = vk::Pipeline::null();
-        self.occlusion_pipeline = pipeline::create_occlusion_pipeline(
-            &self.device,
-            self.render_pass,
-            self.pipeline_layout,
-            &self.aabb_vert_spirv,
-            &self.aabb_frag_spirv,
-            self.msaa_samples,
-        )?;
-        Ok(())
-    }
-
     fn recreate_sky_pipeline(&mut self) -> Result<()> {
         unsafe {
             self.device.destroy_pipeline(self.sky_pipeline, None);
@@ -2633,6 +2419,12 @@ impl Renderer {
         } else {
             self.config.clear_color = [fog_color[0], fog_color[1], fog_color[2], 1.0];
         }
+    }
+
+    /// Enable or disable the shadow pass for subsequent frames. Disabled
+    /// shadows also skip the per-frame cascade render entirely.
+    pub fn set_shadow_active(&mut self, active: bool) {
+        self.shadow_active = active;
     }
 
     /// Set cascaded shadow map data (4 light-space VP matrices + cascade splits).
@@ -2821,7 +2613,14 @@ impl Renderer {
                 ambient_color[2],
                 self.night_factor,
             ],
-            sun_dir_pad: [self.sun_dir[0], self.sun_dir[1], self.sun_dir[2], 0.0],
+            // `w` carries the user-facing "Shadows" setting: 1 = apply the
+            // mesher's ray-traced sun visibility, 0 = treat every face as lit.
+            sun_dir_pad: [
+                self.sun_dir[0],
+                self.sun_dir[1],
+                self.sun_dir[2],
+                if self.config.shadow_enabled { 1.0 } else { 0.0 },
+            ],
         };
         if let Ok(slice) = self.fog_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&fog_data);
@@ -2928,324 +2727,31 @@ impl Renderer {
         if uploads.is_empty() {
             return;
         }
-        // Phase-1 GPU-driven path: route to the mega-buffer subsystem.
-        if let Some(gpu) = self.gpu_driven.as_mut() {
-            gpu.upload(
+        self.gpu_driven.upload(
                 &self.device,
                 &self.alloc,
                 self.command_pool,
                 self.graphics_queue,
                 uploads,
             );
-            return;
-        }
-        let device = &self.device;
-        let alloc = &self.alloc;
-        let pool = self.command_pool;
-        let queue = self.graphics_queue;
-
-        // Create device-local buffers + staging buffers for each upload.
-        struct Pending {
-            pos: ChunkPos,
-            pass: MeshPass,
-            vbo: GpuBuffer,
-            ibo: GpuBuffer,
-            staging: GpuBuffer,
-            v_offset: vk::DeviceSize,
-            i_size: vk::DeviceSize,
-            index_count: u32,
-        }
-        let mut pending: Vec<Pending> = Vec::with_capacity(uploads.len());
-
-        // Build one big staging buffer per chunk (vertices then indices packed).
-        let cmd = match begin_one_time(device, pool) {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("begin_one_time failed: {e}");
-                return;
-            }
-        };
-
-        for u in uploads {
-            if u.vertices.is_empty() || u.indices.is_empty() {
-                continue;
-            }
-            let v_size = u.vertices.len() as vk::DeviceSize;
-            let i_size = u.indices.len() as vk::DeviceSize;
-            let staging = match GpuBuffer::host_visible(
-                device,
-                alloc,
-                v_size + i_size,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                "chunk_staging",
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::error!("staging alloc failed: {e}");
-                    // End the recording into EXECUTABLE state before freeing
-                    // — `vkFreeCommandBuffers` requires the cmd's state to be
-                    // INITIAL or EXECUTABLE, and validation reports "in use"
-                    // (VUID-vkFreeCommandBuffers-pCommandBuffers-00047) for
-                    // primary cmds still in RECORDING after `begin_command_buffer`.
-                    // An un-endable cmd is reset to INITIAL via pool reset.
-                    let _ = unsafe { device.end_command_buffer(cmd) };
-                    unsafe {
-                        device.free_command_buffers(pool, &[cmd]);
-                    }
-                    continue;
-                }
-            };
-            let mut staging = staging;
-            if let Err(e) = staging.upload(device, &u.vertices) {
-                log::error!("staging vertex upload: {e}");
-                staging.destroy(device, alloc);
-                let _ = unsafe { device.end_command_buffer(cmd) };
-                unsafe {
-                    device.free_command_buffers(pool, &[cmd]);
-                }
-                continue;
-            }
-            // Copy indices after vertices in the staging buffer. We bypass
-            // `upload()` here because indices follow vertices in the same
-            // buffer at a non-zero offset, so the helper can't write both
-            // with one call. The flush below covers BOTH the vertex run
-            // (already written+flushed by `upload()`) and this index tail;
-            // flushing twice in the same frame is safe and idempotent so
-            // this isn't worth optimizing unless we add a `write_range()`
-            // helper.
-            {
-                let slice = match staging.mapped_slice_mut() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::error!("staging map: {e}");
-                        staging.destroy(device, alloc);
-                        let _ = unsafe { device.end_command_buffer(cmd) };
-                        unsafe {
-                            device.free_command_buffers(pool, &[cmd]);
-                        }
-                        continue;
-                    }
-                };
-                slice[v_size as usize..(v_size + i_size) as usize].copy_from_slice(&u.indices);
-                if let Err(e) = staging.flush_whole(device) {
-                    log::error!("staging flush: {e}");
-                }
-            }
-
-            let vbo = match GpuBuffer::device_local(
-                device,
-                alloc,
-                v_size,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
-                "chunk_vbo",
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::error!("vbo alloc: {e}");
-                    staging.destroy(device, alloc);
-                    let _ = unsafe { device.end_command_buffer(cmd) };
-                    unsafe {
-                        device.free_command_buffers(pool, &[cmd]);
-                    }
-                    continue;
-                }
-            };
-            let ibo = match GpuBuffer::device_local(
-                device,
-                alloc,
-                i_size,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
-                "chunk_ibo",
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::error!("ibo alloc: {e}");
-                    staging.destroy(device, alloc);
-                    vbo.destroy(device, alloc);
-                    let _ = unsafe { device.end_command_buffer(cmd) };
-                    unsafe {
-                        device.free_command_buffers(pool, &[cmd]);
-                    }
-                    continue;
-                }
-            };
-
-            // Record copies.
-            let v_region = vk::BufferCopy::default()
-                .src_offset(0)
-                .dst_offset(0)
-                .size(v_size);
-            unsafe {
-                device.cmd_copy_buffer(cmd, staging.buffer, vbo.buffer, &[v_region]);
-            }
-            let i_region = vk::BufferCopy::default()
-                .src_offset(v_size)
-                .dst_offset(0)
-                .size(i_size);
-            unsafe {
-                device.cmd_copy_buffer(cmd, staging.buffer, ibo.buffer, &[i_region]);
-            }
-
-            pending.push(Pending {
-                pos: u.pos,
-                pass: u.pass,
-                vbo,
-                ibo,
-                staging,
-                v_offset: v_size,
-                i_size,
-                index_count: u.index_count,
-            });
-        }
-
-        // Use a per-batch fence instead of queue_wait_idle to avoid stalling
-        // the entire GPU queue (which kills frame rate during chunk loading).
-        // Submit WITHOUT a fence wait. The previous code created an
-        // `upload_fence` per batch and called `device.wait_for_fences(..., u64::MAX)`
-        // which stalled the main thread for many seconds during initial
-        // world streaming ("freeze #2" in the user reports). We still submit
-        // in-order on the same graphics queue, so the GPU processes the upload
-        // copies before any subsequent `draw_frame` records. The buffers
-        // and the per-batch fence (gone now — we drop it entirely) are
-        // reclaimed asynchronously in `drain_pending_destructions` once
-        // `FRAMES_IN_FLIGHT` frames have elapsed since submission.
-        unsafe {
-            if let Err(e) = device.end_command_buffer(cmd) {
-                log::error!("end_command_buffer (upload) failed: {e:?}");
-                return;
-            }
-        }
-        let submit_frame = self.frame_counter;
-        // Defer cmd buffer reclamation to the existing
-        // `drain_pending_destructions` path (the same one used for
-        // staging + chunk VBO reclaim below). The earlier
-        // `queue_wait_idle` + `free_command_buffers` pair was trying
-        // to satisfy VUID-vkFreeCommandBuffers-pCommandBuffers-00047
-        // ("cmd in use") AND avoid the STATUS_ACCESS_VIOLATION segfault
-        // we saw after `spawn ready`, but it DEADLOCKED the engine:
-        // `vkQueueWaitIdle` blocks the main thread, which is the same
-        // thread that pumps winit window events. With the main thread
-        // stalled, the swapchain `image_available` semaphore never gets
-        // a present-paired signal (the OS won't present without the
-        // event loop advancing), so the queue never drains, so the
-        // wait never returns — TDR / force-close after ~2 s.
-        //
-        // The fix is to submit with a DEDICATED per-batch fence, push
-        // both the cmd and the fence to `pending_destruction`, and let
-        // the next frame's drain `wait_for_fences` on it. That avoids
-        // both the deadlock (no main-thread wait) AND the spec
-        // violation (we only `vkFreeCommandBuffers` after the fence
-        // has signalled, satisfying the "not pending" requirement).
-        let command_buffers = [cmd];
-        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-        let batch_fence = unsafe {
-            match device.create_fence(&vk::FenceCreateInfo::default(), None) {
-                Ok(f) => f,
-                Err(e) => {
-                    log::error!("upload create_fence failed: {e:?}");
-                    // Submission failure path: we're about to return
-                    // without recording, so free the cmd buffer
-                    // immediately (no fence was ever registered).
-                    device.free_command_buffers(pool, &[cmd]);
-                    return;
-                }
-            }
-        };
-        if let Err(e) = unsafe { device.queue_submit(queue, &[submit_info], batch_fence) } {
-            log::error!("upload queue_submit failed: {e}");
-            unsafe {
-                device.destroy_fence(batch_fence, None);
-                device.free_command_buffers(pool, &[cmd]);
-            }
-            return;
-        }
-        self.pending_destruction.push((
-            submit_frame,
-            PendingDestroy::CommandBuffer {
-                cmd,
-                fence: batch_fence,
-            },
-        ));
-
-        // Insert into the chunk map. Each chunk can have both an opaque and a
-        // transparent pass â€” store them in the same ChunkBuffers entry rather
-        // than overwriting one with the other.
-        let mut chunks = self.chunks.write();
-        for p in pending {
-            let entry = chunks.entry(p.pos).or_insert_with(ChunkBuffers::new);
-            let slot = match p.pass {
-                MeshPass::Opaque => &mut entry.opaque,
-                MeshPass::Transparent => &mut entry.transparent,
-            };
-            // Replace old buffers for this pass — defer destruction so the
-            // GPU doesn't see its memory yanked mid-frame.
-            if let Some(old) = slot.take() {
-                self.pending_destruction
-                    .push((submit_frame, PendingDestroy::ChunkValue(old)));
-            }
-            *slot = Some(PassBuffers {
-                vbo: p.vbo,
-                ibo: p.ibo,
-                index_count: p.index_count,
-            });
-            // Staging: defer too.
-            self.pending_destruction
-                .push((submit_frame, PendingDestroy::Staging(p.staging)));
-            let _ = (p.v_offset, p.i_size); // already used above
-
-            // Reset occlusion state so the chunk is treated as visible next frame.
-            if self.occlusion_culling_enabled {
-                let mut occ = self.occlusion_state.write();
-                if let Some(state) = occ.get_mut(&p.pos) {
-                    state.was_visible = true;
-                    state.consecutive_invisible = 0;
-                }
-            }
-        }
     }
 
     /// Remove a chunk's GPU buffers (called when the streamer unloads it).
     pub fn remove_chunk(&mut self, pos: ChunkPos) {
-        if let Some(gpu) = self.gpu_driven.as_mut() {
-            gpu.remove(pos);
-            return;
-        }
-        let removed = self.chunks.write().remove(&pos);
-        // Defer destruction of the GPU buffers so we don't yank memory out
-        // from under the GPU while it's mid-draw with these chunks. The
-        // same `drain_pending_destructions` reclaim path that `upload_chunks`
-        // uses will pick these up in a couple of frames.
-        let submit_frame = self.frame_counter;
-        if let Some(bufs) = removed {
-            if let Some(opaque) = bufs.opaque {
-                self.pending_destruction
-                    .push((submit_frame, PendingDestroy::ChunkValue(opaque)));
-            }
-            if let Some(transparent) = bufs.transparent {
-                self.pending_destruction
-                    .push((submit_frame, PendingDestroy::ChunkValue(transparent)));
-            }
-        }
-        // Clean up occlusion state so the query index can be reused.
-        if self.occlusion_culling_enabled {
-            let mut occ = self.occlusion_state.write();
-            occ.remove(&pos);
-        }
+        self.gpu_driven.remove(pos);
     }
 
     /// Number of chunks currently on the GPU.
     pub fn chunk_count(&self) -> usize {
-        if let Some(gpu) = self.gpu_driven.as_ref() {
-            return gpu.chunk_count();
-        }
-        self.chunks.read().len()
+        self.gpu_driven.chunk_count()
     }
 
     /// Update the block properties table for the Phase-2 GPU compute mesher.
     /// Call after the block registry is loaded or changes. No-op if GPU
     /// meshing is disabled.
     pub fn set_block_properties(&mut self, props: &[crate::BlockPropertiesGpu]) {
-        if let Some(gpu) = self.gpu_driven.as_mut() {
+        {
+            let gpu = &mut self.gpu_driven;
             gpu.set_block_properties(&self.device, &self.alloc, props);
         }
     }
@@ -3260,7 +2766,8 @@ impl Renderer {
         voxels: Box<[u16]>,
         lod: u32,
     ) {
-        if let Some(gpu) = self.gpu_driven.as_mut() {
+        {
+            let gpu = &mut self.gpu_driven;
             gpu.enqueue_gpu_mesh(pos, pass, voxels, lod);
         }
     }
@@ -3269,7 +2776,8 @@ impl Renderer {
     /// Never blocks on the GPU: polls the in-flight fence and advances queued
     /// meshes through compute -> copy-out -> slot as they complete.
     pub fn drain_gpu_meshes(&mut self) {
-        if let Some(gpu) = self.gpu_driven.as_mut() {
+        {
+            let gpu = &mut self.gpu_driven;
             gpu.drain_gpu_meshes(indirect::GpuTransferCtx {
                 device: &self.device,
                 alloc: &self.alloc,
@@ -3339,23 +2847,10 @@ impl Renderer {
         self.alloc.stats()
     }
 
-    /// Total index count across all chunk buffers (opaque + transparent).
-    /// Returns (vertex_count_estimate, index_count).
+    /// Total index count across every mega-buffer slot (opaque, transparent
+    /// and cutout shadow). Returns (vertex_count, index_count).
     pub fn chunk_buffer_stats(&self) -> (u32, u32) {
-        let chunks = self.chunks.read();
-        let mut index_count = 0u32;
-        for bufs in chunks.values() {
-            if let Some(ref opaque) = bufs.opaque {
-                index_count += opaque.index_count;
-            }
-            if let Some(ref transparent) = bufs.transparent {
-                index_count += transparent.index_count;
-            }
-        }
-        // Estimate vertex count: chunk vertices are ~4 per face, indices are
-        // 6 per face (2 triangles), so vertices ≈ indices * 4/6.
-        let vertex_estimate = index_count * 4 / 6;
-        (vertex_estimate, index_count)
+        self.gpu_driven.buffer_stats()
     }
 
     /// Toggle wireframe rendering.
@@ -3377,73 +2872,6 @@ impl Renderer {
         }
     }
 
-    /// Destroy any GPU resources enqueued by previous `upload_chunks` /
-    /// `remove_chunk` calls that are now at least `FRAMES_IN_FLIGHT` frames
-    /// old. Safe to call repeatedly; each call is O(N) over a queue that
-    /// holds at most a handful of items in steady state (most chunks are
-    /// uploaded once and stay uploaded until unloaded).
-    fn drain_pending_destructions(&mut self) {
-        // An item submitted at `submitted_at` is safe to destroy once
-        // `self.frame_counter >= submitted_at + FRAMES_IN_FLIGHT` because by
-        // that point the corresponding per-frame in-flight fence (which was
-        // submitted-after the upload on the same queue) has already
-        // signalled — i.e. the GPU is past every resource that batch used.
-        let cutoff = self.frame_counter.saturating_sub(FRAMES_IN_FLIGHT);
-        let device = &self.device;
-        let alloc = &self.alloc;
-        self.pending_destruction.retain_mut(|(submitted_at, item)| {
-            if *submitted_at <= cutoff {
-                // `GpuBuffer::destroy_in_place` takes `&mut self` (vs.
-                // `destroy` which takes `self` by move). We can only use
-                // `&mut` here because `item` is borrowed mutably by
-                // `retain_mut`'s closure — moving out of a borrow isn't
-                // allowed. The two operations are semantically the same:
-                // release the underlying Vulkan buffer + alloc.
-                match item {
-                    PendingDestroy::ChunkValue(pb) => {
-                        pb.vbo.destroy_in_place(device, alloc);
-                        pb.ibo.destroy_in_place(device, alloc);
-                    }
-                    PendingDestroy::Staging(b) => {
-                        b.destroy_in_place(device, alloc);
-                    }
-                    PendingDestroy::CommandBuffer { cmd, fence } => {
-                        // Wait for the upload's dedicated fence. This
-                        // is what guarantees the cmd is no longer in
-                        // the "pending" state (VUID 00047 — required
-                        // for `vkFreeCommandBuffers`). The wait is on
-                        // the caller's main thread, but on a normal
-                        // frame the GPU has had ~16 ms (one frame
-                        // period) to complete the upload, so this
-                        // returns immediately. Only stalls on heavy
-                        // backed-up GPU — and even then, only inside
-                        // the `drain_pending_destructions` pre-amble
-                        // (one entry per chunk, batched), not at the
-                        // top of every frame.
-                        unsafe {
-                            // `retain_mut`'s closure borrows the
-                            // fields as `&mut`, so deref into the
-                            // handles before passing to Vulkan FFI.
-                            let cmd_handle = *cmd;
-                            let fence_handle = *fence;
-                            if let Err(e) = device.wait_for_fences(&[fence_handle], true, u64::MAX)
-                            {
-                                log::warn!(
-                                    "pending destroy: wait_for_fences(upload) failed: {e:?}"
-                                );
-                            }
-                            device.free_command_buffers(self.command_pool, &[cmd_handle]);
-                            device.destroy_fence(fence_handle, None);
-                        }
-                    }
-                }
-                false
-            } else {
-                true
-            }
-        });
-    }
-
     /// Render one frame and present it. `camera` drives view-projection + culling.
     /// `ui` provides optional overlay vertices (crosshair, hotbar, pause menu).
     pub fn draw_frame(&mut self, input: FrameInput<'_>) -> Result<()> {
@@ -3459,12 +2887,7 @@ impl Renderer {
         } = input;
         // Resize-check, upload UI, precompute camera matrices. Everything we need
         // before submitting any GPU work.
-        // First: drain any GPU resources queued for deferred destruction from
-        // previous `upload_chunks` / `remove_chunk` calls. By this point the
-        // per-frame in-flight fences (only re-awaited just below) have
-        // signalled, so it's safe to free their associated buffers.
-        self.drain_pending_destructions();
-        let (view_proj, vp_cols, frustum, ui_index_count) = self.prepare_frame(&camera, ui)?;
+        let (view_proj, vp_cols, _frustum, ui_index_count) = self.prepare_frame(&camera, ui)?;
 
         let frame_idx = self.frame_counter % FRAMES_IN_FLIGHT;
         // Copy out the per-frame handles (all `Copy`) so we don't hold an
@@ -3494,9 +2917,6 @@ impl Renderer {
         // Write UBO data now that the previous frame is done with this slot.
         self.flush_pending_ubos();
 
-        // Read back occlusion query results from 2 frames ago.
-        self.readback_occlusion_results(frame_idx);
-
         // Read back the previous frame's GPU timestamps (now available after fence wait).
         // On the first 1-2 frames the queries haven't been written yet, so we
         // tolerate VK_NOT_READY and just skip the update.
@@ -3507,8 +2927,7 @@ impl Renderer {
             // the previous frame's data is at `(frame_idx + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT`.
             // Reading from this frame's own slot would trip the
             // `get_query_pool_results(WAIT)` infinite wait, because the GPU
-            // hasn't written those queries yet. (Match the
-            // `readback_occlusion_results` pattern at line 3384.)
+            // hasn't written those queries yet.
             //
             // Skip the readback on the very first frame: there is no prior
             // frame whose timestamps to read, and querying uninitialised
@@ -3601,8 +3020,6 @@ impl Renderer {
             )?;
             // Reset query pool for this frame's slice and write frame start timestamp.
             device.cmd_reset_query_pool(cmd, self.query_pool, query_offset, GPU_TIMESTAMP_COUNT);
-            // Reset occlusion query pool for this frame.
-            self.reset_occlusion_queries(device, cmd, frame_idx);
             device.cmd_write_timestamp(
                 cmd,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -3617,7 +3034,8 @@ impl Renderer {
         // GPU-driven frustum cull runs OUTSIDE the main render pass (a compute
         // dispatch inside a render pass is illegal). It must precede
         // `record_main_pass_setup`, which begins the render pass.
-        if let Some(gpu) = self.gpu_driven.as_mut() {
+        {
+            let gpu = &mut self.gpu_driven;
             gpu.record_cull(
                 &self.device,
                 cmd,
@@ -3657,12 +3075,11 @@ impl Renderer {
             );
         }
 
-        // Chunk passes: Phase-1 GPU-driven indirect path or legacy per-chunk loop.
+        // Chunk passes: one indirect multi-draw from the GPU-driven buffers.
         // Transparent geometry (water/foliage) renders in
-        // `record_transparent_pass` for both paths, so query 4 is written there.
+        // `record_transparent_pass`, so query 4 is written there.
         let chunk_t0 = std::time::Instant::now();
-        if let Some(gpu) = self.gpu_driven.as_mut() {
-            gpu.record_opaque(
+        self.gpu_driven.record_opaque(
                 &self.device,
                 cmd,
                 descriptor_set,
@@ -3671,19 +3088,6 @@ impl Renderer {
                 self.query_pool,
                 Some(query_offset + 3),
             );
-        } else {
-            self.record_chunk_passes(
-                device,
-                cmd,
-                &ChunkPassFrame {
-                    frustum: &frustum,
-                    vp_cols: &vp_cols,
-                    game_time,
-                    cam_pos: camera.pos,
-                },
-                Some(query_offset + 3),
-            );
-        }
         self.chunk_record_cpu_ms = chunk_t0.elapsed().as_secs_f32() * 1000.0;
 
         // Entity pass: upload quad vertices then draw entity meshes.
@@ -3759,12 +3163,8 @@ impl Renderer {
             device,
             cmd,
             image_index,
-            &ChunkPassFrame {
-                frustum: &frustum,
-                vp_cols: &vp_cols,
-                game_time,
-                cam_pos: camera.pos,
-            },
+            &vp_cols,
+            game_time,
             ui_index_count,
             descriptor_set,
             tile_remap_descriptor_set,
@@ -3842,7 +3242,7 @@ impl Renderer {
             panorama_rotation,
         } = input;
         // Resize-check, upload UI, precompute camera matrices.
-        let (view_proj, vp_cols, frustum, ui_index_count) = self.prepare_frame(&camera, ui)?;
+        let (view_proj, vp_cols, _frustum, ui_index_count) = self.prepare_frame(&camera, ui)?;
 
         // Wait for frame 0's previous GPU work to complete before we
         // write to its UBO and descriptor set.
@@ -3850,9 +3250,6 @@ impl Renderer {
 
         // Write UBO data now that the previous frame is done.
         self.flush_pending_ubos();
-
-        // Read back occlusion query results (uses frame 0 since capture uses frame 0).
-        self.readback_occlusion_results(0);
 
         let device = &self.device;
         let cmd = begin_one_time(device, self.command_pool)?;
@@ -3893,7 +3290,8 @@ impl Renderer {
         self.record_shadow_pass(device, cmd, None);
 
         // GPU-driven frustum cull runs OUTSIDE the main render pass.
-        if let Some(gpu) = self.gpu_driven.as_mut() {
+        {
+            let gpu = &mut self.gpu_driven;
             gpu.record_cull(
                 &self.device,
                 cmd,
@@ -3926,10 +3324,9 @@ impl Renderer {
             );
         }
 
-        // Chunk passes: Phase-1 GPU-driven indirect path or legacy per-chunk loop.
+        // Chunk passes: one indirect multi-draw from the GPU-driven buffers.
         let chunk_ds = self.frames[0].descriptor_set;
-        if let Some(gpu) = self.gpu_driven.as_mut() {
-            gpu.record_opaque(
+        self.gpu_driven.record_opaque(
                 &self.device,
                 cmd,
                 chunk_ds,
@@ -3938,19 +3335,6 @@ impl Renderer {
                 self.query_pool,
                 None,
             );
-        } else {
-            self.record_chunk_passes(
-                &self.device,
-                cmd,
-                &ChunkPassFrame {
-                    frustum: &frustum,
-                    vp_cols: &vp_cols,
-                    game_time,
-                    cam_pos: camera.pos,
-                },
-                None,
-            );
-        }
 
         // â”€â”€ UI overlay pass â”€â”€
         unsafe {
@@ -3972,12 +3356,8 @@ impl Renderer {
             device,
             cmd,
             image_index,
-            &ChunkPassFrame {
-                frustum: &frustum,
-                vp_cols: &vp_cols,
-                game_time,
-                cam_pos: camera.pos,
-            },
+            &vp_cols,
+            game_time,
             ui_index_count,
             self.frames[0].descriptor_set,
             self.frames[0].tile_remap_descriptor_set,
@@ -4152,338 +3532,6 @@ impl Renderer {
         Ok(out)
     }
 
-    /// Read back occlusion query results from the previous frame and update
-    /// per-chunk visibility state. Must be called with `&mut self` (in
-    /// `draw_frame` / `capture_frame`) after the fence wait.
-    fn readback_occlusion_results(&mut self, current_frame_idx: usize) {
-        if !self.occlusion_culling_enabled {
-            return;
-        }
-        // The OTHER frame slot was last written 2 frames ago (fence already
-        // signalled). Read its results.
-        let read_idx = (current_frame_idx + 1) % FRAMES_IN_FLIGHT;
-        let frames = self.occlusion_frames.write();
-        let frame = &frames[read_idx];
-        let queries = &frame.used_queries;
-        if queries.is_empty() {
-            return;
-        }
-
-        // Allocate a results buffer.
-        let mut results = vec![0u32; queries.len()];
-        let mut all_ok = true;
-        for (ri, &qi) in queries.iter().enumerate() {
-            let read = unsafe {
-                self.device.get_query_pool_results(
-                    frame.query_pool,
-                    qi,
-                    &mut results[ri..ri + 1],
-                    vk::QueryResultFlags::WAIT,
-                )
-            };
-            if read.is_err() {
-                all_ok = false;
-                break;
-            }
-        }
-        if !all_ok {
-            return;
-        }
-
-        // Update visibility state.
-        let mut state = self.occlusion_state.write();
-        for (i, &query_idx) in queries.iter().enumerate() {
-            // Find the chunk that owns this query index.
-            for oc in state.values_mut() {
-                if oc.query_index == query_idx {
-                    if results[i] > 0 {
-                        oc.was_visible = true;
-                        oc.consecutive_invisible = 0;
-                    } else {
-                        oc.was_visible = false;
-                        oc.consecutive_invisible += 1;
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Reset the occlusion query pool for the current frame and clear the
-    /// used_queries list. Called at the start of command recording.
-    fn reset_occlusion_queries(
-        &self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        frame_idx: usize,
-    ) {
-        if !self.occlusion_culling_enabled {
-            return;
-        }
-        let mut frames = self.occlusion_frames.write();
-        let frame = &mut frames[frame_idx];
-        // Reset ALL queries in the pool (not just the previously-used ones)
-        // so the very first frame after init has every slot in the
-        // "unavailable" state required by VUID-vkCmdBeginQuery-None-00807.
-        // The min/max optimization only worked on frame N>=2; frame 0
-        // had an empty used_queries list and skipped the reset entirely.
-        unsafe {
-            device.cmd_reset_query_pool(cmd, frame.query_pool, 0, MAX_OCCLUSION_QUERIES);
-        }
-        frame.used_queries.clear();
-    }
-
-    /// Record the opaque chunk draw pass into `cmd`.
-    ///
-    /// Both `draw_frame` and `capture_frame` need identical chunk rendering;
-    /// this is the shared implementation. Uses the **collect-then-drop** lock
-    /// pattern: acquire `self.chunks.read()` once to build the list of
-    /// visible chunks, release it before recording draws. This keeps chunk
-    /// uploads (`upload_chunks` taking `self.chunks.write()`) from blocking
-    /// for the duration of push-constant filling + draw command recording.
-    ///
-    /// `opaque_end_timestamp_query` is `Some(query_offset + 3)` from
-    /// `draw_frame` (GPU profiling); `capture_frame` passes `None`
-    /// since it doesn't run the timestamp pool.
-    ///
-    /// `vp_cols` is the 16-float view-projection matrix in column-major order.
-    fn record_chunk_passes(
-        &self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        frame: &ChunkPassFrame<'_>,
-        opaque_end_timestamp_query: Option<u32>,
-    ) {
-        let ChunkPassFrame {
-            frustum,
-            vp_cols,
-            game_time,
-            cam_pos,
-        } = *frame;
-        // Collect visible opaque chunk buffer handles under the read lock,
-        // then drop the lock so upload_chunks can proceed while we record.
-        // Transparent chunks are NOT collected here — they render
-        // exclusively in the slice-2 transparent pass, which does its own
-        // frustum-culled collection (`record_transparent_pass`).
-        // The tuple carries the precomputed camera dist² so the sort below
-        // never re-derives chunk origins inside the comparator.
-        type DrawList = Vec<(ChunkPos, vk::Buffer, vk::Buffer, u32, f32)>;
-        let mut opaque_draws: DrawList = {
-            let chunks = self.chunks.read();
-            let mut opaque = Vec::with_capacity(chunks.len());
-            for (&pos, bufs) in chunks.iter() {
-                let (min, max) = chunk_aabb(pos);
-                if !frustum.intersects_aabb(min, max) {
-                    continue;
-                }
-                if let Some(b) = &bufs.opaque {
-                    let dist_sq = (chunk_center(pos) - cam_pos).length_squared();
-                    opaque.push((pos, b.vbo.buffer, b.ibo.buffer, b.index_count, dist_sq));
-                }
-            }
-            opaque
-        };
-
-        // Sort opaque chunks front-to-back for better early-Z rejection and
-        // occlusion query efficiency.
-        opaque_draws.sort_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal));
-
-        let occlusion_enabled = self.occlusion_culling_enabled;
-
-        // Pre-allocate persistent occlusion query indices for new chunks.
-        // This ensures each chunk has a stable query_index that persists
-        // across frames, which is required for correct readback mapping.
-        if occlusion_enabled {
-            let mut occ = self.occlusion_state.write();
-            // Bitmap of already-assigned query indices — avoids the
-            // per-frame HashSet allocation + hashing the old code paid.
-            let mut used = [false; MAX_OCCLUSION_QUERIES as usize];
-            for s in occ.values() {
-                if (s.query_index as usize) < used.len() {
-                    used[s.query_index as usize] = true;
-                }
-            }
-            let mut next_idx = 0usize;
-            for (pos, ..) in &opaque_draws {
-                if !occ.contains_key(pos) {
-                    while next_idx < used.len() && used[next_idx] {
-                        next_idx += 1;
-                    }
-                    if next_idx < used.len() {
-                        occ.insert(
-                            *pos,
-                            OcclusionState {
-                                query_index: next_idx as u32,
-                                was_visible: true,
-                                consecutive_invisible: 0,
-                            },
-                        );
-                        used[next_idx] = true;
-                        next_idx += 1;
-                    }
-                }
-            }
-        }
-
-        let issue_draw = |cmd: vk::CommandBuffer,
-                          pos: ChunkPos,
-                          vbo_buf: vk::Buffer,
-                          ibo_buf: vk::Buffer,
-                          index_count: u32| {
-            let mut push = [0f32; 24];
-            write_chunk_push_constants(&mut push, chunk_origin(pos).as_vec3(), vp_cols, game_time);
-            unsafe {
-                device.cmd_push_constants(
-                    cmd,
-                    self.pipeline_layout,
-                    // `self.pipeline_layout` declares the push-constant range
-                    // as VERTEX|FRAGMENT (96 B, layout.rs `create_pipeline_layout`),
-                    // so the call site must echo both stages or validation
-                    // reports VUID-VkCmdPushConstants-offset-01796 ("missing
-                    // stageFlags from the overlapping VkPushConstantRange").
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    bytemuck::bytes_of(&push),
-                );
-                let vbo = [vbo_buf];
-                device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
-                device.cmd_bind_index_buffer(cmd, ibo_buf, 0, vk::IndexType::UINT32);
-                device.cmd_draw_indexed(cmd, index_count, 1, 0, 0, 0);
-            }
-        };
-
-        // ── Opaque pass ──
-        if occlusion_enabled {
-            let occ_state = self.occlusion_state.read();
-            let mut frames = self.occlusion_frames.write();
-            let frame_idx = self.frame_counter % FRAMES_IN_FLIGHT;
-            let frame = &mut frames[frame_idx];
-            let query_pool = frame.query_pool;
-
-            for &(pos, vbo_buf, ibo_buf, index_count, _) in &opaque_draws {
-                let state = occ_state.get(&pos);
-                let should_draw_mesh = match state {
-                    None => true, // New chunk, no query yet -> draw full mesh
-                    Some(s) => {
-                        s.was_visible || s.consecutive_invisible < OCCLUSION_INVISIBLE_THRESHOLD
-                    }
-                };
-
-                if should_draw_mesh {
-                    // Draw full mesh wrapped in an occlusion query.
-                    let qi = match occ_state.get(&pos) {
-                        Some(s) if s.query_index < MAX_OCCLUSION_QUERIES => s.query_index,
-                        _ => continue, // skip if no valid query index
-                    };
-                    if qi < MAX_OCCLUSION_QUERIES {
-                        frame.used_queries.push(qi);
-                        unsafe {
-                            device.cmd_begin_query(
-                                cmd,
-                                query_pool,
-                                qi,
-                                vk::QueryControlFlags::empty(),
-                            );
-                        }
-                        issue_draw(cmd, pos, vbo_buf, ibo_buf, index_count);
-                        unsafe {
-                            device.cmd_end_query(cmd, query_pool, qi);
-                        }
-                    } else {
-                        // Query pool exhausted; draw without query.
-                        issue_draw(cmd, pos, vbo_buf, ibo_buf, index_count);
-                    }
-                } else {
-                    // Chunk was invisible for too long — draw AABB proxy only.
-                    // Use a cheap occlusion query to re-check visibility.
-                    let qi = match occ_state.get(&pos) {
-                        Some(s) if s.query_index < MAX_OCCLUSION_QUERIES => s.query_index,
-                        _ => continue, // skip if no valid query index
-                    };
-                    if qi < MAX_OCCLUSION_QUERIES {
-                        frame.used_queries.push(qi);
-                        let (min, max) = chunk_aabb(pos);
-                        // Push constants: min.xyz in first vec4, VP matrix, max.xyz in last vec4.
-                        let mut push = [0f32; 24];
-                        push[0] = min.x;
-                        push[1] = min.y;
-                        push[2] = min.z;
-                        push[3] = 0.0;
-                        push[4..20].copy_from_slice(vp_cols);
-                        push[20] = max.x;
-                        push[21] = max.y;
-                        push[22] = max.z;
-                        push[23] = 0.0;
-                        unsafe {
-                            device.cmd_bind_pipeline(
-                                cmd,
-                                vk::PipelineBindPoint::GRAPHICS,
-                                self.occlusion_pipeline,
-                            );
-                            device.cmd_push_constants(
-                                cmd,
-                                self.pipeline_layout,
-                                // chunk material layout declares VERTEX|FRAGMENT (96 B);
-                                // see VUID-VkCmdPushConstants-offset-01796 above.
-                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                                0,
-                                bytemuck::bytes_of(&push),
-                            );
-                            device.cmd_bind_index_buffer(
-                                cmd,
-                                self.aabb_index_buffer.buffer,
-                                0,
-                                vk::IndexType::UINT16,
-                            );
-                            device.cmd_begin_query(
-                                cmd,
-                                query_pool,
-                                qi,
-                                vk::QueryControlFlags::empty(),
-                            );
-                            device.cmd_draw_indexed(cmd, 36, 1, 0, 0, 0);
-                            device.cmd_end_query(cmd, query_pool, qi);
-                            // Restore the main chunk pipeline.
-                            device.cmd_bind_pipeline(
-                                cmd,
-                                vk::PipelineBindPoint::GRAPHICS,
-                                self.active_pipeline(),
-                            );
-                        }
-                    }
-                    // If query pool exhausted, silently skip this chunk.
-                }
-            }
-            drop(occ_state);
-            drop(frames);
-        } else {
-            for &(pos, vbo_buf, ibo_buf, index_count, _) in &opaque_draws {
-                issue_draw(cmd, pos, vbo_buf, ibo_buf, index_count);
-            }
-        }
-
-        unsafe {
-            if let Some(q) = opaque_end_timestamp_query {
-                device.cmd_write_timestamp(
-                    cmd,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    self.query_pool,
-                    q,
-                );
-            }
-            // NOTE: transparent chunks are NOT drawn in this (main) pass
-            // anymore. They render exclusively in the slice-2 transparent
-            // pass (`record_transparent_pass`), which runs after the
-            // scene_opaque color+depth copies so water/glass can refract and
-            // reflect the CURRENT frame's opaque scene. The old code drew
-            // them here too, which double-blended them AND depth-occluded the
-            // slice-2 draw (same depth, LESS compare → slice-2 fully hidden).
-            // The transparent_end/ui_end timestamps are likewise written
-            // there, bracketing the water/foliage draws and the UI draw.
-        }
-    }
-
-    /// Record the entity pass: draw all entity meshes (billboards/cubes).
     fn record_entity_pass(
         &self,
         device: &ash::Device,
@@ -4707,6 +3755,23 @@ impl Renderer {
         cmd: vk::CommandBuffer,
         shadow_end_timestamp_query: Option<u32>,
     ) {
+        if !self.shadow_active {
+            // The timestamp pool readback waits for every slot, so publish the
+            // shadow-end slot even on a skipped pass or the capture/bench run
+            // blocks forever on an unwritten query.
+            if let Some(query) = shadow_end_timestamp_query {
+                unsafe {
+                    device.cmd_write_timestamp(
+                        cmd,
+                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                        self.query_pool,
+                        query,
+                    );
+                }
+            }
+            return;
+        }
+
         let shadow_extent = vk::Extent2D {
             width: 2048,
             height: 2048,
@@ -4722,7 +3787,7 @@ impl Renderer {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: shadow_extent,
         };
-        let chunks = self.chunks.read();
+        let vertex_stride = std::mem::size_of::<crate::Vertex>() as vk::DeviceSize;
         for cascade in 0..4u32 {
             let clear_values = [vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
@@ -4749,31 +3814,55 @@ impl Renderer {
                 );
 
                 let vp = self.shadow_ubo_data.cascade_vps[cascade as usize];
-                for (&pos, b) in chunks.iter() {
-                    let Some(opaque) = &b.opaque else { continue };
-                    let origin = chunk_origin(pos);
-                    let mut push = [0f32; 20];
-                    push[..16].copy_from_slice(&vp);
-                    push[16] = origin.x as f32;
-                    push[17] = origin.y as f32;
-                    push[18] = origin.z as f32;
-                    push[19] = 0.0;
-                    device.cmd_push_constants(
-                        cmd,
-                        self.shadow_pipeline_layout,
-                        vk::ShaderStageFlags::VERTEX,
-                        0,
-                        bytemuck::cast_slice(&push),
-                    );
-                    let vbo = [opaque.vbo.buffer];
+                // Every loaded caster is submitted to every cascade. The
+                // per-cascade frustum rejection here was dropping all casters
+                // from the outer cascades (their orthographic light frustum
+                // does not follow the OpenGL-style plane extraction used by
+                // `Frustum`), which left those shadow layers empty. At this
+                // scene size the pass is only ~0.1 ms; correctness wins.
+                {
+                    let gpu = &self.gpu_driven;
+                    let (mega_vbo, mega_ibo) = gpu.mega_buffers();
+                    let vbo = [mega_vbo];
                     device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
-                    device.cmd_bind_index_buffer(cmd, opaque.ibo.buffer, 0, vk::IndexType::UINT32);
-                    device.cmd_draw_indexed(cmd, opaque.index_count, 1, 0, 0, 0);
+                    device.cmd_bind_index_buffer(
+                        cmd,
+                        mega_ibo,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    gpu.for_each_shadow_caster(
+                        |pos, vbo_offset, ibo_offset, index_count, _cutout| {
+                            if !self.config.shadow_enabled {
+                                return;
+                            }
+                            let origin = chunk_origin(pos);
+                            let mut push = [0f32; 20];
+                            push[..16].copy_from_slice(&vp);
+                            push[16] = origin.x as f32;
+                            push[17] = origin.y as f32;
+                            push[18] = origin.z as f32;
+                            device.cmd_push_constants(
+                                cmd,
+                                self.shadow_pipeline_layout,
+                                vk::ShaderStageFlags::VERTEX,
+                                0,
+                                bytemuck::cast_slice(&push),
+                            );
+                            device.cmd_draw_indexed(
+                                cmd,
+                                index_count,
+                                1,
+                                (ibo_offset / 4) as u32,
+                                (vbo_offset / vertex_stride) as i32,
+                                0,
+                            );
+                        },
+                    );
                 }
                 device.cmd_end_render_pass(cmd);
             }
         }
-        drop(chunks);
 
         // Make the depth writes visible to the chunk fragment shader that
         // samples the map this frame. The render pass's final layout keeps
@@ -5493,30 +4582,27 @@ impl Renderer {
 
         // Recreate the Hi-Z depth pyramid for the new extent and re-point the
         // GPU-driven cull shader at it.
-        if self.config.gpu_driven {
-            if let Some(mut old) = self.hiz.take() {
-                old.destroy(&self.device, &self.alloc);
-            }
-            match hiz::HiZ::new(
-                &self.device,
-                &self.alloc,
-                self.command_pool,
-                self.graphics_queue,
-                swapchain_extent,
-                self.scene_opaque_depth.view,
-                self.scene_depth_sampler,
-            ) {
-                Ok(h) => {
-                    if let Some(gpu) = self.gpu_driven.as_mut() {
-                        gpu.update_hiz(&self.device, h.sampled_view(), h.sampler(), h.params());
-                    }
-                    self.hiz = Some(h);
-                }
-                Err(e) => {
-                    log::error!("HiZ resize failed: {e}");
-                }
-            }
+        if let Some(mut old) = self.hiz.take() {
+            old.destroy(&self.device, &self.alloc);
         }
+        let h = hiz::HiZ::new(
+            &self.device,
+            &self.alloc,
+            self.command_pool,
+            self.graphics_queue,
+            swapchain_extent,
+            self.scene_opaque_depth.view,
+            self.scene_depth_sampler,
+        )?;
+        {
+            let mut params = h.params();
+            if !self.config.occlusion_culling {
+                params[2] = 0.0;
+            }
+            self.gpu_driven
+                .update_hiz(&self.device, h.sampled_view(), h.sampler(), params);
+        }
+        self.hiz = Some(h);
 
         // Recreate the transparent pass framebuffers against the new
         // offscreen images (they referenced the destroyed ones before).
@@ -5874,59 +4960,23 @@ impl Renderer {
     /// Slice 2 helper: the second render pass that LOADS color/depth from
     /// `offscreen_images[image_index]`, binds `transparent_pipeline` and the
     /// shared chunk descriptor set (binding 6 = scene_opaque sampler), draws
-    /// every chunk's `transparent` PassBuffers entry, then ends.
+    /// the GPU-driven transparent slots, then ends.
+    #[allow(clippy::too_many_arguments)]
     fn record_transparent_pass(
         &self,
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         image_index: u32,
-        frame: &ChunkPassFrame<'_>,
+        vp_cols: &[f32],
+        game_time: f32,
         ui_index_count: u32,
         descriptor_set: vk::DescriptorSet,
         tile_remap_descriptor_set: vk::DescriptorSet,
         transparent_end_timestamp_query: Option<u32>,
         ui_end_timestamp_query: Option<u32>,
     ) {
-        let ChunkPassFrame {
-            frustum,
-            vp_cols,
-            game_time,
-            cam_pos,
-        } = *frame;
-        // (origin, vbo_buf, ibo_buf, index_count, dist_sq) — copy everything
-        // out in a single locked pass so we drop the chunks lock before the
-        // unsafe draw loop. Frustum-cull transparent chunks so off-screen
-        // water is not drawn. An empty result doubles as the "no transparent
-        // geometry this frame" check, so the whole map is only walked once.
-        let mut draws: Vec<(glam::Vec3, vk::Buffer, vk::Buffer, u32, f32)> = Vec::new();
-        {
-            let chunks = self.chunks.read();
-            draws.reserve(chunks.len());
-            for (pos, bufs) in chunks.iter() {
-                if let Some(ref t) = bufs.transparent {
-                    let (origin, max) = chunk_aabb(*pos);
-                    if !frustum.intersects_aabb(origin, max) {
-                        continue;
-                    }
-                    let center = chunk_center(*pos);
-                    draws.push((
-                        origin,
-                        t.vbo.buffer,
-                        t.ibo.buffer,
-                        t.index_count,
-                        (center - cam_pos).length_squared(),
-                    ));
-                }
-            }
-        }
-        // GPU-driven transparent slots (when `gpu_driven` is enabled the
-        // legacy `draws` list is empty and vice-versa, so at most one of
-        // these is non-empty).
-        let gpu_transparent = self
-            .gpu_driven
-            .as_ref()
-            .is_some_and(|g| g.transparent_slots() > 0);
-        if draws.is_empty() && ui_index_count == 0 && !gpu_transparent {
+        let gpu_transparent = self.gpu_driven.transparent_slots();
+        if ui_index_count == 0 && gpu_transparent == 0 {
             // No transparent draws this frame. Both bracketing timestamps
             // (4: transparent_end, 5: ui_end) must still be written — the
             // per-frame pool slots were reset at the top of draw_frame, and
@@ -5963,8 +5013,6 @@ impl Renderer {
             );
             return;
         }
-        draws.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
-
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue { float32: [0.0; 4] },
         }];
@@ -6016,28 +5064,8 @@ impl Renderer {
                 &[descriptor_set, tile_remap_descriptor_set],
                 &[],
             );
-            for (origin, vbo_buffer, ibo_buffer, index_count, _dist_sq) in draws.iter() {
-                let mut pc = [0.0f32; 24];
-                write_chunk_push_constants(&mut pc, *origin, vp_cols, game_time);
-                device.cmd_push_constants(
-                    cmd,
-                    self.pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    bytemuck::cast_slice(&pc),
-                );
-                let vbo = [*vbo_buffer];
-                device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
-                device.cmd_bind_index_buffer(cmd, *ibo_buffer, 0, vk::IndexType::UINT32);
-                device.cmd_draw_indexed(cmd, *index_count, 1, 0, 0, 0);
-            }
-            // GPU-driven transparent draw: one indirect multi-draw against the
-            // same scene copy the legacy path uses, so water samples the
-            // current frame (not the previous frame's stale copy).
-            if let Some(gpu) = self.gpu_driven.as_ref() {
-                if gpu.transparent_slots() > 0 {
-                    gpu.record_transparent(device, cmd, descriptor_set, vp_cols, game_time);
-                }
+            if gpu_transparent > 0 {
+                self.gpu_driven.record_transparent(device, cmd, descriptor_set, vp_cols, game_time);
             }
             // Timestamp 4: transparent pass end. Written here — after the
             // water/foliage draws, before the UI — because that is where
@@ -6075,29 +5103,15 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        // Wait for the GPU to finish, then drain any pending cmd+fence
-        // pairs while the handles are still valid. `device_wait_idle`
-        // signals every upload-batch fence, so the `wait_for_fences`
-        // inside `drain_pending_destructions` is a no-op for surviving
-        // entries, and `free_command_buffers` + `destroy_fence` then
-        // run on still-valid handles before pool/device teardown.
-        // Without this, every Renderer shutdown would silently leak
-        // the per-frame tail of pending cmd+fence pairs.
+        // Wait for the GPU to finish before releasing any resources the
+        // in-flight command buffers may still reference.
         if let Err(e) = unsafe { self.device.device_wait_idle() } {
             log::warn!("Renderer::drop: device_wait_idle failed: {e:?}");
         }
-        self.drain_pending_destructions();
         let device = &self.device;
 
-        // Chunk buffers.
-        let chunks = std::mem::take(&mut self.chunks).into_inner();
-        for (_, bufs) in chunks {
-            bufs.destroy(device, &self.alloc);
-        }
         // Phase-1 GPU-driven pipeline.
-        if let Some(mut gpu) = self.gpu_driven.take() {
-            gpu.destroy(device, &self.alloc, self.command_pool);
-        }
+        self.gpu_driven.destroy(device, &self.alloc, self.command_pool);
         // Phase-3 Hi-Z depth pyramid.
         if let Some(mut h) = self.hiz.take() {
             h.destroy(device, &self.alloc);
@@ -6255,13 +5269,6 @@ impl Drop for Renderer {
             device.destroy_pipeline_layout(self.entity_pipeline_layout, None);
             device.destroy_pipeline(self.entity_held_pipeline, None);
             device.destroy_pipeline(self.overlay_pipeline, None);
-
-            // Occlusion culling cleanup.
-            self.device.destroy_pipeline(self.occlusion_pipeline, None);
-            self.aabb_index_buffer.destroy_in_place(device, &self.alloc);
-            for frame in self.occlusion_frames.get_mut().drain(..) {
-                self.device.destroy_query_pool(frame.query_pool, None);
-            }
 
             // Particle subpass resources.
             // Sets owned by `particle_depth_descriptor_pool` are freed when
