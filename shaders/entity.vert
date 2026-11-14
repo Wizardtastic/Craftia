@@ -24,13 +24,14 @@ layout(location = 2) in uint in_tile;
 layout(location = 0) out vec2 frag_uv;
 layout(location = 1) out float frag_fog;
 layout(location = 2) flat out uint frag_tile;
+layout(location = 3) out float frag_light;
 
 layout(push_constant) uniform Push {
     mat4 model;
     uint tile;
     float half_size;
     uint billboard;
-    uint _pad;
+    float light;
 } push;
 
 layout(set = 0, binding = 0) uniform Camera {
@@ -89,6 +90,7 @@ void main() {
 
     frag_uv = in_uv;
     frag_tile = push.tile;
+    frag_light = clamp(push.light, 0.0, 1.0);
 
     // Fog: compute from world position (extract from model matrix translation).
     vec3 entity_pos = vec3(push.model[3][0], push.model[3][1], push.model[3][2]);

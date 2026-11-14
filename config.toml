@@ -1,15 +1,16 @@
 [graphics]
 width = 1280
 height = 720
-vsync = true
+vsync = false
 fog_distance = 320.0
 exposure = 0.6000000238418579
-vignette_strength = 0.15000000596046448
-raytrace_quality = 1.0
-raytrace_softness = 0.0
+vignette_strength = 0.0
+textures_dir = "assets/textures"
 msaa_samples = 4
 occlusion_culling = false
 gpu_meshing = false
+raytrace_quality = 1.0
+raytrace_softness = 0.01240536943078041
 water_y = 62.0
 wet_edge_strength = 0.5
 caustics_strength = 0.6000000238418579

@@ -2136,11 +2136,16 @@ impl crate::EngineApp {
                 }
                 // Load entity state.
                 let _ = self.load_entities(&save_path);
-                // Load world_info and restore cheats flag.
+                // Load world_info and restore cheats flag + game mode.
+                let mut loaded_mode = None;
                 if let Some(mut info) = crate::save::read_world_info(&save_path) {
                     info.last_played = crate::save::chrono_now();
                     let _ = crate::save::write_world_info(&save_path, &info);
                     self.gameplay.cheats_enabled = info.cheats_enabled();
+                    loaded_mode = Some(info.game_mode.clone());
+                }
+                if let Some(mode) = loaded_mode.as_deref() {
+                    self.apply_world_game_mode(mode);
                 }
                 self.gameplay.current_world_path = Some(save_path);
                 self.gameplay.play_time_accumulator = 0.0;
@@ -2153,6 +2158,18 @@ impl crate::EngineApp {
                     .chat
                     .push_message(format!("Failed to load world: {e}"));
             }
+        }
+    }
+
+    /// Apply a persisted game-mode name to the player's ECS component. Newly
+    /// spawned worlds default to Survival, so without this the mode selected
+    /// in the create dialog (or saved earlier) has no effect.
+    fn apply_world_game_mode(&mut self, mode: &str) {
+        let Some(mode) = voxel_game::GameMode::from_str_loose(mode) else {
+            return;
+        };
+        if let Some(player) = self.simulation.player_entity() {
+            self.simulation.ecs_world_mut().set(player, mode);
         }
     }
 
@@ -2207,7 +2224,7 @@ impl crate::EngineApp {
 
         // Write world_info.json.
         let mut info = crate::save::WorldInfo::new_default(&name, seed);
-        info.game_mode = game_mode;
+        info.game_mode = game_mode.clone();
         if allow_cheats {
             info.flags.push("cheats".to_string());
         }
@@ -2229,6 +2246,7 @@ impl crate::EngineApp {
         self.gameplay.current_world_path = Some(save_path);
         self.gameplay.play_time_accumulator = 0.0;
         self.gameplay.cheats_enabled = allow_cheats;
+        self.apply_world_game_mode(&game_mode);
         self.input.spawned = false;
         self.enter_playing();
     }

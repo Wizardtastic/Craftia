@@ -9,7 +9,9 @@
 //! instead.
 
 use voxel_core::math::ChunkPos;
-use voxel_render::{ChunkUpload, GpuTimings, MeshPass, RendererConfig, Vertex};
+use voxel_render::{
+    BlockLightGpu, ChunkUpload, EmissiveLight, GpuTimings, MeshPass, RendererConfig, Vertex,
+};
 
 #[test]
 fn renderer_config_default_disables_validation() {
@@ -105,6 +107,25 @@ fn vertex_layout_is_pod_roundtrip_safe_with_nonzero_payload() {
         back.tile, v.tile,
         "tile must survive POD roundtrip (no padding bit-stealing)"
     );
+}
+
+#[test]
+fn entity_push_constants_match_shader_layout() {
+    // mat4(64) + tile(4) + half_size(4) + billboard(4) + light(4) = 80 bytes,
+    // exactly the entity pipeline's push-constant range.
+    assert_eq!(
+        std::mem::size_of::<voxel_render::entity::EntityPushConstants>(),
+        80
+    );
+}
+
+#[test]
+fn raytrace_gpu_structs_match_shader_layouts() {
+    // std140 arrays round the 20-byte logical BlockLightGpu payload up to 32;
+    // the Rust side must include the padding or every block after index 0
+    // would be misread. EmissiveLight is exactly two vec4s.
+    assert_eq!(std::mem::size_of::<BlockLightGpu>(), 32);
+    assert_eq!(std::mem::size_of::<EmissiveLight>(), 32);
 }
 
 #[test]

@@ -601,13 +601,24 @@ impl crate::EngineApp {
                         streamer.request_remesh(n);
                     }
                 }
+                // Keep the ray-tracing grid in sync immediately for the same
+                // reason as the creative edit path above.
+                let voxels = self.world_state.world.gpu_light_voxels(cp);
+                if let (Some(voxels), Some(r)) = (voxels, self.render.renderer.as_mut()) {
+                    r.queue_light_chunk(voxel_core::math::chunk_origin(cp), &voxels);
+                }
                 if (block_id.0 as usize) < reg.count() {
                     let center = glam::Vec3::new(
                         pos[0] as f32 + 0.5,
                         pos[1] as f32 + 0.5,
                         pos[2] as f32 + 0.5,
                     );
-                    let color = reg.get(block_id).map_color;
+                    let light = Self::local_light_at(
+                        &self.world_state.world,
+                        &self.emissive_lights,
+                        center,
+                    );
+                    let color = Self::dim_color(reg.get(block_id).map_color, light);
                     spawn_particles_break(
                         &mut self.render.renderer,
                         center,
@@ -787,6 +798,28 @@ impl crate::EngineApp {
                     if !result.edits.is_empty() {
                         // Clone edits for particle spawning before moving into undo.
                         let edits_for_particles = result.edits.clone();
+                        // Push the edited chunks into the ray-tracing grid
+                        // immediately instead of waiting for the remesh event.
+                        // Otherwise point-light occlusion lags a frame or more,
+                        // so freshly placed walls visibly leak torch light.
+                        let mut touched_chunks: Vec<voxel_core::ChunkPos> = edits_for_particles
+                            .iter()
+                            .map(|edit| {
+                                voxel_core::math::block_to_chunk(glam::IVec3::new(
+                                    edit.x, edit.y, edit.z,
+                                ))
+                            })
+                            .collect();
+                        touched_chunks.sort_unstable_by_key(|c| (c.x(), c.y(), c.z()));
+                        touched_chunks.dedup();
+                        for cp in touched_chunks {
+                            let voxels = self.world_state.world.gpu_light_voxels(cp);
+                            if let (Some(voxels), Some(r)) =
+                                (voxels, self.render.renderer.as_mut())
+                            {
+                                r.queue_light_chunk(voxel_core::math::chunk_origin(cp), &voxels);
+                            }
+                        }
                         self.gameplay.undo_redo.push(voxel_game::EditAction {
                             edits: result.edits,
                         });
@@ -806,7 +839,12 @@ impl crate::EngineApp {
                                     );
                                     let reg = self.world_state.world.registry();
                                     let def = reg.get(hit.block_id);
-                                    let color = def.map_color;
+                                    let light = Self::local_light_at(
+                                        &self.world_state.world,
+                                        &self.emissive_lights,
+                                        pos,
+                                    );
+                                    let color = Self::dim_color(def.map_color, light);
                                     let normal = camera_now.forward();
                                     spawn_particles_break(
                                         &mut self.render.renderer,
@@ -833,7 +871,12 @@ impl crate::EngineApp {
                                     edit.y as f32 + 0.5,
                                     edit.z as f32 + 0.5,
                                 );
-                                let color = reg.get(block_id).map_color;
+                                let light = Self::local_light_at(
+                                    &self.world_state.world,
+                                    &self.emissive_lights,
+                                    pos,
+                                );
+                                let color = Self::dim_color(reg.get(block_id).map_color, light);
                                 spawn_particles_place(&mut self.render.renderer, pos, color);
                             }
                         }
@@ -1199,7 +1242,7 @@ impl crate::EngineApp {
             .simulation
             .player_pos()
             .unwrap_or(self.gameplay.spawn_pos);
-        let (entity_data, held_item_data): (Vec<_>, Vec<_>) = {
+        let (mut entity_data, mut held_item_data): (Vec<_>, Vec<_>) = {
             let ecs = self.simulation.ecs_world();
             let mut opaque = Vec::new();
             let mut transparent = Vec::new();
@@ -1223,6 +1266,7 @@ impl crate::EngineApp {
                             half_size: mesh.half_size,
                             transparent: mesh.transparent,
                             held_item: false,
+                            light: 1.0,
                         };
                         if mesh.transparent {
                             transparent.push(data);
@@ -1300,6 +1344,7 @@ impl crate::EngineApp {
                             half_size: 0.15,
                             transparent: false,
                             held_item: true,
+                            light: 1.0,
                         });
 
                         // Add arm below the held item.
@@ -1319,6 +1364,7 @@ impl crate::EngineApp {
                             half_size: 0.08, // Narrower than held item
                             transparent: false,
                             held_item: true,
+                            light: 1.0,
                         });
                     }
                 }
@@ -1326,6 +1372,16 @@ impl crate::EngineApp {
 
             (opaque, held)
         };
+
+        // Entities and held items use their own local light level so they go
+        // fully black underground instead of inheriting the global sky ambient.
+        for data in entity_data.iter_mut().chain(held_item_data.iter_mut()) {
+            data.light = Self::local_light_at(
+                &self.world_state.world,
+                &self.emissive_lights,
+                data.pos,
+            );
+        }
 
         // Compute the physical sun/moon state for this frame.
         let mut dp = self.day_params();
@@ -1370,6 +1426,7 @@ impl crate::EngineApp {
             1.0
         };
         dp.lighting.underwater = underwater;
+        self.refresh_emissive_lights(camera.pos);
         let block_light_table = {
             let reg = self.world_state.world.registry();
             Self::build_block_light_table(&reg)
@@ -1377,6 +1434,7 @@ impl crate::EngineApp {
         if let Some(r) = self.render.renderer.as_mut() {
             r.set_raytrace_lighting(dp.lighting);
             r.set_block_light_table(block_light_table);
+            r.set_emissive_lights(&self.emissive_lights);
             r.set_post_params(
                 self.config.exposure * dp.exposure,
                 self.config.vignette_strength,
@@ -1595,6 +1653,7 @@ impl crate::EngineApp {
             .world
             .water_submersion(camera.pos - eye_extent, camera.pos + eye_extent)
             > 0.5;
+        self.refresh_emissive_lights(camera.pos);
         let block_light_table = {
             let reg = self.world_state.world.registry();
             Self::build_block_light_table(&reg)
@@ -1603,6 +1662,7 @@ impl crate::EngineApp {
             return;
         };
         r.set_block_light_table(block_light_table);
+        r.set_emissive_lights(&self.emissive_lights);
         let mut lighting = dp.lighting;
         lighting.underwater = underwater;
         r.set_raytrace_lighting(lighting);
@@ -1714,6 +1774,42 @@ impl crate::EngineApp {
     /// Re-centre the renderer's voxel grid on the player when they travel a
     /// few chunks, and repopulate it with every loaded chunk. Between recentres
     /// the grid is updated incrementally by the streamer's remesh events.
+    /// Refresh the dynamic emissive-light list used by the ray-traced point
+    /// lights. Throttled to 4 Hz because it walks every voxel in the nearby
+    /// loaded chunks; edits become visible within a quarter second.
+    fn refresh_emissive_lights(&mut self, center: glam::Vec3) {
+        const MAX_LIGHTS: usize = voxel_render::MAX_EMISSIVE_LIGHTS;
+        const SCAN_CHUNK_RADIUS: i32 = 2;
+        self.emissive_light_timer -= self.input.frame_time.max(0.0) as f32;
+        if self.emissive_light_timer > 0.0 && !self.emissive_lights.is_empty() {
+            return;
+        }
+        self.emissive_light_timer = 0.25;
+
+        let center_block = voxel_core::math::world_to_block(center);
+        let mut raw = self
+            .world_state
+            .world
+            .emissive_lights_near(center_block, SCAN_CHUNK_RADIUS);
+        raw.sort_by_key(|(p, _, _)| p.distance_squared(center_block));
+
+        let to_linear = |v: u8| (v as f32 / 255.0).powf(2.2);
+        self.emissive_lights.clear();
+        self.emissive_lights
+            .extend(raw.into_iter().take(MAX_LIGHTS).map(
+                |(p, color, level)| voxel_render::EmissiveLight {
+                    position: [p.x as f32 + 0.5, p.y as f32 + 0.5, p.z as f32 + 0.5],
+                    range: 4.0 + level as f32 * 0.8,
+                    color: [
+                        to_linear(color[0]),
+                        to_linear(color[1]),
+                        to_linear(color[2]),
+                    ],
+                    intensity: 18.0 * (level as f32 / 15.0).powi(2),
+                },
+            ));
+    }
+
     fn update_light_grid(&mut self, player_pos: glam::Vec3) {
         const GRID_HALF_XZ: i32 = 96;
         const RECENTER_CHUNKS: i32 = 4;
@@ -1741,6 +1837,75 @@ impl crate::EngineApp {
             }
         }
         self.input.light_grid_center = Some(center);
+    }
+
+    /// Local light at an entity/held-item position: how much sky reaches it
+    /// vertically plus any nearby torch/emissive light with a clear line of
+    /// sight. Zero means the object should be renderered pitch black.
+    fn local_light_at(
+        world: &voxel_world::World,
+        lights: &[voxel_render::EmissiveLight],
+        pos: glam::Vec3,
+    ) -> f32 {
+        use voxel_world::registry::BlockKind;
+
+        let x = pos.x.floor() as i32;
+        let z = pos.z.floor() as i32;
+        let mut y = pos.y.floor() as i32 + 1;
+        let mut sky = 1.0f32;
+        let registry = world.registry();
+        while y < voxel_core::WORLD_HEIGHT_BLOCKS {
+            let id = world.get_block(x, y, z);
+            if !id.is_air() {
+                let def = registry.get(id);
+                match def.kind {
+                    BlockKind::Solid | BlockKind::Cactus => return 0.0,
+                    BlockKind::Liquid => sky *= 0.70,
+                    BlockKind::Foliage => sky *= 0.62,
+                    BlockKind::Transparent => sky *= 0.86,
+                    BlockKind::Air => {}
+                }
+                if sky < 0.01 {
+                    return 0.0;
+                }
+            }
+            y += 1;
+        }
+
+        let mut light = sky;
+        for l in lights {
+            let lp = glam::Vec3::from(l.position);
+            let to_light = lp - pos;
+            let d = to_light.length();
+            if d <= 0.001 || d >= l.range {
+                continue;
+            }
+            let falloff = (1.0 - d / l.range).clamp(0.0, 1.0);
+            let atten = falloff / (1.0 + 0.12 * d * d);
+            let contrib = (l.intensity * atten * 0.12).clamp(0.0, 1.0);
+            if contrib <= light {
+                continue;
+            }
+            // A wall between the entity and the light blocks it.
+            let ray = voxel_core::Ray::new(pos, to_light / d, (d - 0.35).max(0.0));
+            if voxel_physics::raycast_voxels(world, ray).is_some() {
+                continue;
+            }
+            light = contrib;
+        }
+        light.clamp(0.0, 1.0)
+    }
+
+    /// Dim a particle/block colour by the local light level, including its
+    /// alpha, so break/place dust is invisible in pitch-dark caves.
+    fn dim_color(color: [u8; 4], light: f32) -> [u8; 4] {
+        let l = light.clamp(0.0, 1.0);
+        [
+            (color[0] as f32 * l) as u8,
+            (color[1] as f32 * l) as u8,
+            (color[2] as f32 * l) as u8,
+            (color[3] as f32 * l) as u8,
+        ]
     }
 
     /// Build the per-block ray-tracing table (opacity kind, emission and
@@ -1774,6 +1939,7 @@ impl crate::EngineApp {
                 def.emission,
                 def.emission_color,
                 roughness,
+                [def.map_color[0], def.map_color[1], def.map_color[2]],
             );
         }
         table
@@ -1809,6 +1975,44 @@ impl crate::EngineApp {
         }
         table.world_params = [water_y, wet_edge, caustics, leaves];
         table
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::Vec3;
+    use voxel_core::ChunkPos;
+    use voxel_world::{Chunk, World};
+
+    #[test]
+    fn entity_light_is_pitch_black_under_a_solid_roof() {
+        let world = World::new(0);
+        let cp = ChunkPos::new(0, 0, 0);
+        let mut chunk = Chunk::new(cp);
+        let stone = world.registry().id_of("stone").unwrap();
+        chunk.set(0, 5, 0, stone);
+        world.insert_chunk(cp, chunk);
+
+        let light = crate::EngineApp::local_light_at(
+            &world,
+            &[],
+            Vec3::new(0.5, 2.0, 0.5),
+        );
+        assert_eq!(light, 0.0, "a solid roof must block all local light");
+    }
+
+    #[test]
+    fn entity_light_is_full_under_open_sky() {
+        let world = World::new(0);
+        let cp = ChunkPos::new(0, 0, 0);
+        world.insert_chunk(cp, Chunk::new(cp));
+
+        let light = crate::EngineApp::local_light_at(
+            &world,
+            &[],
+            Vec3::new(0.5, 2.0, 0.5),
+        );
+        assert_eq!(light, 1.0, "open sky must fully light an entity");
     }
 }
 

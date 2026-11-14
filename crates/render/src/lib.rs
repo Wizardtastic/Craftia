@@ -190,7 +190,9 @@ impl BlockPropertiesGpu {
 
 /// Per-block ray-tracing material, indexed by block ID in the GPU voxel grid.
 ///
-/// 16 bytes, matching `BlockLightGpu` in `shaders/chunk.frag`.
+/// 32 bytes, matching `BlockLightGpu` in `shaders/chunk.frag`. The padding
+/// keeps the std140 array stride at 32 bytes (20 bytes would round up to 32
+/// on the GPU and desynchronise every entry after the first).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct BlockLightGpu {
@@ -203,6 +205,10 @@ pub struct BlockLightGpu {
     pub emission_rgb: u32,
     /// 0 = mirror, 255 = matte.
     pub roughness: u32,
+    /// Packed RGB8 average albedo (from the block's map colour), used for
+    /// one-bounce diffuse GI.
+    pub albedo_rgb: u32,
+    pub _pad: [u32; 3],
 }
 
 impl BlockLightGpu {
@@ -212,7 +218,13 @@ impl BlockLightGpu {
     pub const KIND_TRANSLUCENT: u32 = 3;
     pub const KIND_FOLIAGE: u32 = 4;
 
-    pub fn new(kind: u32, emission_level: u8, emission: [u8; 3], roughness: u8) -> Self {
+    pub fn new(
+        kind: u32,
+        emission_level: u8,
+        emission: [u8; 3],
+        roughness: u8,
+        albedo: [u8; 3],
+    ) -> Self {
         Self {
             kind,
             emission_level: emission_level as u32,
@@ -220,6 +232,10 @@ impl BlockLightGpu {
                 | ((emission[1] as u32) << 8)
                 | ((emission[2] as u32) << 16),
             roughness: roughness as u32,
+            albedo_rgb: albedo[0] as u32
+                | ((albedo[1] as u32) << 8)
+                | ((albedo[2] as u32) << 16),
+            _pad: [0; 3],
         }
     }
 }
@@ -241,6 +257,23 @@ impl Default for BlockLightTable {
 
 impl BlockLightTable {
     pub const SIZE_BYTES: usize = std::mem::size_of::<Self>();
+}
+
+/// Maximum number of dynamic emissive blocks uploaded to the shader per frame.
+pub const MAX_EMISSIVE_LIGHTS: usize = 32;
+
+/// One dynamic point light (torch, lava, glowstone) sourced from the loaded
+/// voxel chunks. 32 bytes, matching `EmissiveLights` in `shaders/chunk.frag`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct EmissiveLight {
+    pub position: [f32; 3],
+    /// Cutoff distance in blocks; intensity fades smoothly to zero here.
+    pub range: f32,
+    /// Linear RGB radiance colour.
+    pub color: [f32; 3],
+    /// Radiant intensity scale (already includes the emission level).
+    pub intensity: f32,
 }
 
 /// Full ray-tracing lighting state for one frame, supplied by the engine's

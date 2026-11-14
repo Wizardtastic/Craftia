@@ -741,6 +741,11 @@ pub(crate) struct EngineApp {
     sysinfo: sysinfo::System,
     /// Counter to throttle sysinfo refreshes (every N frames).
     sysinfo_refresh_counter: u32,
+    /// Nearest emissive blocks (torches, lava) uploaded to the ray tracer.
+    emissive_lights: Vec<voxel_render::EmissiveLight>,
+    /// Seconds until the next emissive-light scan. Scanning walks loaded
+    /// chunks, so it is throttled rather than run every frame.
+    emissive_light_timer: f32,
     /// Texture pack manager: tracks loaded packs and their metadata.
     texture_pack_manager: TexturePackManager,
 }
@@ -860,6 +865,8 @@ impl EngineApp {
             audio: voxel_audio::AudioManager::null(),
             sysinfo: sysinfo::System::new(),
             sysinfo_refresh_counter: 0,
+            emissive_lights: Vec::new(),
+            emissive_light_timer: 0.0,
             texture_pack_manager: TexturePackManager::default(),
         })
     }
@@ -1988,7 +1995,18 @@ impl ApplicationHandler for EngineApp {
                         }
                         if self.input.cursor_locked {
                             match button {
-                                MouseButton::Left => self.input.input.clicks.left = pressed,
+                                MouseButton::Left => {
+                                    self.input.input.clicks.left = pressed;
+                                    // `Action::Attack` is the held state read by the
+                                    // progressive mining system. The one-shot
+                                    // `clicks` flag only covers presses, so mirror
+                                    // the button into the held set here.
+                                    if pressed {
+                                        self.input.input.held.insert(Action::Attack);
+                                    } else {
+                                        self.input.input.held.remove(&Action::Attack);
+                                    }
+                                }
                                 MouseButton::Right => self.input.input.clicks.right = pressed,
                                 _ => {}
                             }

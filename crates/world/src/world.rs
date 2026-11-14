@@ -892,6 +892,50 @@ impl World {
         Some(out)
     }
 
+    /// Collect emissive blocks (torches, lava, glowstone) in the loaded chunks
+    /// within `chunk_radius` of `center`. Returns `(world position, emission
+    /// colour, emission level)`. Used to build the shader's dynamic point-light
+    /// list; scanning is O(loaded voxels) so callers should throttle it.
+    pub fn emissive_lights_near(
+        &self,
+        center: IVec3,
+        chunk_radius: i32,
+    ) -> Vec<(IVec3, [u8; 3], u8)> {
+        let center_chunk = block_to_chunk(center);
+        let mut out = Vec::new();
+        for shard in self.chunks.read_all() {
+            for (pos, chunk) in shard.iter() {
+                if (pos.x() - center_chunk.x()).abs() > chunk_radius
+                    || (pos.y() - center_chunk.y()).abs() > chunk_radius
+                    || (pos.z() - center_chunk.z()).abs() > chunk_radius
+                {
+                    continue;
+                }
+                let origin = chunk_origin(*pos);
+                for ly in 0..CHUNK_SIZE {
+                    for lz in 0..CHUNK_SIZE {
+                        for lx in 0..CHUNK_SIZE {
+                            let id = chunk.get(lx, ly, lz);
+                            if id.is_air() {
+                                continue;
+                            }
+                            let def = self.reg.get(id);
+                            if def.emission == 0 {
+                                continue;
+                            }
+                            out.push((
+                                origin + IVec3::new(lx, ly, lz),
+                                def.emission_color,
+                                def.emission,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Positions of every currently loaded chunk (cheap: keys only).
     pub fn loaded_chunk_positions(&self) -> Vec<ChunkPos> {
         let mut out = Vec::new();
@@ -950,6 +994,22 @@ mod tests {
         let world = World::new(42);
         // No chunks loaded.
         assert!(!world.set_block(0, 0, 0, BlockId(1)));
+    }
+
+    #[test]
+    fn emissive_lights_near_finds_torch() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        let mut chunk = Chunk::new(cp);
+        let torch = world.registry().id_of("torch").unwrap();
+        chunk.set(1, 2, 3, torch);
+        world.insert_chunk(cp, chunk);
+
+        let lights = world.emissive_lights_near(IVec3::new(1, 2, 3), 1);
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].0, IVec3::new(1, 2, 3));
+        assert_eq!(lights[0].2, 14);
+        assert_eq!(lights[0].1, [255, 200, 100]);
     }
 
     #[test]

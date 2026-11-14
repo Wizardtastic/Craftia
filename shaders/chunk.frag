@@ -10,7 +10,9 @@
 //
 //   * sun and moon soft shadows (cone-jittered DDA rays)
 //   * ray-traced ambient occlusion + sky diffuse GI (hemisphere rays)
-//   * one-bounce emissive block lighting (torch/lava/firefly gather rays)
+//   * two-bounce diffuse GI with per-block albedo colour bleed
+//   * soft, occluded point lights for torches/lava/fireflies (diffuse through
+//     glass/water/leaves, fully blocked by opaque geometry)
 //   * GGX-ish specular reflections for glossy surfaces
 //   * water reflections + ray-traced water-column refraction absorption
 //   * sun caustics under water, leaves subsurface backlight
@@ -66,10 +68,24 @@ struct BlockLightGpu {
     uint emission_level;
     uint emission_rgb;
     uint roughness;
+    uint albedo_rgb;
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 layout(set = 0, binding = 9) uniform BlockLights {
     BlockLightGpu blocks[256];
 } block_lights;
+
+// ── Dynamic emissive block lights (binding 10) ───────────────────────────
+// CPU-gathered torch/lava/glowstone positions near the camera. Direct point
+// lights make light spread smoothly instead of relying on a gather ray
+// randomly crossing an emissive voxel.
+layout(set = 0, binding = 10) uniform EmissiveLights {
+    vec4 light_pos_range[32];      // xyz = world position, w = cutoff range
+    vec4 light_color_intensity[32];// rgb = linear colour, a = intensity
+    vec4 light_meta;               // x = active count
+} lights;
 
 const uint BLOCK_KIND_AIR        = 0u;
 const uint BLOCK_KIND_OPAQUE     = 1u;
@@ -210,6 +226,7 @@ struct TraceHit {
     float transmittance; // fraction of light that survives the march
     vec3 emission;       // emitted radiance gathered along the ray
     vec3 position;       // first blocking hit position (if hit)
+    vec3 normal;         // outward normal of the blocking face (if hit)
     uint block;          // first blocking block ID (0 = miss)
     float distance;      // distance to the blocking hit
     bool hit;
@@ -230,6 +247,8 @@ TraceHit trace_voxels(vec3 origin, vec3 dir, float max_dist, int max_steps,
     r.water = false;
 
     vec3 d = normalize(dir);
+    r.normal = -d;
+    int axis = -1;
     ivec3 cell = ivec3(floor(origin));
     ivec3 stp = ivec3(sign(d));
     vec3 inv = 1.0 / max(abs(d), vec3(1e-6));
@@ -260,8 +279,15 @@ TraceHit trace_voxels(vec3 origin, vec3 dir, float max_dist, int max_steps,
             if (m.kind == BLOCK_KIND_OPAQUE) {
                 r.hit = true;
                 r.block = id;
+                // Nothing survives an opaque hit. Keeping this at 1.0 made
+                // every visibility check that reads `transmittance` treat a
+                // blocked ray as fully lit (the cause of daylight in caves).
+                r.transmittance = 0.0;
                 r.distance = t;
                 r.position = origin + d * t;
+                if (axis == 0) r.normal = vec3(-sign(d.x), 0.0, 0.0);
+                else if (axis == 1) r.normal = vec3(0.0, -sign(d.y), 0.0);
+                else if (axis == 2) r.normal = vec3(0.0, 0.0, -sign(d.z));
                 break;
             } else if (m.kind == BLOCK_KIND_WATER) {
                 // Beer absorption through every water cell crossed.
@@ -279,79 +305,233 @@ TraceHit trace_voxels(vec3 origin, vec3 dir, float max_dist, int max_steps,
             t = tmax.x;
             tmax.x += tdelta.x;
             cell.x += stp.x;
+            axis = 0;
         } else if (tmax.y < tmax.z) {
             t = tmax.y;
             tmax.y += tdelta.y;
             cell.y += stp.y;
+            axis = 1;
         } else {
             t = tmax.z;
             tmax.z += tdelta.z;
             cell.z += stp.z;
+            axis = 2;
         }
         if (t > max_dist) break;
     }
     return r;
 }
 
-// Shadow ray toward `light_dir`. Multiple jittered rays inside the light's
-// angular disc produce a real, distance-stable penumbra.
-float soft_visibility(vec3 p, vec3 n, vec3 light_dir, float angular_radius,
-                      float jitter_seed) {
+// Fixed low-discrepancy taps inside the light's angular disc. These are NOT
+// rotated per pixel or per frame: a stable penumbra is far less objectionable
+// than the shimmering grain produced by stochastic shadow rays.
+const vec2 SHADOW_TAPS[8] = vec2[8](
+    vec2(0.0, 0.0),
+    vec2(0.85, 0.20),
+    vec2(-0.65, 0.55),
+    vec2(0.10, -0.90),
+    vec2(-0.40, -0.55),
+    vec2(0.55, 0.75),
+    vec2(-0.90, -0.15),
+    vec2(0.75, -0.65)
+);
+
+// Shadow ray toward `light_dir`. Samples a fixed set of offsets inside the
+// light's angular disc to produce a stable penumbra.
+float soft_visibility(vec3 p, vec3 n, vec3 light_dir, float angular_radius) {
     if (light_dir.y <= 0.0) return 0.0;
     vec3 helper = abs(light_dir.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     vec3 t1 = normalize(cross(light_dir, helper));
     vec3 t2 = cross(light_dir, t1);
-    float a = jitter_seed * 6.2831853;
-    vec3 offset = t1 * cos(a) + t2 * sin(a);
-    // Two samples per pixel plus a third for high quality settings.
-    vec3 o1 = offset * angular_radius;
-    vec3 o2 = (t1 * cos(a + 2.0944) + t2 * sin(a + 2.0944)) * angular_radius * 1.6;
-    vec3 o3 = (t1 * cos(a + 4.1888) + t2 * sin(a + 4.1888)) * angular_radius * 1.6;
+    int taps = rt.grid_extent.w > 0.66 ? 6 : (rt.grid_extent.w > 0.33 ? 4 : 3);
     vec3 origin = p + n * 0.02;
-    float budget = 72.0;
-    float sum = trace_voxels(origin, light_dir + o1, budget, 96, false).transmittance;
-    sum += trace_voxels(origin, light_dir + o2, budget, 96, false).transmittance;
-    if (rt.grid_extent.w > 0.66) {
-        sum += trace_voxels(origin, light_dir + o3, budget, 96, false).transmittance;
-        sum /= 3.0;
-    } else {
-        sum *= 0.5;
+    float sum = 0.0;
+    for (int i = 0; i < 8; i++) {
+        if (i >= taps) break;
+        vec2 o = SHADOW_TAPS[i] * angular_radius * 1.8;
+        vec3 dir = normalize(light_dir + t1 * o.x + t2 * o.y);
+        sum += trace_voxels(origin, dir, 72.0, 96, false).transmittance;
+    }
+    return sum / float(taps);
+}
+
+// Average block albedo (sRGB8 -> linear) used by diffuse one-bounce GI.
+vec3 block_albedo(uint id) {
+    BlockLightGpu m = block_light(id);
+    vec3 a = vec3(
+        float(m.albedo_rgb & 255u),
+        float((m.albedo_rgb >> 8u) & 255u),
+        float((m.albedo_rgb >> 16u) & 255u)) / 255.0;
+    return max(pow(a, vec3(2.2)), vec3(0.02));
+}
+
+// Soft visibility for a point light. A handful of fixed taps inside the
+// light's tiny angular disc gives a stable penumbra; opaque geometry blocks
+// every tap (so an enclosed torch is fully dark), while glass/water/leaves
+// attenuate and slightly diffuse the surviving taps instead of hard-cutting.
+float point_visibility(vec3 p, vec3 n, vec3 l, float d) {
+    vec3 helper = abs(l.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 t1 = normalize(cross(l, helper));
+    vec3 t2 = cross(l, t1);
+    // The visible flame/glow volume is wider than the physical wick. A larger
+    // angular source makes the penumbra wide enough that shadows from
+    // different torches overlap and blend instead of meeting in hard lines.
+    float radius = clamp(0.85 / max(d, 0.75), 0.018, 0.45);
+    // Eight fixed taps at high quality smooth the penumbra into a continuous
+    // gradient rather than a handful of visible contour bands.
+    int taps = rt.grid_extent.w > 0.66 ? 8 : (rt.grid_extent.w > 0.33 ? 5 : 4);
+    vec3 origin = p + n * 0.035;
+    float sum = 0.0;
+    for (int i = 0; i < 8; i++) {
+        if (i >= taps) break;
+        vec2 o = SHADOW_TAPS[i] * radius;
+        vec3 dir = normalize(l + t1 * o.x + t2 * o.y);
+        TraceHit th = trace_voxels(origin, dir, max(d - 0.30, 0.0), 48, false);
+        sum += th.hit ? 0.0 : th.transmittance;
+    }
+    return sum / float(taps);
+}
+
+// Cheap softened visibility for indirect point-light bounces. A single hard
+// ray made indirect torch shadows meet in visible lines; three taps are enough
+// to break up that edge without the cost of the full eight-tap direct pass.
+float point_visibility_cheap(vec3 p, vec3 n, vec3 l, float d) {
+    vec3 helper = abs(l.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 t1 = normalize(cross(l, helper));
+    vec3 t2 = cross(l, t1);
+    float radius = clamp(0.70 / max(d, 0.75), 0.018, 0.38);
+    vec3 origin = p + n * 0.035;
+    float sum = 0.0;
+    for (int i = 0; i < 3; i++) {
+        vec2 o = SHADOW_TAPS[i] * radius;
+        vec3 dir = normalize(l + t1 * o.x + t2 * o.y);
+        TraceHit th = trace_voxels(origin, dir, max(d - 0.30, 0.0), 48, false);
+        sum += th.hit ? 0.0 : th.transmittance;
+    }
+    return sum / 3.0;
+}
+
+// Direct illumination from CPU-gathered emissive blocks. Sharp point lights
+// with inverse-square falloff, a smooth cutoff and ray-traced occlusion.
+// shadow_mode: 0 = none (debug), 1 = soft direct, 2 = cheap soft bounce.
+vec3 sample_emissive_lights(vec3 p, vec3 n, int shadow_mode) {
+    vec3 sum = vec3(0.0);
+    int count = int(lights.light_meta.x);
+    for (int i = 0; i < 32; i++) {
+        if (i >= count) break;
+        vec4 pr = lights.light_pos_range[i];
+        vec3 to_light = pr.xyz - p;
+        float d2 = dot(to_light, to_light);
+        float range = pr.w;
+        if (d2 >= range * range || d2 < 1e-4) continue;
+        float d = sqrt(d2);
+        vec3 l = to_light / d;
+        // Smooth wrapped diffuse: a linear clamp leaves a visible crease
+        // where N.L crosses zero. Smoothstep approaches zero with zero slope,
+        // so overlapping torch pools fade into each other instead of forming
+        // a hard diagonal terminator. Shadowing still blocks walls completely.
+        float ndl = smoothstep(-0.15, 0.85, dot(n, l));
+        if (ndl <= 0.0) continue;
+        float atten = 1.0 / (1.0 + 0.12 * d2);
+        // Wider cutoff band avoids a visible ring where one light's range ends.
+        atten *= 1.0 - smoothstep(range * 0.5, range, d);
+        float vis = 1.0;
+        if (shadow_mode == 1) {
+            vis = point_visibility(p, n, l, d);
+        } else if (shadow_mode == 2) {
+            vis = point_visibility_cheap(p, n, l, d);
+        }
+        vec4 ci = lights.light_color_intensity[i];
+        sum += ci.rgb * ci.w * atten * ndl * vis;
     }
     return sum;
 }
 
-// Cosine-weighted hemisphere ambient: 3 traced rays weighted by the analytic
-// sky radiance they see. This is ray-traced sky occlusion + diffusely
-// reflected skylight in one term.
-vec3 sky_ambient_raytraced(vec3 p, vec3 n, float seed) {
+// Direct light arriving at an arbitrary hit point, used by GI bounces.
+// Emissive light is shadowed here: unshadowed bounce light was the source of
+// torchlight leaking through walls into sealed rooms.
+vec3 surface_direct_light(vec3 p, vec3 n) {
+    vec3 sd = normalize(rt.sun_dir_vis.xyz);
+    float sv = clamp(rt.sun_dir_vis.w, 0.0, 1.0);
+    float ndl = max(dot(n, sd), 0.0);
+    float vis = 0.0;
+    if (ndl > 0.0 && sv > 0.001) {
+        TraceHit th = trace_voxels(p + n * 0.03, sd, 48.0, 64, false);
+        vis = th.hit ? 0.0 : th.transmittance;
+    }
+    vec3 c = rt.sun_color_radius.rgb * ndl * sv * vis;
+    // Sky ambient at the bounce point must also be occluded, otherwise every
+    // interior wall would inject daylight into a sealed room through GI.
+    float sky_vis = trace_voxels(p + n * 0.03, vec3(0.0, 1.0, 0.0),
+                                 64.0, 96, false).transmittance;
+    c += sky_radiance(n) * 0.35 * sky_vis;
+    c += sample_emissive_lights(p + n * 0.03, n, 2);
+    return c;
+}
+
+// A single extra cosine ray at a GI hit, approximating the second diffuse
+// bounce. This is what lets warm light wrap past a corner instead of stopping
+// at the first lit face. Only evaluated at high ray-tracing quality.
+vec3 second_bounce(vec3 p, vec3 n, vec3 incoming) {
+    vec3 rd = reflect(incoming, n);
+    if (dot(rd, n) <= 0.01) rd = n;
+    rd = normalize(rd);
+    TraceHit h = trace_voxels(p + n * 0.03, rd, 10.0, 16, true);
+    vec3 c = h.emission;
+    if (!h.hit) {
+        c += sky_radiance(rd) * h.transmittance;
+    } else {
+        c += block_albedo(h.block) * surface_direct_light(h.position, h.normal);
+    }
+    return c;
+}
+
+// Cosine-weighted hemisphere GI from a fixed Fibonacci direction set. The
+// directions do not change per pixel or per frame; only real occlusion varies,
+// which removes the stochastic grain while keeping contact shadows.
+// A hit surface contributes its albedo times its own direct sun/sky/emissive
+// lighting, giving a true one-bounce colour bleed.
+vec3 sky_ambient_raytraced(vec3 p, vec3 n) {
     vec3 up = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     vec3 t = normalize(cross(up, n));
     vec3 b = cross(n, t);
-    float a = seed * 6.2831853;
-    vec3 dirs[3];
-    dirs[0] = normalize(n + t * cos(a) * 0.75 + b * sin(a) * 0.75);
-    dirs[1] = normalize(n + t * cos(a + 2.0944) * 0.85 + b * sin(a + 2.0944) * 0.85);
-    dirs[2] = normalize(n + t * cos(a + 4.1888) * 0.45 + b * sin(a + 4.1888) * 0.45);
-
+    int samples = rt.grid_extent.w > 0.66 ? 8 : (rt.grid_extent.w > 0.33 ? 5 : 3);
     vec3 sum = vec3(0.0);
-    int samples = rt.grid_extent.w > 0.5 ? 3 : 2;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 8; i++) {
         if (i >= samples) break;
-        vec3 d = dirs[i];
-        float ndl = max(dot(n, d), 0.0);
-        if (ndl <= 0.0) continue;
-        TraceHit hit = trace_voxels(p + n * 0.02, d, 12.0, 20, true);
-        vec3 radiance = sky_radiance(d) * hit.transmittance;
-        // A hit surface contributes one diffuse bounce (approximated by its
-        // emissive term and a fraction of the sky it would see) instead of
-        // going black: this is cheap one-bounce indirect light.
-        if (hit.hit) {
-            radiance += hit.emission * 0.35
-                      + sky_radiance(n) * 0.06 * hit.transmittance;
+        float u = (float(i) + 0.5) / float(samples);
+        float phi = 2.39996323 * float(i);
+        float cos_theta = sqrt(1.0 - u);
+        float sin_theta = sqrt(u);
+        vec3 d = normalize(t * cos(phi) * sin_theta
+                         + b * sin(phi) * sin_theta
+                         + n * cos_theta);
+        // Long enough to reach the roof of large caves/rooms. A short trace
+        // used to miss the ceiling and then sample sky, leaking ambient light
+        // into underground spaces.
+        TraceHit hit = trace_voxels(p + n * 0.02, d, 48.0, 64, true);
+        vec3 radiance = hit.emission;
+        if (!hit.hit) {
+            // Only count sky on a miss if the ray actually escaped to open
+            // sky. In a large sealed room the ray can exceed the trace range
+            // while still indoors; checking upward from its endpoint keeps
+            // that space pitch dark.
+            vec3 endpoint = p + d * 48.0;
+            float end_sky = trace_voxels(endpoint + vec3(0.0, 0.01, 0.0),
+                                         vec3(0.0, 1.0, 0.0), 64.0, 96,
+                                         false).transmittance;
+            radiance += sky_radiance(d) * hit.transmittance * end_sky;
+        } else {
+            vec3 albedo = block_albedo(hit.block);
+            vec3 bounce = surface_direct_light(hit.position, hit.normal);
+            if (rt.grid_extent.w > 0.66) {
+                bounce += second_bounce(hit.position, hit.normal, d) * 0.55;
+            }
+            radiance += albedo * bounce;
         }
-        sum += radiance * ndl;
+        sum += radiance;
     }
-    return sum / float(max(samples, 1));
+    return sum / float(samples);
 }
 
 // One-bounce specular reflection. Hits are resolved against the voxel grid;
@@ -372,7 +552,10 @@ vec3 trace_reflection(vec3 p, vec3 n, vec3 v, float roughness, float seed) {
     if (!hit.hit) {
         return fallback + hit.emission;
     }
-    vec3 colour = fallback * 0.55;
+    // A reflected ray that hit geometry must not also collect sky radiance:
+    // doing so lit sealed rooms/underground surfaces as if the wall were a
+    // window. Off-screen hits stay black (or use the shaded scene copy below).
+    vec3 colour = vec3(0.0);
     // Project the traced hit into the scene copy: if that surface is on
     // screen we can reuse its shaded colour (a ray-traced reflection with
     // real terrain albedo, no screen-space search).
@@ -457,43 +640,33 @@ void main() {
     float sun_ndl = max(dot(n, sun_dir), 0.0);
     float moon_ndl = max(dot(n, moon_dir), 0.0);
 
-    float seed = hash12(gl_FragCoord.xy + fract(rt.params.w) * 17.0);
+    // Static per-pixel hash: only used to break up rough reflections. It must
+    // not include time, or every ray-traced term shimmers between frames.
+    float seed = hash12(gl_FragCoord.xy);
     float shadow_softness = max(rt.params.y, 0.0008);
     float sun_ang = max(rt.sun_color_radius.a, shadow_softness);
 
     // ── Ray-traced direct sun + moon ─────────────────────────────────────
     float sun_shadow = 1.0;
     if (sun_vis > 0.001 && sun_ndl > 0.0) {
-        sun_shadow = soft_visibility(frag_world_pos, n, sun_dir, sun_ang, seed);
+        sun_shadow = soft_visibility(frag_world_pos, n, sun_dir, sun_ang);
     }
     float moon_shadow = 1.0;
     if (moon_ndl > 0.0) {
         moon_shadow = soft_visibility(frag_world_pos, n, moon_dir,
-                                      max(rt.moon_color_radius.a, shadow_softness),
-                                      fract(seed * 7.31));
+                                      max(rt.moon_color_radius.a, shadow_softness));
     }
     vec3 direct = rt.sun_color_radius.rgb * sun_ndl * sun_vis * sun_shadow;
     direct += rt.moon_color_radius.rgb * moon_ndl * moon_shadow;
 
     // ── Ray-traced ambient occlusion + sky GI ────────────────────────────
-    vec3 ambient = sky_ambient_raytraced(frag_world_pos, n, seed);
+    vec3 ambient = sky_ambient_raytraced(frag_world_pos, n);
     ambient *= rt.params.z;
 
-    // ── Ray-traced emissive block light ──────────────────────────────────
-    vec3 emissive_light = vec3(0.0);
-    {
-        // Two short gather rays biased toward grazing directions catch
-        // torches, lava and glowing blocks with real occlusion.
-        vec3 up = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-        vec3 t = normalize(cross(up, n));
-        vec3 b = cross(n, t);
-        float a = seed * 6.2831853;
-        vec3 d1 = normalize(n * 0.55 + t * cos(a) + b * sin(a));
-        vec3 d2 = normalize(n * 0.55 + t * cos(a + PI) + b * sin(a + PI));
-        TraceHit h1 = trace_voxels(frag_world_pos + n * 0.02, d1, 28.0, 48, true);
-        TraceHit h2 = trace_voxels(frag_world_pos + n * 0.02, d2, 28.0, 48, true);
-        emissive_light = (h1.emission + h2.emission) * 0.5;
-    }
+    // ── Dynamic emissive block lights (torches, lava, glowstone) ─────────
+    // Direct point lights with ray-traced occlusion: these produce smooth,
+    // physically-shaped pools of light instead of sparse gather-ray hits.
+    vec3 emissive_light = sample_emissive_lights(frag_world_pos, n, 1);
 
     vec3 lighting = direct + ambient + emissive_light;
 
@@ -551,7 +724,7 @@ void main() {
         vec3 refracted = textureLod(scene_opaque, clamp(scene_uv, vec2(0.001), vec2(0.999)), 0.0).rgb * beer;
         refracted = mix(refracted, refracted * (albedo * 2.6 + 0.03), 0.30);
         // Water body receives the same traced lighting (sparkle + depth).
-        refracted += albedo * (ambient + direct) * 0.25;
+        refracted += albedo * (ambient + direct + emissive_light) * 0.25;
 
         vec3 water_col = mix(refracted, reflected, clamp(fres + 0.10, 0.0, 1.0));
         tinted = water_col;
@@ -617,14 +790,21 @@ void main() {
     vec3 fog_col = rt.fog_density.rgb;
     if (fog_t > 0.001) {
         vec3 mid = mix(frag_world_pos, cam_pos, 0.5);
-        float vis = 0.0;
-        if (sun_vis > 0.0) {
-            vis = soft_visibility(mid, -sun_dir, sun_dir, sun_ang * 3.0,
-                                  fract(seed * 5.13));
+        float sun_fog = 0.0;
+        if (sun_vis > 0.001) {
+            sun_fog = soft_visibility(mid, -sun_dir, sun_dir, sun_ang * 3.0);
         }
-        vec3 scatter = rt.sun_color_radius.rgb * vis * 0.55
-                     + rt.moon_color_radius.rgb * 0.25;
-        vec3 haze = fog_col + scatter;
+        float moon_fog = 0.0;
+        if (moon_dir.y > 0.001) {
+            moon_fog = soft_visibility(mid, -moon_dir, moon_dir,
+                                       max(rt.moon_color_radius.a, shadow_softness) * 3.0);
+        }
+        // Fog is only lit where it can actually see the sky/sun/moon. A dark
+        // cave or sealed room therefore fades to black instead of grey haze.
+        float sky_fog = trace_voxels(mid, vec3(0.0, 1.0, 0.0), 96.0, 128, false).transmittance;
+        vec3 haze = fog_col * sky_fog
+                  + rt.sun_color_radius.rgb * sun_fog * 0.55
+                  + rt.moon_color_radius.rgb * moon_fog * 0.25;
         tinted = mix(tinted, haze, clamp(fog_t * min(rt.fog_density.a, 1.0), 0.0, 1.0));
     }
 

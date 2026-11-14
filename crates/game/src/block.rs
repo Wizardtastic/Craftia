@@ -244,6 +244,30 @@ mod tests {
     }
 
     #[test]
+    fn survival_left_click_does_not_break_instantly() {
+        let world = world_with_block(BlockId(2));
+        let streamer = ChunkStreamer::spawn(world.clone(), Default::default()).unwrap();
+        let mut inventory = SurvivalInventory::new();
+        let result = BlockAction::apply(
+            &BlockInteraction {
+                world: &world,
+                streamer: &streamer,
+                eye: glam::Vec3::new(5.5, 10.0, 5.5),
+                look_dir: glam::Vec3::new(0.0, -1.0, 0.0),
+                player_pos: glam::Vec3::new(5.5, 50.0, 5.5),
+                mode: GameMode::Survival,
+            },
+            &mut inventory,
+            Clicks {
+                left: true,
+                right: false,
+            },
+        );
+        assert!(!result.broke);
+        assert_eq!(world.get_block(5, 5, 5), BlockId(2));
+    }
+
+    #[test]
     fn break_bedrock_is_noop() {
         let bedrock_id = world_with_block(BlockId(2))
             .registry()

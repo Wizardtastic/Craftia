@@ -9,6 +9,7 @@ const float ATLAS_TILES = 16.0;
 layout(location = 0) in vec2 frag_uv;
 layout(location = 1) in float frag_fog;
 layout(location = 2) flat in uint frag_tile;
+layout(location = 3) in float frag_light;
 
 layout(location = 0) out vec4 out_color;
 
@@ -37,10 +38,14 @@ void main() {
     // Entities are lit by the same dynamic sun/moon + sky irradiance as the
     // world. They have no world-space normal in this forward path, so use a
     // soft wrapped lambert term.
-    vec3 lighting = fog.sun_color.rgb * fog.sun_color.a * 0.72
-                  + fog.sky_ambient.rgb;
+    // No light = no visibility. Entities and the held item must go fully
+    // black in caves/sealed rooms instead of inheriting a global sky ambient.
+    float local_light = clamp(frag_light, 0.0, 1.0);
+    vec3 lighting = (fog.sun_color.rgb * fog.sun_color.a * 0.72
+                  + fog.sky_ambient.rgb) * local_light;
     // Same sRGB → linear albedo conversion as chunk.frag.
     vec3 albedo = pow(tex.rgb, vec3(2.2));
-    vec3 final_color = mix(albedo * lighting, fog.color_and_density.rgb, frag_fog);
+    vec3 fog_rgb = fog.color_and_density.rgb * local_light;
+    vec3 final_color = mix(albedo * lighting, fog_rgb, frag_fog);
     out_color = vec4(final_color, tex.a);
 }

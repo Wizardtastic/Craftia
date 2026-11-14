@@ -381,6 +381,9 @@ pub struct Renderer {
     block_light_ubo: GpuBuffer,
     pending_block_light: crate::BlockLightTable,
     block_light_dirty: bool,
+    emissive_lights_ubo: GpuBuffer,
+    pending_emissive_lights: pipeline::EmissiveLightsUbo,
+    emissive_lights_dirty: bool,
     /// Chunks waiting to be copied into the voxel grid.
     pending_light_chunks: Vec<(glam::IVec3, Vec<u8>)>,
     /// Pending re-centre of the grid, cleared + repopulated next frame.
@@ -985,6 +988,13 @@ impl Renderer {
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             "block_light_ubo",
         )?;
+        let emissive_lights_ubo = GpuBuffer::host_visible(
+            &device,
+            &alloc,
+            std::mem::size_of::<pipeline::EmissiveLightsUbo>() as vk::DeviceSize,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            "emissive_lights_ubo",
+        )?;
 
         // --- per-frame resources ---
         // Allocate FRAMES_IN_FLIGHT chunk material descriptor sets (one per
@@ -1167,6 +1177,9 @@ impl Renderer {
                     reflection_buffer: reflection_ubo.buffer,
                     block_light_buffer: block_light_ubo.buffer,
                     block_light_size: crate::BlockLightTable::SIZE_BYTES as vk::DeviceSize,
+                    emissive_lights_buffer: emissive_lights_ubo.buffer,
+                    emissive_lights_size: std::mem::size_of::<pipeline::EmissiveLightsUbo>()
+                        as vk::DeviceSize,
                 },
             );
             // Tile-remap UBO: 256 u32 entries (= 1024 B). Currently an
@@ -1826,6 +1839,9 @@ impl Renderer {
             block_light_ubo,
             pending_block_light: crate::BlockLightTable::default(),
             block_light_dirty: true,
+            emissive_lights_ubo,
+            pending_emissive_lights: pipeline::EmissiveLightsUbo::default(),
+            emissive_lights_dirty: true,
             pending_light_chunks: Vec::new(),
             light_grid_reset: None,
             offscreen_images,
@@ -1959,6 +1975,9 @@ impl Renderer {
                     reflection_buffer: self.reflection_ubo.buffer,
                     block_light_buffer: self.block_light_ubo.buffer,
                     block_light_size: crate::BlockLightTable::SIZE_BYTES as vk::DeviceSize,
+                    emissive_lights_buffer: self.emissive_lights_ubo.buffer,
+                    emissive_lights_size: std::mem::size_of::<pipeline::EmissiveLightsUbo>()
+                        as vk::DeviceSize,
                 },
             );
         }
@@ -2323,6 +2342,32 @@ impl Renderer {
         self.block_light_dirty = true;
     }
 
+    /// Replace the dynamic emissive-light list (torches, lava, glowstone)
+    /// consumed by the chunk shader's direct point-light loop.
+    pub fn set_emissive_lights(&mut self, lights: &[crate::EmissiveLight]) {
+        let count = lights.len().min(crate::MAX_EMISSIVE_LIGHTS);
+        for (i, light) in lights.iter().take(count).enumerate() {
+            self.pending_emissive_lights.positions_ranges[i] = [
+                light.position[0],
+                light.position[1],
+                light.position[2],
+                light.range,
+            ];
+            self.pending_emissive_lights.colors_intensities[i] = [
+                light.color[0],
+                light.color[1],
+                light.color[2],
+                light.intensity,
+            ];
+        }
+        for i in count..crate::MAX_EMISSIVE_LIGHTS {
+            self.pending_emissive_lights.positions_ranges[i] = [0.0; 4];
+            self.pending_emissive_lights.colors_intensities[i] = [0.0; 4];
+        }
+        self.pending_emissive_lights.meta = [count as f32, 0.0, 0.0, 0.0];
+        self.emissive_lights_dirty = true;
+    }
+
     /// Queue one 16³ chunk of block IDs for the ray-tracing voxel grid. The
     /// copy is uploaded on the next `flush_light_grid` (which `draw_frame`
     /// calls automatically). `voxels` must hold at least 4096 entries.
@@ -2635,6 +2680,18 @@ impl Renderer {
                 }
             }
             self.block_light_dirty = false;
+        }
+
+        if self.emissive_lights_dirty {
+            if let Ok(slice) = self.emissive_lights_ubo.mapped_slice_mut() {
+                let bytes: &[u8] = bytemuck::bytes_of(&self.pending_emissive_lights);
+                let len = bytes.len().min(slice.len());
+                slice[..len].copy_from_slice(&bytes[..len]);
+                if let Err(e) = self.emissive_lights_ubo.flush_whole(&self.device) {
+                    log::warn!("emissive_lights_ubo flush failed: {e}");
+                }
+            }
+            self.emissive_lights_dirty = false;
         }
 
     }
@@ -3480,7 +3537,7 @@ impl Renderer {
                 tile: entity.tile,
                 half_size: entity.half_size,
                 billboard,
-                _pad: [0; 2],
+                light: entity.light.clamp(0.0, 1.0),
             };
             unsafe {
                 device.cmd_push_constants(
@@ -3649,7 +3706,7 @@ impl Renderer {
                 tile: entity.tile,
                 half_size: entity.half_size,
                 billboard,
-                _pad: [0; 2],
+                light: entity.light.clamp(0.0, 1.0),
             };
             unsafe {
                 device.cmd_push_constants(
@@ -4957,6 +5014,7 @@ impl Drop for Renderer {
         self.voxel_grid.destroy(device, &self.alloc);
         self.raytrace_ubo.destroy_in_place(device, &self.alloc);
         self.block_light_ubo.destroy_in_place(device, &self.alloc);
+        self.emissive_lights_ubo.destroy_in_place(device, &self.alloc);
 
         // Offscreen resources.
         for &fb in &self.offscreen_framebuffers {

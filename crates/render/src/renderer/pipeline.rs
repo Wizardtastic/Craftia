@@ -74,6 +74,29 @@ pub(super) struct RaytraceUbo {
     pub(super) params: [f32; 4],
 }
 
+/// Dynamic emissive block lights (chunk binding 10). `meta.x` is the active
+/// count; the rest is reserved for future light types.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub(super) struct EmissiveLightsUbo {
+    /// SoA layout: all positions/ranges first, then all colours/intensities,
+    /// matching the shader's two `vec4[32]` arrays. Interleaving these would
+    /// make every colour/intensity read zero.
+    pub positions_ranges: [[f32; 4]; crate::MAX_EMISSIVE_LIGHTS],
+    pub colors_intensities: [[f32; 4]; crate::MAX_EMISSIVE_LIGHTS],
+    pub meta: [f32; 4],
+}
+
+impl Default for EmissiveLightsUbo {
+    fn default() -> Self {
+        Self {
+            positions_ranges: [[0.0; 4]; crate::MAX_EMISSIVE_LIGHTS],
+            colors_intensities: [[0.0; 4]; crate::MAX_EMISSIVE_LIGHTS],
+            meta: [0.0; 4],
+        }
+    }
+}
+
 /// Per-frame tile remap (set 1, binding 0). Maps canonical tile IDs to
 /// animated tile IDs for procedural texture variation. The chunk fragment
 /// shader reads `tile_remap.map[frag_tile]` at line 257 of
@@ -567,6 +590,12 @@ pub(super) fn create_descriptor_set_layout(
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        // Binding 10 = dynamic emissive block lights (torches, lava).
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(10)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
     ];
     let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     unsafe { device.create_descriptor_set_layout(&create_info, None) }
@@ -578,11 +607,11 @@ pub(super) fn create_descriptor_pool(
     max_sets: usize,
 ) -> Result<vk::DescriptorPool> {
     let pool_sizes = [
-        // 7 chunk UBOs per frame set: camera, fog, raytrace, material table,
-        // reflection, block-light table and the set-1 tile remap.
+            // 8 chunk UBOs per frame set: camera, fog, raytrace, material table,
+    // reflection, block-light table, emissive lights and the set-1 tile remap.
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: (max_sets * 7) as u32,
+            descriptor_count: (max_sets * 8) as u32,
         },
         // 4 combined image samplers per frame set (atlas + voxel grid +
         // scene_opaque_color + scene_opaque_depth).
@@ -633,6 +662,8 @@ pub(super) struct DescriptorResources {
     pub reflection_buffer: vk::Buffer,
     pub block_light_buffer: vk::Buffer,
     pub block_light_size: vk::DeviceSize,
+    pub emissive_lights_buffer: vk::Buffer,
+    pub emissive_lights_size: vk::DeviceSize,
 }
 
 pub(super) fn update_descriptor_set(
@@ -657,6 +688,8 @@ pub(super) fn update_descriptor_set(
         reflection_buffer,
         block_light_buffer,
         block_light_size,
+        emissive_lights_buffer,
+        emissive_lights_size,
     } = res;
     let cam_info = vk::DescriptorBufferInfo::default()
         .buffer(camera_buffer)
@@ -678,6 +711,10 @@ pub(super) fn update_descriptor_set(
         .buffer(material_table_buffer)
         .offset(0)
         .range(material_table_size);
+    let emissive_lights_info = vk::DescriptorBufferInfo::default()
+        .buffer(emissive_lights_buffer)
+        .offset(0)
+        .range(emissive_lights_size);
     let reflection_info = vk::DescriptorBufferInfo::default()
         .buffer(reflection_buffer)
         .offset(0)
@@ -705,6 +742,7 @@ pub(super) fn update_descriptor_set(
     let voxel_img_infos = [voxel_img_info];
     let raytrace_buf_infos = [raytrace_info];
     let block_light_buf_infos = [block_light_info];
+    let emissive_lights_buf_infos = [emissive_lights_info];
     let material_buf_infos = [material_info];
     let scene_opaque_infos = [scene_opaque_info];
     let scene_depth_infos = [scene_depth_info];
@@ -761,6 +799,11 @@ pub(super) fn update_descriptor_set(
             .dst_binding(9)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&block_light_buf_infos),
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(10)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&emissive_lights_buf_infos),
     ];
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }

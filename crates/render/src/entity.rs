@@ -20,6 +20,9 @@ pub struct EntityRenderData {
     pub transparent: bool,
     /// Whether this is a held item (uses ALWAYS depth compare).
     pub held_item: bool,
+    /// Local light level 0..1 (sky visibility plus nearby emissive light).
+    /// Zero keeps entities and held items pitch dark underground/sealed in.
+    pub light: f32,
 }
 
 /// Push constants for the entity pipeline (80 bytes).
@@ -29,9 +32,8 @@ pub struct EntityPushConstants {
     pub model: [[f32; 4]; 4], // 64 bytes
     pub tile: u32,            // 4 bytes
     pub half_size: f32,       // 4 bytes
-    pub billboard: u32,       // 4 bytes
-    pub _pad: [u32; 2],       // 8 bytes
-                              // total: 84 bytes, but we round to 80 with vec4 alignment
+    pub billboard: u32, // 4 bytes
+    pub light: f32,     // 4 bytes; total exactly the 80-byte push range
 }
 
 /// Create the entity pipeline layout. Uses the same descriptor set
