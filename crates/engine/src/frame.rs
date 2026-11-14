@@ -607,6 +607,8 @@ impl crate::EngineApp {
                 if let (Some(voxels), Some(r)) = (voxels, self.render.renderer.as_mut()) {
                     r.queue_light_chunk(voxel_core::math::chunk_origin(cp), &voxels);
                 }
+                // Breaking a block can reveal a previously enclosed torch.
+                self.emissive_light_timer = 0.0;
                 if (block_id.0 as usize) < reg.count() {
                     let center = glam::Vec3::new(
                         pos[0] as f32 + 0.5,
@@ -820,6 +822,10 @@ impl crate::EngineApp {
                                 r.queue_light_chunk(voxel_core::math::chunk_origin(cp), &voxels);
                             }
                         }
+                        // A placed/removed block can cover or uncover a torch.
+                        // Rescan now instead of waiting up to 250 ms, otherwise
+                        // the old point light keeps lighting the new cover.
+                        self.emissive_light_timer = 0.0;
                         self.gameplay.undo_redo.push(voxel_game::EditAction {
                             edits: result.edits,
                         });
@@ -1799,13 +1805,19 @@ impl crate::EngineApp {
             .extend(raw.into_iter().take(MAX_LIGHTS).map(
                 |(p, color, level)| voxel_render::EmissiveLight {
                     position: [p.x as f32 + 0.5, p.y as f32 + 0.5, p.z as f32 + 0.5],
-                    range: 4.0 + level as f32 * 0.8,
+                    // A torch reaches a little over ten blocks before its
+                    // inverse-square contribution is negligible.
+                    range: 4.0 + level as f32 * 0.55,
                     color: [
                         to_linear(color[0]),
                         to_linear(color[1]),
                         to_linear(color[2]),
                     ],
-                    intensity: 18.0 * (level as f32 / 15.0).powi(2),
+                    // Calibrated for the shader's inverse-square falloff so
+                    // the 2-block brightness stays close to the old look
+                    // while the near field is brighter and the far field falls
+                    // away much sooner.
+                    intensity: 52.0 * (level as f32 / 15.0).powi(2),
                 },
             ));
     }
@@ -1875,13 +1887,26 @@ impl crate::EngineApp {
         let mut light = sky;
         for l in lights {
             let lp = glam::Vec3::from(l.position);
+            // Stale point lights can survive one edit frame on the CPU list.
+            // Ignore any whose source voxel is no longer emissive.
+            let src = world.get_block(
+                lp.x.floor() as i32,
+                lp.y.floor() as i32,
+                lp.z.floor() as i32,
+            );
+            if registry.get(src).emission == 0 {
+                continue;
+            }
             let to_light = lp - pos;
             let d = to_light.length();
             if d <= 0.001 || d >= l.range {
                 continue;
             }
-            let falloff = (1.0 - d / l.range).clamp(0.0, 1.0);
-            let atten = falloff / (1.0 + 0.12 * d * d);
+            // Match the shader's inverse-square falloff, with a smooth
+            // range fade so entity lighting doesn't end in a hard ring.
+            let range_t = ((d / l.range - 0.6) / 0.4).clamp(0.0, 1.0);
+            let range_fade = 1.0 - range_t * range_t * (3.0 - 2.0 * range_t);
+            let atten = range_fade / (0.25 + d * d);
             let contrib = (l.intensity * atten * 0.12).clamp(0.0, 1.0);
             if contrib <= light {
                 continue;

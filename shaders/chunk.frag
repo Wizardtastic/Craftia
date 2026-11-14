@@ -272,8 +272,8 @@ TraceHit trace_voxels(vec3 origin, vec3 dir, float max_dist, int max_steps,
                               float((m.emission_rgb >> 8u) & 255u),
                               float((m.emission_rgb >> 16u) & 255u)) / 255.0;
                 float level = float(m.emission_level) / 15.0;
-                // Inverse-square-ish falloff, clamped for stability up close.
-                float fade = 1.0 / (1.0 + 0.22 * t * t);
+                // Inverse-square falloff from a small emitting volume.
+                float fade = 1.0 / (0.25 + t * t);
                 r.emission += e * level * 10.0 * fade * r.transmittance;
             }
             if (m.kind == BLOCK_KIND_OPAQUE) {
@@ -420,6 +420,12 @@ vec3 sample_emissive_lights(vec3 p, vec3 n, int shadow_mode) {
     for (int i = 0; i < 32; i++) {
         if (i >= count) break;
         vec4 pr = lights.light_pos_range[i];
+        // Reject stale lights immediately. Covering a torch replaces its
+        // source voxel with a non-emissive block before the throttled CPU
+        // scan runs; without this check the old point light keeps shining
+        // through the new cover for several frames.
+        uint source = voxel_id(ivec3(floor(pr.xyz)));
+        if (block_light(source).emission_level == 0u) continue;
         vec3 to_light = pr.xyz - p;
         float d2 = dot(to_light, to_light);
         float range = pr.w;
@@ -432,9 +438,15 @@ vec3 sample_emissive_lights(vec3 p, vec3 n, int shadow_mode) {
         // a hard diagonal terminator. Shadowing still blocks walls completely.
         float ndl = smoothstep(-0.15, 0.85, dot(n, l));
         if (ndl <= 0.0) continue;
-        float atten = 1.0 / (1.0 + 0.12 * d2);
-        // Wider cutoff band avoids a visible ring where one light's range ends.
-        atten *= 1.0 - smoothstep(range * 0.5, range, d);
+        // Inverse-square irradiance from a finite flame volume: the 0.25
+        // term is the squared 0.5-block source radius, which keeps the very
+        // close field finite without flattening the whole falloff curve.
+        // This gives a bright pool near the flame and a much faster drop-off
+        // than the old 1/(1 + 0.12 d^2) approximation.
+        float atten = 1.0 / (0.25 + d2);
+        // Fade only where inverse-square light is already weak, so the range
+        // limit cannot draw a visible ring.
+        atten *= 1.0 - smoothstep(range * 0.6, range, d);
         float vis = 1.0;
         if (shadow_mode == 1) {
             vis = point_visibility(p, n, l, d);
