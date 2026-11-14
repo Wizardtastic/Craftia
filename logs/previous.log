@@ -1,25 +1,27 @@
-[2026-11-14T00:29:36Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
-[2026-11-14T00:29:36Z INFO  voxel] ============ voxel sandbox startup ============
-[2026-11-14T00:29:36Z INFO  voxel]   binary:    voxel-app 0.1.0
-[2026-11-14T00:29:36Z INFO  voxel]   git:       bcfa9d1 (dirty)
-[2026-11-14T00:29:36Z INFO  voxel]   rustc:     rustc 1.96.0 (ac68faa20 2026-05-25)
-[2026-11-14T00:29:36Z INFO  voxel]   target:    x86_64-pc-windows-msvc
-[2026-11-14T00:29:36Z INFO  voxel]   build unx: 1794610244
-[2026-11-14T00:29:36Z INFO  voxel]   pid:       19164
-[2026-11-14T00:29:36Z INFO  voxel] ===============================================
-[2026-11-14T00:29:36Z INFO  voxel_engine::settings] Loaded config from config_shadowoff.toml
-[2026-11-14T00:29:36Z INFO  voxel] starting voxel engine (seed=1337)
-[2026-11-14T00:29:36Z INFO  voxel_engine] spawn search: land column at (2, 65, 2) -> spawn pos [2.5, 67.0, 2.5]
-[2026-11-14T00:29:36Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
-[2026-11-14T00:29:36Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
-[2026-11-14T00:29:36Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
-[2026-11-14T00:29:36Z INFO  voxel_render::renderer] MSAA TYPE_4 enabled
-[2026-11-14T00:29:36Z INFO  voxel_render::renderer::indirect] GPU-driven chunk pipeline ready (VBO 4096 KiB, IBO 1024 KiB, max 8192 slots)
-[2026-11-14T00:29:36Z INFO  voxel_engine] file-watcher: active (config = config_shadowoff.toml)
-[2026-11-14T00:29:36Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
-[2026-11-14T00:29:36Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
-[2026-11-14T00:29:36Z INFO  voxel_engine] Audio system initialized
-[2026-11-14T00:29:36Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
-[2026-11-14T00:29:38Z INFO  voxel_engine::frame] captured frame to capture.png (1280x720, chunks=443)
-[2026-11-14T00:29:38Z INFO  voxel_engine::frame] bench summary: frames=160 avg_cpu=8.42ms [1.25..99.49] avg_chunk_cpu=0.002ms avg_gpu=0.23ms avg_shadow=0.00ms avg_gen=0.13ms avg_mesh=0.66ms | chunks gpu=443 loaded=791 meshed=791 upload=0.00ms
-[2026-11-14T00:29:38Z INFO  voxel_render::hot_reload] file-watcher: shut down
+[2026-11-14T01:29:46Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
+[2026-11-14T01:29:46Z INFO  voxel] ============ voxel sandbox startup ============
+[2026-11-14T01:29:46Z INFO  voxel]   binary:    voxel-app 0.1.0
+[2026-11-14T01:29:46Z INFO  voxel]   git:       113b909 (dirty)
+[2026-11-14T01:29:46Z INFO  voxel]   rustc:     rustc 1.96.0 (ac68faa20 2026-05-25)
+[2026-11-14T01:29:46Z INFO  voxel]   target:    x86_64-pc-windows-msvc
+[2026-11-14T01:29:46Z INFO  voxel]   build unx: 1794619749
+[2026-11-14T01:29:46Z INFO  voxel]   pid:       28148
+[2026-11-14T01:29:46Z INFO  voxel] ===============================================
+[2026-11-14T01:29:46Z INFO  voxel_engine::settings] Loaded config from config.toml
+[2026-11-14T01:29:46Z INFO  voxel] starting voxel engine (seed=1337)
+[2026-11-14T01:29:46Z INFO  voxel_engine] spawn search: land column at (2, 65, 2) -> spawn pos [2.5, 67.0, 2.5]
+[2026-11-14T01:29:46Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
+[2026-11-14T01:29:46Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
+[2026-11-14T01:29:46Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
+[2026-11-14T01:29:46Z INFO  voxel_render::renderer] MSAA TYPE_4 enabled
+[2026-11-14T01:29:46Z INFO  voxel_render::renderer::indirect] GPU-driven chunk pipeline ready (VBO 4096 KiB, IBO 1024 KiB, max 8192 slots)
+[2026-11-14T01:29:46Z INFO  voxel_engine] file-watcher: active (config = config.toml)
+[2026-11-14T01:29:47Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
+[2026-11-14T01:29:47Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
+[2026-11-14T01:29:47Z INFO  voxel_engine] Audio system initialized
+[2026-11-14T01:29:47Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
+[2026-11-14T01:29:49Z INFO  voxel_world::save] Loaded 791 chunks from saves\New_World_1
+[2026-11-14T01:29:49Z INFO  voxel_engine::ui] loaded world from saves\New_World_1 (seed=1337, 791 chunks)
+[2026-11-14T01:29:49Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
+[2026-11-14T01:31:06Z INFO  voxel_engine::ui] exit game requested
+[2026-11-14T01:31:07Z INFO  voxel_render::hot_reload] file-watcher: shut down

@@ -1,30 +1,23 @@
 #version 450
 
+// Post-processing: exposure, HDR bloom, ACES tone mapping, vignette and the
+// underwater colour grade. Ambient occlusion is no longer a screen-space
+// effect - it is ray traced per pixel in chunk.frag against the voxel world.
+
 layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
 
 layout(set = 0, binding = 0) uniform sampler2D scene_color;
-layout(set = 0, binding = 1) uniform sampler2D depth_tex;
 
 layout(push_constant) uniform Push {
-    vec4 params;     // x = exposure, y = vignette_strength, z = time, w = underwater (0 or 1)
-    vec4 ssao;       // x = radius, y = bias, z = strength, w = enabled (0 or 1)
-    vec4 proj;       // x = near, y = far, z = screen_w, w = screen_h
+    vec4 params; // x = exposure, y = vignette_strength, z = time, w = underwater
 } push;
 
-// Bloom constants. The scene target is RGBA16F, so only genuinely bright
-// pixels (HDR sun disc, emissive tiles, sunlit snow) exceed the threshold.
-// A wider ring radius gives a soft atmospheric glow instead of the old
-// one-pixel halo.
 #define BLOOM_INTENSITY    0.22
 #define BLOOM_THRESHOLD    1.05
 #define BLOOM_PIXEL_RADIUS 5.0
 #define BLOOM_RINGS        2
 
-// SSAO constants.
-#define SSAO_SAMPLES 16
-
-// ACES filmic tone mapping.
 vec3 aces_tonemap(vec3 color) {
     const float a = 2.51;
     const float b = 0.03;
@@ -34,114 +27,13 @@ vec3 aces_tonemap(vec3 color) {
     return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
 }
 
-// Linearize depth from [0,1] NDC to view-space Z (positive distance).
-float linearize_depth(float d, float near, float far) {
-    return near * far / (far - d * (far - near));
-}
-
-// Hash-based pseudo-random per-pixel rotation (avoids needing a noise texture).
-vec2 hash_noise(vec2 uv) {
-    vec3 n = fract(vec3(uv.xyx) * vec3(443.8975, 397.2973, 491.1871));
-    n += dot(n, n.yzx + 19.19);
-    return fract(vec2((n.x + n.y) * n.z, (n.x + n.z) * n.y)) * 2.0 - 1.0;
-}
-
-// Compute SSAO occlusion factor.
-float compute_ssao(vec2 uv, float depth_linear, vec3 view_pos) {
-    float radius = push.ssao.x;
-    float bias   = push.ssao.y;
-    float near   = push.proj.x;
-    float far    = push.proj.y;
-    vec2  res    = push.proj.zw;
-
-    // Reconstruct a pseudo-normal from depth gradients.
-    // This works well for axis-aligned voxel geometry.
-    vec2 texel = 1.0 / res;
-    float dxp = linearize_depth(texture(depth_tex, uv + vec2(texel.x, 0.0)).r, near, far);
-    float dxn = linearize_depth(texture(depth_tex, uv - vec2(texel.x, 0.0)).r, near, far);
-    float dyp = linearize_depth(texture(depth_tex, uv + vec2(0.0, texel.y)).r, near, far);
-    float dyn = linearize_depth(texture(depth_tex, uv - vec2(0.0, texel.y)).r, near, far);
-    vec3 normal = normalize(vec3(dxn - dxp, dyn - dyp, 0.002)); // slight z bias for stability
-
-    // Generate a random rotation vector for this pixel.
-    vec2 noise = hash_noise(uv * res);
-
-    // Build a TBN matrix to orient samples along the normal.
-    // Use Gram-Schmidt with the noise vector.
-    vec3 tangent   = normalize(noise.x * vec3(1.0, 0.0, 0.0) + noise.y * vec3(0.0, 1.0, 0.0));
-    tangent = normalize(tangent - dot(tangent, normal) * normal);
-    vec3 bitangent = cross(normal, tangent);
-    mat3 tbn = mat3(tangent, bitangent, normal);
-
-    // Pre-computed hemisphere kernel (16 samples, cosine-weighted distribution).
-    // Hardcoded here to avoid needing a UBO for the kernel.
-    const vec3 kernel[SSAO_SAMPLES] = vec3[SSAO_SAMPLES](
-        vec3(-0.073, 0.028, 0.071), vec3(0.044, -0.041, 0.063),
-        vec3(-0.063, -0.057, 0.045), vec3(0.055, 0.073, 0.025),
-        vec3(-0.023, 0.037, 0.094), vec3(0.096, -0.011, 0.019),
-        vec3(-0.089, 0.064, 0.031), vec3(0.014, 0.091, 0.047),
-        vec3(0.038, -0.074, 0.061), vec3(-0.051, 0.015, 0.088),
-        vec3(0.071, 0.043, -0.035), vec3(-0.029, -0.086, 0.042),
-        vec3(0.065, -0.033, 0.067), vec3(-0.047, 0.077, 0.021),
-        vec3(0.033, 0.021, 0.092), vec3(-0.081, -0.048, 0.044)
-    );
-
-    float occlusion = 0.0;
-    for (int i = 0; i < SSAO_SAMPLES; i++) {
-        // Orient the sample in the hemisphere around the normal.
-        vec3 sample_dir = tbn * kernel[i];
-        vec3 sample_pos = view_pos + sample_dir * radius;
-
-        // Project sample position back to screen space to get the UV.
-        // We approximate the projection by working in depth-space.
-        // For a perspective projection, sample_pos.xy / sample_pos.z maps to UV offset.
-        vec2 sample_uv = uv + sample_dir.xy * radius / view_pos.z;
-
-        // Clamp to screen bounds.
-        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
-            continue;
-        }
-
-        float sample_depth = linearize_depth(texture(depth_tex, sample_uv).r, near, far);
-
-        // Range check: ignore samples that are too far from the current fragment.
-        float range_check = smoothstep(0.0, 1.0, radius / abs(depth_linear - sample_depth));
-
-        // If the sampled geometry is closer (smaller Z) than our sample position, it occludes.
-        occlusion += (sample_depth <= sample_pos.z - bias ? 1.0 : 0.0) * range_check;
-    }
-
-    occlusion = 1.0 - (occlusion / float(SSAO_SAMPLES));
-    return occlusion;
-}
-
 void main() {
-    // Underwater coloring is applied below, but keep scene UVs fixed so
-    // submerged block textures do not sway with the water animation.
     vec2 uv = frag_uv;
 
-    // Sample HDR scene and apply exposure.
     vec3 hdr = texture(scene_color, uv).rgb;
     hdr *= push.params.x;
 
-    // --- SSAO ---
-    float ssao_factor = 1.0;
-    if (push.ssao.w > 0.5) {
-        float raw_depth = texture(depth_tex, uv).r;
-        float linear_d = linearize_depth(raw_depth, push.proj.x, push.proj.y);
-
-        // Reconstruct approximate view-space position from UV + depth.
-        // Z is positive linear depth (matching linearize_depth output).
-        // XY are NDC-scaled depth for approximate projection.
-        vec3 view_pos = vec3(uv * 2.0 - 1.0, 1.0) * linear_d;
-
-        float ao = compute_ssao(uv, linear_d, view_pos);
-        // Mix with full brightness based on strength parameter.
-        ssao_factor = mix(1.0, ao, push.ssao.z);
-        hdr *= ssao_factor;
-    }
-
-    // --- BLOOM: extract brights, blur, composite ---
+    // Bloom: extract bright HDR pixels and blur sparsely.
     vec2 texel = 1.0 / vec2(textureSize(scene_color, 0));
     vec3 bloom = vec3(0.0);
     float total_weight = 0.0;
@@ -164,17 +56,13 @@ void main() {
         total_weight += weight * 4.0;
     }
     bloom /= total_weight;
-
-    // Composite bloom onto HDR scene.
     hdr += bloom * BLOOM_INTENSITY;
 
-    // Tonemap, vignette, underwater.
     vec3 color = aces_tonemap(hdr);
 
     vec2 vignette_uv = frag_uv * 2.0 - 1.0;
     float vignette = 1.0 - dot(vignette_uv, vignette_uv) * push.params.y;
-    vignette = clamp(vignette, 0.0, 1.0);
-    color *= vignette;
+    color *= clamp(vignette, 0.0, 1.0);
 
     if (push.params.w > 0.5) {
         float depth_factor = 1.0 - smoothstep(0.05, 0.3, frag_uv.y);

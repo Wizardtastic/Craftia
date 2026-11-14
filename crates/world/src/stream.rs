@@ -15,7 +15,7 @@ use glam::Vec3;
 use voxel_core::{
     chunk_neighbours,
     math::{block_to_chunk, chunk_origin, world_to_block, ChunkPos},
-    BlockId, Frustum, CHUNK_SIZE,
+    Frustum, CHUNK_SIZE,
 };
 
 use crate::{
@@ -92,7 +92,6 @@ enum State {
 
 enum Cmd {
     Focus(Vec3),
-    SunDir(Vec3),
     Frustum(Frustum),
     LoadRadius(u32),
     Remesh(ChunkPos),
@@ -143,11 +142,6 @@ impl ChunkStreamer {
     /// Update the streaming focus (player position in world space).
     pub fn set_focus(&self, pos: Vec3) {
         let _ = self.cmd_tx.send(Cmd::Focus(pos));
-    }
-
-    /// Update the sun direction for lighting computation.
-    pub fn set_sun_dir(&self, dir: Vec3) {
-        let _ = self.cmd_tx.send(Cmd::SunDir(dir));
     }
 
     /// Update the view frustum for mesh-building culling.
@@ -202,7 +196,6 @@ fn run_worker(
     let gen: Arc<TerrainGenerator> = world.terrain();
     let reg: Arc<BlockRegistry> = world.registry();
     let mut focus = Vec3::new(0.0, 80.0, 0.0);
-    let mut sun_dir = Vec3::new(0.3, 0.9, 0.1).normalize();
     let mut desired = Vec::new();
     let mut desired_chunks = std::collections::HashSet::new();
     let mut frustum = None::<Frustum>;
@@ -223,25 +216,6 @@ fn run_worker(
                 Cmd::Focus(p) => {
                     focus = p;
                     focus_changed = true;
-                }
-                Cmd::SunDir(d) => {
-                    let new_dir = d.normalize_or_zero();
-                    // Sun shadows are ray-traced while meshing, so a cached
-                    // chunk mesh is only valid for the sun direction it was
-                    // built with. Once the sun has swung far enough for the
-                    // shadow direction / length to change visibly, demote every
-                    // meshed chunk back to `Structured`: the normal mesh phase
-                    // rebuilds them (nearest first, a batch per iteration) and
-                    // re-traces the sun rays for the new direction.
-                    const SUN_RELIGHT_COS: f32 = 0.9996; // ~1.6 degrees
-                    if sun_dir.dot(new_dir) < SUN_RELIGHT_COS {
-                        for s in state.values_mut() {
-                            if *s == State::Meshed {
-                                *s = State::Structured;
-                            }
-                        }
-                    }
-                    sun_dir = new_dir;
                 }
                 Cmd::Frustum(f) => {
                     frustum = Some(f);
@@ -330,7 +304,6 @@ fn run_worker(
             let priority_remesh: Vec<ChunkPos> = priority_remesh_set.into_iter().collect();
             let world = world.clone();
             let reg = reg.clone();
-            let sun_dir_for_mesh = sun_dir;
             for pos in &priority_remesh {
                 state.insert(*pos, State::Meshing);
             }
@@ -348,7 +321,6 @@ fn run_worker(
                                     sample,
                                     sample_water,
                                     sample_loaded,
-                                    sun_dir_for_mesh,
                                 )
                             },
                         );
@@ -383,10 +355,6 @@ fn run_worker(
             let gen = gen.clone();
             let reg = reg.clone();
             let world_for_light = world.clone();
-            // Cache the stone block ID once per batch — the sample_block
-            // closure below is called per ray-step in compute_sunlight, so
-            // this avoids a HashMap lookup on every unloaded-chunk query.
-            let stone = reg.id_of("stone").unwrap_or(BlockId(2));
             let gen_t0 = Instant::now();
             let generated: Vec<(ChunkPos, Chunk)> = pool.install(|| {
                 gen_batch
@@ -405,35 +373,6 @@ fn run_worker(
                             |wx, wy, wz| world_for_light.get_block(wx, wy, wz),
                             |wx, wy, wz, id| world_for_light.set_block_no_light(wx, wy, wz, id),
                         );
-                        // Compute lighting: ray-based sunlight + torchlight BFS.
-                        let mut cross_updates = Vec::new();
-                        crate::light::compute_all(
-                            &mut chunk,
-                            &reg,
-                            sun_dir,
-                            // sample_block: for cross-chunk block lookups during
-                            // sunlight ray marching. Unloaded chunks are treated as
-                            // opaque to prevent rays from punching through ungenerated
-                            // terrain, which would cause bright-white flashing columns
-                            // at chunk edges.
-                            &|wx, wy, wz| {
-                                if world_for_light.is_block_loaded(wx, wy, wz) {
-                                    world_for_light.get_block(wx, wy, wz)
-                                } else {
-                                    stone
-                                }
-                            },
-                            // sample_torchlight: for cross-chunk torchlight
-                            &|wx, wy, wz| world_for_light.get_torchlight_world(wx, wy, wz),
-                            // cross_chunk_update: collect pending torchlight updates
-                            &mut |pos, level, color| cross_updates.push((pos, level, color)),
-                        );
-                        // Apply cross-chunk torchlight updates to the world.
-                        for (pos, level, color) in cross_updates {
-                            world_for_light.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
-                            world_for_light
-                                .set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
-                        }
                         Some((pos, chunk))
                     })
                     .collect()
@@ -443,9 +382,8 @@ fn run_worker(
                 world.insert_chunk(pos, chunk);
                 state.insert(pos, State::Generated);
                 let _ = event_tx.send(ChunkStreamEvent::Generated(pos));
-                // Remesh loaded neighbours so their border faces and sunlight
-                // are updated now that this chunk exists. They don't need to
-                // re-run structures — their blocks haven't changed.
+                // Remesh loaded neighbours so their border faces update now
+                // that this chunk exists. They don't need to re-run structures.
                 for n in neighbours(pos) {
                     if let Some(s) = state.get_mut(&n) {
                         if *s == State::Meshed {
@@ -510,7 +448,6 @@ fn run_worker(
                             world_for_sample.get_block(x, y, z)
                         });
                         chunk.dirty = true;
-                        chunk.light_dirty = true;
                         (pos, chunk)
                     })
                     .collect()
@@ -595,8 +532,7 @@ fn run_worker(
                 let world = world.clone();
                 let reg = reg.clone();
                 let mesher = &mesher;
-                let sun_dir_for_mesh = sun_dir;
-                let mesh_t0 = Instant::now();
+                    let mesh_t0 = Instant::now();
                 let meshes: Vec<(ChunkPos, ChunkMeshBundle)> = pool.install(|| {
                     near.par_iter()
                         .map(|&pos| {
@@ -609,7 +545,6 @@ fn run_worker(
                                         sample,
                                         sample_water,
                                         sample_loaded,
-                                        sun_dir_for_mesh,
                                     )
                                 },
                             );

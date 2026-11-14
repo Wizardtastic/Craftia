@@ -12,17 +12,12 @@
 
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec2 in_uv;
-layout(location = 2) in float in_light;
-layout(location = 3) in uint in_tile;
-layout(location = 4) in vec4 in_light_color;
+layout(location = 2) in uint in_tile;
 
 layout(location = 0) out vec2 frag_uv;
-layout(location = 1) out float frag_light;
-layout(location = 2) out float frag_fog;
-layout(location = 3) out vec3 frag_world_pos;
-layout(location = 4) flat out uint frag_tile;
-layout(location = 5) flat out vec4 frag_light_color;
-layout(location = 6) flat out float frag_sun;
+layout(location = 1) out float frag_fog;
+layout(location = 2) out vec3 frag_world_pos;
+layout(location = 3) flat out uint frag_tile;
 
 layout(push_constant) uniform Push {
     mat4 view_proj;     // offset 0  (64 bytes)
@@ -48,13 +43,8 @@ void main() {
     vec3 world = origin + local;
     gl_Position = push.view_proj * vec4(world, 1.0);
     frag_uv = in_uv;
-    frag_light = in_light;
-    // Unpack the mesher's per-quad words: low byte = atlas tile index,
-    // second byte = ray-traced sun visibility (0 = shadowed, 255 = lit).
-    frag_tile = in_tile & 0xFFu;
-    frag_sun = float((in_tile >> 8u) & 0xFu) / 15.0;
+    frag_tile = in_tile;
     frag_world_pos = world;
-    frag_light_color = in_light_color;
 
     // Matches chunk.vert: fog only in the last 45% of the view distance.
     float dist = length(world - cam.cam_pos_and_maxdist.xyz);

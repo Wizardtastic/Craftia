@@ -110,7 +110,7 @@ pub fn create_entity_pipeline_with_depth(
             .name(c"main"),
     ];
 
-    // Same vertex layout as chunks (32 bytes: pos + uv + light + tile + light_color).
+    // Same 24-byte vertex layout as chunks: pos + uv + atlas tile.
     let vertex_binding = vk::VertexInputBindingDescription::default()
         .binding(0)
         .stride(std::mem::size_of::<crate::Vertex>() as u32)
@@ -129,18 +129,8 @@ pub fn create_entity_pipeline_with_depth(
         vk::VertexInputAttributeDescription::default()
             .binding(0)
             .location(2)
-            .format(vk::Format::R32_SFLOAT)
-            .offset(20),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(3)
             .format(vk::Format::R32_UINT)
-            .offset(24),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(4)
-            .format(vk::Format::R8G8B8A8_UNORM)
-            .offset(28),
+            .offset(20),
     ];
     let vertex_bindings = [vertex_binding];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
@@ -268,57 +258,31 @@ pub fn create_held_item_pipeline(
 }
 
 /// Build a unit quad (2 triangles, 6 vertices) for billboard/cube rendering.
-/// Each vertex has pos in [-0.5, 0.5], uv in [0, 1], light = 1.0, tile = 0.
+/// Each vertex has pos in [-0.5, 0.5], uv in [0, 1], tile = 0.
 pub fn unit_quad_vertices() -> Vec<crate::Vertex> {
-    let tile = 0u32;
-    let light = 1.0f32;
-    // White RGB tint with alpha = 0: the alpha byte now carries the block
-    // (torch) light level, and entities are lit by sun/sky only.
-    let white = 0x00FF_FFFFu32;
-    vec![
-        crate::Vertex {
-            pos: [-0.5, -0.5, 0.0],
-            uv: [0.0, 1.0],
-            light,
-            tile,
-            light_color: white,
-        },
-        crate::Vertex {
-            pos: [0.5, -0.5, 0.0],
-            uv: [1.0, 1.0],
-            light,
-            tile,
-            light_color: white,
-        },
-        crate::Vertex {
-            pos: [0.5, 0.5, 0.0],
-            uv: [1.0, 0.0],
-            light,
-            tile,
-            light_color: white,
-        },
-        crate::Vertex {
-            pos: [-0.5, -0.5, 0.0],
-            uv: [0.0, 1.0],
-            light,
-            tile,
-            light_color: white,
-        },
-        crate::Vertex {
-            pos: [0.5, 0.5, 0.0],
-            uv: [1.0, 0.0],
-            light,
-            tile,
-            light_color: white,
-        },
-        crate::Vertex {
-            pos: [-0.5, 0.5, 0.0],
-            uv: [0.0, 0.0],
-            light,
-            tile,
-            light_color: white,
-        },
-    ]
+    let p = [
+        [-0.5f32, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    let uv = [
+        [0.0f32, 1.0],
+        [1.0, 1.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 0.0],
+        [0.0, 0.0],
+    ];
+    (0..6)
+        .map(|i| crate::Vertex {
+            pos: p[i],
+            uv: uv[i],
+            tile: 0,
+        })
+        .collect()
 }
 
 /// Create the pipeline layout for skinned entity rendering.
@@ -397,48 +361,31 @@ pub fn create_skinned_entity_pipeline(
             .input_rate(vk::VertexInputRate::VERTEX),
     ];
 
-    // Attributes from binding 0 (same as regular entity)
+    // Attributes from binding 0 (same 24-byte layout as regular entities)
     let vertex_attrs = [
-        // location 0: pos (vec3)
         vk::VertexInputAttributeDescription::default()
             .binding(0)
             .location(0)
             .format(vk::Format::R32G32B32_SFLOAT)
             .offset(0),
-        // location 1: uv (vec2)
         vk::VertexInputAttributeDescription::default()
             .binding(0)
             .location(1)
             .format(vk::Format::R32G32_SFLOAT)
             .offset(12),
-        // location 2: light (float)
         vk::VertexInputAttributeDescription::default()
             .binding(0)
             .location(2)
-            .format(vk::Format::R32_SFLOAT)
-            .offset(20),
-        // location 3: tile (uint)
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(3)
             .format(vk::Format::R32_UINT)
-            .offset(24),
-        // location 4: light_color (vec4 packed as RGBA8) from binding 0
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(4)
-            .format(vk::Format::R8G8B8A8_UNORM)
-            .offset(28),
-        // location 5: joint_indices (uvec4) from binding 1
+            .offset(20),
         vk::VertexInputAttributeDescription::default()
             .binding(1)
-            .location(5)
+            .location(3)
             .format(vk::Format::R32G32B32A32_UINT)
             .offset(0),
-        // location 6: joint_weights (vec4) from binding 1
         vk::VertexInputAttributeDescription::default()
             .binding(1)
-            .location(6)
+            .location(4)
             .format(vk::Format::R32G32B32A32_SFLOAT)
             .offset(16),
     ];

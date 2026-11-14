@@ -1,27 +1,97 @@
-[2026-11-14T00:34:15Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
-[2026-11-14T00:34:15Z INFO  voxel] ============ voxel sandbox startup ============
-[2026-11-14T00:34:15Z INFO  voxel]   binary:    voxel-app 0.1.0
-[2026-11-14T00:34:15Z INFO  voxel]   git:       bcfa9d1 (dirty)
-[2026-11-14T00:34:15Z INFO  voxel]   rustc:     rustc 1.96.0 (ac68faa20 2026-05-25)
-[2026-11-14T00:34:15Z INFO  voxel]   target:    x86_64-pc-windows-msvc
-[2026-11-14T00:34:15Z INFO  voxel]   build unx: 1794613111
-[2026-11-14T00:34:15Z INFO  voxel]   pid:       11648
-[2026-11-14T00:34:15Z INFO  voxel] ===============================================
-[2026-11-14T00:34:15Z INFO  voxel_engine::settings] Loaded config from config.toml
-[2026-11-14T00:34:15Z INFO  voxel] starting voxel engine (seed=1337)
-[2026-11-14T00:34:15Z INFO  voxel_engine] spawn search: land column at (2, 65, 2) -> spawn pos [2.5, 67.0, 2.5]
-[2026-11-14T00:34:15Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
-[2026-11-14T00:34:15Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
-[2026-11-14T00:34:15Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
-[2026-11-14T00:34:15Z INFO  voxel_render::renderer] MSAA TYPE_4 enabled
-[2026-11-14T00:34:15Z INFO  voxel_render::renderer::indirect] GPU-driven chunk pipeline ready (VBO 4096 KiB, IBO 1024 KiB, max 8192 slots)
-[2026-11-14T00:34:15Z INFO  voxel_engine] file-watcher: active (config = config.toml)
-[2026-11-14T00:34:15Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
-[2026-11-14T00:34:15Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
-[2026-11-14T00:34:15Z INFO  voxel_engine] Audio system initialized
-[2026-11-14T00:34:15Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
-[2026-11-14T00:34:35Z INFO  voxel_world::save] Loaded 791 chunks from saves\New_World_1
-[2026-11-14T00:34:35Z INFO  voxel_engine::ui] loaded world from saves\New_World_1 (seed=1337, 791 chunks)
-[2026-11-14T00:34:36Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
-[2026-11-14T00:34:54Z INFO  voxel_engine::ui] exit game requested
-[2026-11-14T00:34:54Z INFO  voxel_render::hot_reload] file-watcher: shut down
+[2026-11-14T01:42:25Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
+[2026-11-14T01:42:25Z INFO  voxel] ============ voxel sandbox startup ============
+[2026-11-14T01:42:25Z INFO  voxel]   binary:    voxel-app 0.1.0
+[2026-11-14T01:42:25Z INFO  voxel]   git:       113b909 (dirty)
+[2026-11-14T01:42:25Z INFO  voxel]   rustc:     rustc 1.96.0 (ac68faa20 2026-05-25)
+[2026-11-14T01:42:25Z INFO  voxel]   target:    x86_64-pc-windows-msvc
+[2026-11-14T01:42:25Z INFO  voxel]   build unx: 1794620017
+[2026-11-14T01:42:25Z INFO  voxel]   pid:       18644
+[2026-11-14T01:42:25Z INFO  voxel] ===============================================
+[2026-11-14T01:42:25Z INFO  voxel_engine::settings] Loaded config from config.toml
+[2026-11-14T01:42:25Z INFO  voxel] starting voxel engine (seed=1337)
+[2026-11-14T01:42:25Z INFO  voxel_engine] spawn search: land column at (2, 65, 2) -> spawn pos [2.5, 67.0, 2.5]
+[2026-11-14T01:42:25Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
+[2026-11-14T01:42:25Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
+[2026-11-14T01:42:25Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
+[2026-11-14T01:42:25Z INFO  voxel_render::renderer::indirect] GPU-driven chunk pipeline ready (VBO 4096 KiB, IBO 1024 KiB, max 8192 slots)
+[2026-11-14T01:42:25Z INFO  voxel_engine] file-watcher: active (config = config.toml)
+[2026-11-14T01:42:25Z WARN  voxel_audio::registry] Audio directory not found: assets/audio
+[2026-11-14T01:42:25Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
+[2026-11-14T01:42:25Z INFO  voxel_engine] Audio system initialized
+[2026-11-14T01:42:25Z INFO  voxel_engine::frame] spawn ready: player at (2.5, 65.9, 2.5), surface_y=64
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkQueueSubmit(): pSubmits[0].pSignalSemaphores[0] (VkSemaphore 0x4d000000004d) is being signaled by VkQueue 0x1d9803814d0, but it may still be in use by VkSwapchainKHR 0xd500000000d5.
+    Most recently acquired image indices: [0], 1, 2.
+    (Brackets mark the last use of VkSemaphore 0x4d000000004d in a presentation operation.)
+    Swapchain image 0 was presented but was not re-acquired, so VkSemaphore 0x4d000000004d may still be in use and cannot be safely reused with image index 2.
+    Hint: See https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html for details on swapchain semaphore reuse. Examples of possible approaches:
+       a) Use a separate semaphore per swapchain image. Index these semaphores using the index of the acquired image.
+       b) Consider the VK_KHR_swapchain_maintenance1 extension. It allows using a VkFence with the presentation operation.
+    The Vulkan spec states: Each binary semaphore element of the pSignalSemaphores member of any element of pSubmits must be unsignaled when the semaphore signal operation it defines is executed on the device (https://docs.vulkan.org/spec/latest/chapters/cmdbuffers.html#VUID-vkQueueSubmit-pSignalSemaphores-00067)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkQueueSubmit(): pSubmits[0].pSignalSemaphores[0] (VkSemaphore 0x520000000052) is being signaled by VkQueue 0x1d9803814d0, but it may still be in use by VkSwapchainKHR 0xd500000000d5.
+    Most recently acquired image indices: 0, [1], 2, 0.
+    (Brackets mark the last use of VkSemaphore 0x520000000052 in a presentation operation.)
+    Swapchain image 1 was presented but was not re-acquired, so VkSemaphore 0x520000000052 may still be in use and cannot be safely reused with image index 0.
+    Hint: See https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html for details on swapchain semaphore reuse. Examples of possible approaches:
+       a) Use a separate semaphore per swapchain image. Index these semaphores using the index of the acquired image.
+       b) Consider the VK_KHR_swapchain_maintenance1 extension. It allows using a VkFence with the presentation operation.
+    The Vulkan spec states: Each binary semaphore element of the pSignalSemaphores member of any element of pSubmits must be unsignaled when the semaphore signal operation it defines is executed on the device (https://docs.vulkan.org/spec/latest/chapters/cmdbuffers.html#VUID-vkQueueSubmit-pSignalSemaphores-00067)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] (Warning - This VUID has now been reported 10 times, which is the duplicate_message_limit value, this will be the last time reporting it).
+    vkCmdPushConstants(): is called with
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (84)
+    but VkPipelineLayout 0x800000000080 doesn't have any valid VkPushConstantRange:
+      stageFlags (VK_SHADER_STAGE_VERTEX_BIT), offset (0), size (80) [invalid because outside the range]
+    The Vulkan spec states: For each byte in the range specified by offset and size and for each shader stage in stageFlags, there must be a push constant range in layout that includes that byte and that stage (https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html#VUID-vkCmdPushConstants-offset-01795)
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkCmdEndRenderPass(): Called before reaching final subpass.
+    The Vulkan spec states: The current subpass index must be equal to the number of subpasses in the render pass minus one (https://docs.vulkan.org/spec/latest/chapters/renderpass.html#VUID-vkCmdEndRenderPass-None-00910)
+[2026-11-14T01:42:25Z INFO  voxel_engine::frame] captured frame to capture.png (480x300, chunks=53)
+[2026-11-14T01:42:25Z INFO  voxel_engine::frame] bench summary: frames=24 avg_cpu=2.58ms [1.89..4.02] avg_chunk_cpu=0.016ms avg_gpu=0.71ms avg_gen=0.00ms avg_mesh=0.03ms | chunks gpu=53 loaded=91 meshed=91 upload=0.00ms
+[2026-11-14T01:42:25Z WARN  voxel_render::renderer::device] [validation] vkDestroyDevice(): VkDevice 0x1d9805d00d0 has 12 leaked objects that have not been destroyed.
+    (Only printing the first 10 objects, but can be increased by raising the VK_LAYER_DUPLICATE_MESSAGE_LIMIT/'duplicate_message_limit' setting value)
+    VkCommandBuffer 0x1d9807118d0, VkCommandBuffer 0x1d9807070d0, VkImageView 0xd900000000d9, VkImageView 0xdb00000000db, VkImageView 0xda00000000da, VkCommandPool 0x30000000003, VkRenderPass 0x190000000019, VkPipeline 0x7f000000007f, VkPipelineLayout 0x7c000000007c, VkPipelineLayout 0x8d000000008d.
+    The Vulkan spec states: All child objects created on device that can be destroyed or freed must have been destroyed or freed prior to destroying device (https://docs.vulkan.org/spec/latest/chapters/devsandqueues.html#VUID-vkDestroyDevice-device-05137)
+[2026-11-14T01:42:25Z INFO  voxel_render::hot_reload] file-watcher: shut down

@@ -19,7 +19,7 @@ pub mod player;
 pub mod systems;
 pub mod undo;
 
-pub use block::BlockAction;
+pub use block::{BlockAction, BlockInteraction};
 pub use chat::{ChatState, CommandResult};
 pub use components::property_animator::{AnimationClipHandle, PropertyAnimator, PropertyTarget};
 pub use components::{

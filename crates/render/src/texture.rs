@@ -457,6 +457,14 @@ pub fn dispatch_image_layout_transition(
             vk::PipelineStageFlags::TRANSFER,
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
         ),
+        // First-use transition for images created in UNDEFINED and then kept
+        // in GENERAL (the ray-tracing voxel grid).
+        (L::UNDEFINED, L::GENERAL) => (
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::SHADER_READ,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+        ),
         (L::UNDEFINED, L::SHADER_READ_ONLY_OPTIMAL) => (
             vk::AccessFlags::empty(),
             vk::AccessFlags::SHADER_READ,

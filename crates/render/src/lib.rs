@@ -41,33 +41,21 @@ pub use ui_atlas::{
 
 use bytemuck::{Pod, Zeroable};
 
-/// GPU vertex layout (32 bytes), matching `voxel_world::mesh::ChunkVertex`.
-/// Kept here as the rendering-side contract; the mesher produces the same layout.
+/// GPU vertex layout (24 bytes), matching `voxel_world::mesh::ChunkVertex`.
 ///
-/// The `tile` field carries the per-vertex atlas tile index (`u32`, location 3).
-/// It is passed `flat` from the vertex shader to the fragment shader and used
-/// to pick the correct sub-tile from the 2D atlas via the shader-side
-/// `(tile_origin + fract(uv)) / 16` calculation.
+/// Lighting is no longer carried in the vertex stream. The chunk fragment
+/// shader ray traces the voxel world per pixel, so the only per-vertex data is
+/// geometry, tile UVs and the atlas tile index.
 ///
-/// The `light_color` field carries a packed RGBA color for tinted lighting:
-/// RGB is the torch light tint and A is the block-light level (0..255). The
-/// mesher keeps `light` for sky visibility so the shader can light the two
-/// independently — that split is what makes nights dark while torches still
-/// illuminate. It is passed `flat` to the fragment shader.
-///
-/// The `tile` word is packed: bits 0..7 are the atlas tile index and bits
-/// 8..11 are the mesher's ray-traced sun visibility (0..15), which the shader
-/// unpacks into `frag_sun` and uses as the cast-shadow term.
-/// Mirror changes here in `crates/render/src/renderer/pipeline.rs`
-/// `create_graphics_pipeline` + `create_shadow_pipeline` `vertex_attributes` arrays.
+/// Mirror changes here in `crates/render/src/renderer/pipeline.rs` vertex
+/// attribute arrays and in `shaders/chunk.vert` / `shaders/chunk_indirect.vert`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct Vertex {
     pub pos: [f32; 3],
     pub uv: [f32; 2],
-    pub light: f32,
+    /// Atlas tile index; passed flat to the fragment shader.
     pub tile: u32,
-    pub light_color: u32,
 }
 
 /// GPU vertex layout for skinned meshes (60 bytes).
@@ -196,6 +184,123 @@ impl BlockPropertiesGpu {
             tiles23: tiles[2] as u32 | ((tiles[3] as u32) << 16),
             tiles45: tiles[4] as u32 | ((tiles[5] as u32) << 16),
             flags,
+        }
+    }
+}
+
+/// Per-block ray-tracing material, indexed by block ID in the GPU voxel grid.
+///
+/// 16 bytes, matching `BlockLightGpu` in `shaders/chunk.frag`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct BlockLightGpu {
+    /// 0 = air/pass-through, 1 = opaque, 2 = water, 3 = translucent,
+    /// 4 = foliage (partial sunlight transmission).
+    pub kind: u32,
+    /// Emissive light level 0..15.
+    pub emission_level: u32,
+    /// Packed RGB8 emissive colour (low byte = R).
+    pub emission_rgb: u32,
+    /// 0 = mirror, 255 = matte.
+    pub roughness: u32,
+}
+
+impl BlockLightGpu {
+    pub const KIND_AIR: u32 = 0;
+    pub const KIND_OPAQUE: u32 = 1;
+    pub const KIND_WATER: u32 = 2;
+    pub const KIND_TRANSLUCENT: u32 = 3;
+    pub const KIND_FOLIAGE: u32 = 4;
+
+    pub fn new(kind: u32, emission_level: u8, emission: [u8; 3], roughness: u8) -> Self {
+        Self {
+            kind,
+            emission_level: emission_level as u32,
+            emission_rgb: emission[0] as u32
+                | ((emission[1] as u32) << 8)
+                | ((emission[2] as u32) << 16),
+            roughness: roughness as u32,
+        }
+    }
+}
+
+/// Block-light lookup table uploaded once per frame (chunk binding 9).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct BlockLightTable {
+    pub blocks: [BlockLightGpu; TILE_MATERIAL_TABLE_LEN],
+}
+
+impl Default for BlockLightTable {
+    fn default() -> Self {
+        Self {
+            blocks: [BlockLightGpu::default(); TILE_MATERIAL_TABLE_LEN],
+        }
+    }
+}
+
+impl BlockLightTable {
+    pub const SIZE_BYTES: usize = std::mem::size_of::<Self>();
+}
+
+/// Full ray-tracing lighting state for one frame, supplied by the engine's
+/// astronomical day/night model.
+#[derive(Clone, Copy, Debug)]
+pub struct RaytraceLighting {
+    /// Direction *towards* the sun (normalised).
+    pub sun_dir: [f32; 3],
+    /// Direct sun radiance in linear HDR units.
+    pub sun_color: [f32; 3],
+    /// Physical angular radius of the sun in radians (soft shadow penumbra).
+    pub sun_angular_radius: f32,
+    /// Direction *towards* the moon.
+    pub moon_dir: [f32; 3],
+    /// Moonlight radiance in linear HDR units.
+    pub moon_color: [f32; 3],
+    /// Moon angular radius in radians.
+    pub moon_angular_radius: f32,
+    /// Illuminated fraction of the moon (0 = new, 1 = full).
+    pub moon_phase: f32,
+    /// Sky radiance at the zenith / horizon (linear HDR).
+    pub sky_zenith: [f32; 3],
+    pub sky_horizon: [f32; 3],
+    /// 0 at day, 1 at night (stars, exposure lift).
+    pub night: f32,
+    /// Fog/horizon colour and density scale.
+    pub fog_color: [f32; 3],
+    pub fog_density: f32,
+    /// Ray-tracing quality 0..1 (affects ray counts and AO strength).
+    pub quality: f32,
+    /// Extra penumbra width in radians (0 = physical sun angular radius).
+    pub shadow_softness: f32,
+    /// Master reflection strength 0..1.
+    pub reflection_strength: f32,
+    /// Game time in seconds (animated water / caustics / dithering).
+    pub time: f32,
+    /// Camera is submerged.
+    pub underwater: bool,
+}
+
+impl Default for RaytraceLighting {
+    fn default() -> Self {
+        Self {
+            sun_dir: [0.0, 1.0, 0.0],
+            sun_color: [3.3, 3.2, 3.0],
+            sun_angular_radius: 0.0047,
+            moon_dir: [0.0, -1.0, 0.0],
+            moon_color: [0.0, 0.0, 0.0],
+            moon_angular_radius: 0.0045,
+            moon_phase: 0.5,
+            sky_zenith: [0.145, 0.36, 0.86],
+            sky_horizon: [0.61, 0.775, 0.98],
+            night: 0.0,
+            fog_color: [0.62, 0.78, 0.96],
+            fog_density: 1.0,
+            quality: 1.0,
+            shadow_softness: 0.004,
+            reflection_strength: 0.85,
+            time: 0.0,
+            underwater: false,
         }
     }
 }

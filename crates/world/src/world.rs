@@ -104,7 +104,6 @@ pub struct World {
     /// travels to the renderer via `ChunkStreamEvent::MeshReady`; the world
     /// only tracks which chunks are meshed (for counts / debug overlays).
     meshes: RwLock<HashSet<ChunkPos>>,
-    sun_dir: RwLock<glam::Vec3>,
     /// Positions of water sources/flowing water still spreading. Drained and
     /// refilled each water tick by `tick_water`.
     pending_flow: RwLock<HashSet<IVec3>>,
@@ -179,7 +178,6 @@ impl World {
             gen,
             chunks: ShardedChunks::new(),
             meshes: RwLock::new(HashSet::new()),
-            sun_dir: RwLock::new(glam::Vec3::new(0.3, 0.9, 0.1).normalize()),
             pending_flow: RwLock::new(HashSet::new()),
             source_water: RwLock::new(HashSet::new()),
             water_remesh: RwLock::new(HashSet::new()),
@@ -198,14 +196,6 @@ impl World {
     }
     pub fn terrain(&self) -> Arc<TerrainGenerator> {
         self.gen.clone()
-    }
-
-    pub fn set_sun_dir(&self, dir: glam::Vec3) {
-        *self.sun_dir.write() = dir;
-    }
-
-    pub fn get_sun_dir(&self) -> glam::Vec3 {
-        *self.sun_dir.read()
     }
 
     // --- chunk storage -----------------------------------------------------
@@ -442,120 +432,6 @@ impl World {
         }
     }
 
-    /// Get sunlight at a world coordinate (0 if chunk not loaded).
-    pub fn get_sunlight_world(&self, x: i32, y: i32, z: i32) -> u8 {
-        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
-            return 0;
-        }
-        let cp = block_to_chunk(IVec3::new(x, y, z));
-        let chunks = self.chunks.read_shard(cp);
-        let Some(chunk) = chunks.get(&cp) else {
-            if y >= voxel_core::SEA_LEVEL {
-                return 15;
-            }
-            return 0;
-        };
-        let origin = chunk_origin(cp);
-        chunk.get_sunlight(x - origin.x, y - origin.y, z - origin.z)
-    }
-
-    /// Get torchlight at a world coordinate (0 if chunk not loaded).
-    pub fn get_torchlight_world(&self, x: i32, y: i32, z: i32) -> u8 {
-        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
-            return 0;
-        }
-        let cp = block_to_chunk(IVec3::new(x, y, z));
-        let chunks = self.chunks.read_shard(cp);
-        let Some(chunk) = chunks.get(&cp) else {
-            return 0;
-        };
-        let origin = chunk_origin(cp);
-        chunk.get_torchlight(x - origin.x, y - origin.y, z - origin.z)
-    }
-
-    /// Set torchlight at a world coordinate (no-op if chunk not loaded).
-    pub fn set_torchlight_world(&self, x: i32, y: i32, z: i32, v: u8) {
-        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
-            return;
-        }
-        let cp = block_to_chunk(IVec3::new(x, y, z));
-        let mut chunks = self.chunks.write_shard(cp);
-        let Some(chunk) = chunks.get_mut(&cp) else {
-            return;
-        };
-        let origin = chunk_origin(cp);
-        chunk.set_torchlight(x - origin.x, y - origin.y, z - origin.z, v);
-    }
-
-    /// Set torchlight color (packed RGBA8, `R8G8B8A8_UNORM` layout, low byte
-    /// = R) at a world coordinate (no-op if chunk not loaded). Pass `0` for
-    /// "no color" (sunlight-only cell).
-    pub fn set_torchlight_color_world(&self, x: i32, y: i32, z: i32, color: u32) {
-        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
-            return;
-        }
-        let cp = block_to_chunk(IVec3::new(x, y, z));
-        let mut chunks = self.chunks.write_shard(cp);
-        let Some(chunk) = chunks.get_mut(&cp) else {
-            return;
-        };
-        let origin = chunk_origin(cp);
-        chunk.set_torchlight_color(x - origin.x, y - origin.y, z - origin.z, color);
-    }
-
-    /// Recompute sunlight and torchlight for a single chunk. Used after water
-    /// flow simulation modifies block types/light absorption across chunks.
-    pub fn recompute_lighting_at(&self, cp: ChunkPos) {
-        let reg = self.reg.clone();
-        let chunks = self.chunks.read_shard(cp);
-        let Some(chunk) = chunks.get(&cp) else {
-            return;
-        };
-        let mut chunk_copy = chunk.clone();
-        drop(chunks);
-
-        let sun_dir = self.get_sun_dir();
-
-        // Upgrade the self-reference once per call (`self_ref` was seeded via
-        // `Arc::new_cyclic`); closures capture the resulting `Arc<World>` by
-        // move so cross-thread access is safe without raw self-pointers.
-        let arc = self.self_ref.upgrade().expect("World outlives use");
-        let sample_block = {
-            let arc = Arc::clone(&arc);
-            move |wx: i32, wy: i32, wz: i32| arc.get_block(wx, wy, wz)
-        };
-        let sample_torch = {
-            let arc = Arc::clone(&arc);
-            move |wx: i32, wy: i32, wz: i32| arc.get_torchlight_world(wx, wy, wz)
-        };
-        let mut cross_updates = Vec::new();
-        crate::light::compute_all(
-            &mut chunk_copy,
-            &reg,
-            sun_dir,
-            &sample_block,
-            &sample_torch,
-            &mut |pos, level, color| cross_updates.push((pos, level, color)),
-        );
-
-        for (pos, level, color) in cross_updates {
-            self.set_torchlight_world(pos.0.x, pos.0.y, pos.0.z, level);
-            self.set_torchlight_color_world(pos.0.x, pos.0.y, pos.0.z, color);
-        }
-
-        let mut chunks = self.chunks.write_shard(cp);
-        if let Some(chunk) = chunks.get_mut(&cp) {
-            std::mem::swap(&mut chunk.sunlight, &mut chunk_copy.sunlight);
-            std::mem::swap(&mut chunk.torchlight, &mut chunk_copy.torchlight);
-            std::mem::swap(
-                &mut chunk.torchlight_color,
-                &mut chunk_copy.torchlight_color,
-            );
-            chunk.dirty = true;
-            chunk.light_dirty = true;
-        }
-    }
-
     /// True if a chunk is loaded (generated) at the given chunk position.
     pub fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {
         self.chunks.read_shard(pos).contains_key(&pos)
@@ -666,14 +542,10 @@ impl World {
         reg.is_solid(id)
     }
 
-    /// Set a block without any lighting recomputation. Writes the block,
-    /// marks the chunk dirty + light_dirty, and returns true on success.
+    /// Set a block without extra bookkeeping. Returns true on success.
     ///
-    /// Use this when placing many blocks during world generation (e.g.
-    /// tree leaves spilling across chunk borders) where the per-block
-    /// lighting recomputation cost of [`set_block`] would be prohibitive.
-    /// Lighting is deferred to the caller — typically the chunk's own
-    /// `compute_all` pass or a future remesh.
+    /// Used by world generation when placing many blocks (e.g. tree leaves
+    /// spilling across chunk borders).
     pub fn set_block_no_light(&self, x: i32, y: i32, z: i32, id: BlockId) -> bool {
         if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
             return false;
@@ -689,29 +561,19 @@ impl World {
             return false;
         };
         chunk.set(lx, ly, lz, id);
-        chunk.light_dirty = true;
         true
     }
 
     /// Set a block by world coordinate. Returns true if its chunk is loaded.
-    /// Also recomputes lighting for the affected chunk and its 6 cardinal
-    /// neighbours. Neighbours are processed first to scrub cross-chunk light
-    /// decreases before the central chunk is recalculated. Water flow remains
-    /// caller-driven because water level may not be set yet (bucket placement
-    /// sets the block before its level).
+    /// Water flow remains caller-driven because the water level may not be
+    /// set yet (bucket placement sets the block before its level).
     pub fn set_block(&self, x: i32, y: i32, z: i32, id: BlockId) -> bool {
         if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
             return false;
         }
         match self.set_block_if(x, y, z, id, crate::volume::BlockPredicate::Any) {
             ConditionalBlockWrite::Unloaded => false,
-            ConditionalBlockWrite::Skipped => {
-                // A loaded no-op still follows set_block's original lighting
-                // refresh behavior.
-                let cp = block_to_chunk(IVec3::new(x, y, z));
-                self.recompute_lighting_around(cp);
-                true
-            }
+            ConditionalBlockWrite::Skipped => true,
             ConditionalBlockWrite::Changed(_) => true,
         }
     }
@@ -760,62 +622,12 @@ impl World {
         self.source_water.write().remove(&pos);
         self.pending_flow.write().remove(&pos);
 
-        // Re-light the 6 cardinal neighbours FIRST so they pick up the new
-        // central-chunk torchlight via `sample_torchlight`/`sample_block`,
-        // and then re-light the central chunk so its BFS sees the freshly
-        // re-lit boundary cells at their final values. Doing it this order
-        // (rather than central-first) means we never double-write torchlight
-        // values on the same cell. Without this re-light, a torch that was
-        // emitting across a chunk boundary would leave phantom light on the
-        // neighbour side: `cross_chunk_update` only ever writes *higher*
-        // values, so a remove never sends a decrease signal. The neighbour
-        // re-lights are how we "scrub" that ghost light out.
-        //
-        // Cost: `compute_torchlight` is O(chunk volume) per chunk and the
-        // BFS is cheap at 16³. We gate on `is_chunk_loaded` so unloaded
-        // neighbour positions are a single hashmap probe (no chunk copy).
-        self.recompute_lighting_around(cp);
         self.enqueue_water_neighbours(pos);
         if removed_water {
             self.mark_water_remesh(pos);
             crate::water::rebuild_flow_after_source_removed(self, pos);
         }
         ConditionalBlockWrite::Changed(old)
-    }
-
-    /// Recompute lighting for the changed chunk and its loaded cardinal
-    /// neighbours. Recomputing the neighbours first lets them sample the new
-    /// center value; the final center pass then clears stale light decreases.
-    fn recompute_lighting_around(&self, cp: ChunkPos) {
-        const CARDINALS: [glam::IVec3; 6] = [
-            glam::IVec3::new(1, 0, 0),
-            glam::IVec3::new(-1, 0, 0),
-            glam::IVec3::new(0, 1, 0),
-            glam::IVec3::new(0, -1, 0),
-            glam::IVec3::new(0, 0, 1),
-            glam::IVec3::new(0, 0, -1),
-        ];
-        // Vertical bounds guard: skip neighbour chunk positions outside the
-        // legal Y chunk range so we don't acquire the world write lock just
-        // to discover the chunk is absent.
-        for d in CARDINALS {
-            let ny = cp.y() + d.y;
-            if !(0..voxel_core::MAX_CHUNK_Y).contains(&ny) {
-                continue;
-            }
-            let ncp = ChunkPos::new(cp.x() + d.x, ny, cp.z() + d.z);
-            if self.is_chunk_loaded(ncp) {
-                self.recompute_lighting_at(ncp);
-            }
-        }
-        // Finally re-light the central chunk itself.
-        self.recompute_lighting_at(cp);
-
-        // NOTE: water flow simulation is NOT called here because the water
-        // level may not be set yet (bucket places block then sets level).
-        // Callers that need flow should enqueue the position (via
-        // `place_water` / `remove_water`) and let `tick_water` drive the
-        // incremental spread.
     }
 
     /// Convenience: set a block and report the owning chunk position, if any.
@@ -1059,6 +871,36 @@ impl World {
         f(&chunk, &sample, &sample_water, &sample_loaded)
     }
 
+    /// Snapshot a chunk's 16³ block IDs as one byte per voxel for the
+    /// renderer's ray-tracing voxel grid. Layout is x fastest, then y, then z
+    /// (matching a `VkBufferImageCopy` into a 3D image). Block IDs above 255
+    /// are stored as stone so they stay opaque to shadow rays.
+    pub fn gpu_light_voxels(&self, pos: ChunkPos) -> Option<Vec<u8>> {
+        let chunks = self.chunks.read_shard(pos);
+        let chunk = chunks.get(&pos)?;
+        let blocks = chunk.snapshot_blocks();
+        let mut out = vec![0u8; 16 * 16 * 16];
+        for z in 0..16usize {
+            for y in 0..16usize {
+                for x in 0..16usize {
+                    let idx = voxel_core::math::local_index(x as i32, y as i32, z as i32);
+                    let id = blocks[idx].0;
+                    out[(z * 16 + y) * 16 + x] = if id <= 255 { id as u8 } else { 1 };
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Positions of every currently loaded chunk (cheap: keys only).
+    pub fn loaded_chunk_positions(&self) -> Vec<ChunkPos> {
+        let mut out = Vec::new();
+        for shard in self.chunks.read_all() {
+            out.extend(shard.keys().copied());
+        }
+        out
+    }
+
     /// Snapshot a chunk as an 18³ `u16` BlockId volume for the GPU compute
     /// mesher: the 16³ chunk interior plus a 1-voxel border from the 26
     /// neighbouring chunks. Output layout is z-major, then y, then x so it
@@ -1174,20 +1016,6 @@ mod tests {
         world.insert_chunk(cp, chunk);
         assert!(world.is_solid(0, 0, 0));
         assert!(!world.is_solid(1, 0, 0));
-    }
-
-    #[test]
-    fn get_torchlight_unloaded_returns_zero() {
-        let world = World::new(42);
-        assert_eq!(world.get_torchlight_world(0, 0, 0), 0);
-    }
-
-    #[test]
-    fn set_torchlight_noop_for_unloaded() {
-        let world = World::new(42);
-        world.set_torchlight_world(0, 0, 0, 10);
-        // No panic, no effect.
-        assert_eq!(world.get_torchlight_world(0, 0, 0), 0);
     }
 
     #[test]

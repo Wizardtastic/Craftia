@@ -142,12 +142,10 @@ pub(crate) const SETTINGS_ROWS: &[SettingsRow] = &[
     SettingsRow::Toggle("VSync"),
     SettingsRow::Slider("Fog Distance", 100.0, 800.0),
     SettingsRow::Slider("Exposure", 0.1, 3.0),
-    SettingsRow::Toggle("Shadows"),
     SettingsRow::Toggle("Vignette"),
-    SettingsRow::Toggle("SSAO"),
-    SettingsRow::Slider("SSAO Radius", 0.5, 5.0),
-    SettingsRow::Slider("SSAO Bias", 0.001, 0.1),
-    SettingsRow::Slider("SSAO Strength", 0.0, 3.0),
+    SettingsRow::Slider("Raytrace Quality", 0.0, 1.0),
+    SettingsRow::Slider("Shadow Softness", 0.0, 0.02),
+    SettingsRow::Slider("Reflections", 0.0, 1.0),
     SettingsRow::Slider("MSAA Samples", 0.0, 3.0),
     SettingsRow::Gap(8.0),
     SettingsRow::Section("PLAYER"),
@@ -926,9 +924,9 @@ mod tests {
                 "Render Distance",
                 "Fog Distance",
                 "Exposure",
-                "SSAO Radius",
-                "SSAO Bias",
-                "SSAO Strength",
+                "Raytrace Quality",
+                "Shadow Softness",
+                "Reflections",
                 "MSAA Samples",
                 "Mouse Sensitivity",
                 "Walk Speed",
@@ -936,7 +934,7 @@ mod tests {
             ]
         );
         let toggle_names: Vec<_> = lay.toggles.iter().map(|t| t.label).collect();
-        assert_eq!(toggle_names, vec!["VSync", "Shadows", "Vignette", "SSAO"]);
+        assert_eq!(toggle_names, vec!["VSync", "Vignette"]);
     }
 
     #[test]

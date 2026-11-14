@@ -32,8 +32,6 @@ fn main() {
         ("ui.frag", "ui.frag.spv"),
         ("sky.vert", "sky.vert.spv"),
         ("sky.frag", "sky.frag.spv"),
-        ("shadow.vert", "shadow.vert.spv"),
-        ("shadow.frag", "shadow.frag.spv"),
         ("post.vert", "post.vert.spv"),
         ("post.frag", "post.frag.spv"),
         ("entity.vert", "entity.vert.spv"),

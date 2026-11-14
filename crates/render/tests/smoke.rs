@@ -48,10 +48,9 @@ fn renderer_config_default_fog_distance_is_positive() {
 fn gpu_timings_supports_steady_state_assignment() {
     // Roundtrip a non-default GpuTimings through Copy semantics. Default-zero
     // is checked by the `Default` derive itself; the meaningful guarantee is
-    // that the struct stays `Copy` + fieldwise-assignable as a 7-f32 block.
+    // that the struct stays `Copy` + fieldwise-assignable as a 6-f32 block.
     let t = GpuTimings {
         frame_ms: 16.6,
-        shadow_ms: 0.5,
         sky_ms: 0.2,
         opaque_ms: 8.0,
         transparent_ms: 1.0,
@@ -59,9 +58,9 @@ fn gpu_timings_supports_steady_state_assignment() {
         post_ms: 0.4,
     };
     let frame_ms_sum =
-        t.frame_ms + t.shadow_ms + t.sky_ms + t.opaque_ms + t.transparent_ms + t.ui_ms + t.post_ms;
+        t.frame_ms + t.sky_ms + t.opaque_ms + t.transparent_ms + t.ui_ms + t.post_ms;
     assert_eq!(
-        frame_ms_sum, 27.0,
+        frame_ms_sum, 26.5,
         "GpuTimings additions must be exact (no implicit padding/NaN bits)"
     );
 }
@@ -90,31 +89,21 @@ fn vertex_layout_is_pod_roundtrip_safe_with_nonzero_payload() {
     let v = Vertex {
         pos: [1.0, 2.0, 3.0],
         uv: [0.5, 0.25],
-        light: 0.75,
-        light_color: 0xFF00FF00,
         tile: 7,
     };
     let bytes = bytemuck::bytes_of(&v);
     assert_eq!(
         bytes.len(),
-        32,
-        "Vertex must be exactly 32 bytes (3*4 pos + 2*4 uv + 4 light + 4 tile + 4 light_color)"
+        24,
+        "Vertex must be exactly 24 bytes (3*4 pos + 2*4 uv + 4 tile)"
     );
     let back: Vertex = *bytemuck::from_bytes(bytes);
     assert_eq!(back.pos[0], 1.0, "pos[0] must survive POD roundtrip");
     assert_eq!(back.pos, v.pos);
     assert_eq!(back.uv, v.uv);
     assert_eq!(
-        back.light, v.light,
-        "light must survive POD roundtrip (no padding bit-stealing)"
-    );
-    assert_eq!(
         back.tile, v.tile,
         "tile must survive POD roundtrip (no padding bit-stealing)"
-    );
-    assert_eq!(
-        back.light_color, v.light_color,
-        "light_color must survive POD roundtrip (no padding bit-stealing)"
     );
 }
 

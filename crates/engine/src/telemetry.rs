@@ -19,7 +19,6 @@ pub struct TelemetrySnapshot {
     pub chunk_record_cpu_ms: f32,
 
     // -- GPU pass breakdown (for stacked graph) --
-    pub gpu_shadow_ms: f32,
     pub gpu_sky_ms: f32,
     pub gpu_opaque_ms: f32,
     pub gpu_transparent_ms: f32,
@@ -70,7 +69,6 @@ impl Default for TelemetrySnapshot {
             cpu_frame_ms: 0.0,
             gpu_frame_ms: 0.0,
             chunk_record_cpu_ms: 0.0,
-            gpu_shadow_ms: 0.0,
             gpu_sky_ms: 0.0,
             gpu_opaque_ms: 0.0,
             gpu_transparent_ms: 0.0,
@@ -115,7 +113,6 @@ pub enum MetricGroup {
 pub enum MetricSelector {
     CpuFrameMs,
     GpuFrameMs,
-    GpuShadowMs,
     GpuSkyMs,
     GpuOpaqueMs,
     GpuTransparentMs,
@@ -228,7 +225,6 @@ impl TelemetryCollector {
             .map(|s| match selector {
                 MetricSelector::CpuFrameMs => s.cpu_frame_ms,
                 MetricSelector::GpuFrameMs => s.gpu_frame_ms,
-                MetricSelector::GpuShadowMs => s.gpu_shadow_ms,
                 MetricSelector::GpuSkyMs => s.gpu_sky_ms,
                 MetricSelector::GpuOpaqueMs => s.gpu_opaque_ms,
                 MetricSelector::GpuTransparentMs => s.gpu_transparent_ms,

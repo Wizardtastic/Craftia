@@ -275,18 +275,21 @@ mod tests {
         target: Option<BlockId>,
         surface_only: bool,
     ) -> EditState {
-        let mut brush = BrushTool::default();
-        brush.shape = shape;
-        brush.radius = 1.0;
-        brush.block = OUTPUT;
-        brush.replace = replace;
-        brush.target = target;
-        brush.surface_only = surface_only;
-        let mut edit = EditState::default();
-        edit.mode = EditModeState::Active {
-            tool: EditTool::Brush(brush),
+        let brush = BrushTool {
+            shape,
+            radius: 1.0,
+            block: OUTPUT,
+            replace,
+            target,
+            surface_only,
+            ..Default::default()
         };
-        edit
+        EditState {
+            mode: EditModeState::Active {
+                tool: EditTool::Brush(brush),
+            },
+            ..Default::default()
+        }
     }
 
     fn shape_cells(shape: BrushShape) -> Vec<IVec3> {
@@ -298,8 +301,7 @@ mod tests {
                     let included = match shape {
                         BrushShape::Sphere => p.distance_squared(CENTER) <= 1,
                         BrushShape::Cylinder => {
-                            y >= CENTER.y - 1
-                                && y < CENTER.y + 1
+                            (CENTER.y - 1..CENTER.y + 1).contains(&y)
                                 && (x - CENTER.x).pow(2) + (z - CENTER.z).pow(2) <= 1
                         }
                         BrushShape::Box => true,

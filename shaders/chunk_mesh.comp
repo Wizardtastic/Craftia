@@ -8,7 +8,7 @@
 // than initial load speed; the CPU greedy mesher refines near chunks.
 //
 // Input:  18³ R16_UINT 3D texture (16³ chunk + 1-voxel border from neighbours).
-// Output: flat uint vertex buffer (8 uints = 32 bytes per vertex, matching the
+// Output: flat uint vertex buffer (6 uints = 24 bytes per vertex, matching the
 //         #[repr(C)] Vertex layout), uint index buffer, and a 2-element counter
 //         [vertex_count, index_count] incremented atomically.
 
@@ -27,7 +27,7 @@ layout(std430, set = 0, binding = 1) readonly buffer PropsBuf {
     uvec4 props[];
 };
 
-// Output: flat uint arrays. Each vertex = 8 consecutive uints (32 bytes).
+// Output: flat uint arrays. Each vertex = 6 consecutive uints (24 bytes).
 layout(std430, set = 0, binding = 2) buffer VertBuf { uint verts[]; };
 layout(std430, set = 0, binding = 3) buffer IdxBuf { uint idxs[]; };
 layout(std430, set = 0, binding = 4) buffer CtrBuf { uint ctr[2]; };
@@ -125,24 +125,18 @@ void main() {
         uint v_base = atomicAdd(ctr[0], 4u);
         uint i_base = atomicAdd(ctr[1], 6u);
         uint tile = block_tile(cur_id, uint(fi));
-        float light = cur_liquid ? 1.5 : FACE_SHADE[fi];
         vec3 base = bpos + FACE_BASE[fi] * float(cell);
 
-        uint vo = v_base * 8u;
+        uint vo = v_base * 6u;
         for (int c = 0; c < 4; c++) {
             vec3 p = base + FACE_CORNER[fi * 4 + c] * float(cell);
-            uint o = vo + uint(c) * 8u;
+            uint o = vo + uint(c) * 6u;
             verts[o + 0] = floatBitsToUint(p.x);
             verts[o + 1] = floatBitsToUint(p.y);
             verts[o + 2] = floatBitsToUint(p.z);
             verts[o + 3] = floatBitsToUint(FACE_UV[fi * 4 + c].x);
             verts[o + 4] = floatBitsToUint(FACE_UV[fi * 4 + c].y);
-            verts[o + 5] = floatBitsToUint(light);
-            // Low byte = tile, bits 8..11 = sun visibility level (0..15).
-            // The GPU mesher does not ray trace, so it reports fully lit (15)
-            // and the chunk fragment shader's sun term is left untouched.
-            verts[o + 6] = (tile & 0xFFu) | 0x0F00u;
-            verts[o + 7] = 0u; // light_color (no colored lighting for distant chunks)
+            verts[o + 5] = tile & 0xFFu;
         }
         idxs[i_base + 0] = v_base;
         idxs[i_base + 1] = v_base + 1u;

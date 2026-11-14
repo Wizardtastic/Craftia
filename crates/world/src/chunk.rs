@@ -13,26 +13,6 @@ use voxel_core::{BlockId, ChunkPos, CHUNK_CUBED};
 
 use crate::registry::BlockRegistry;
 
-/// Default packed RGBA8 tint for daylight: warm white `[255, 248, 240, 255]`.
-/// Stored in `(A << 24) | (B << 16) | (G << 8) | R` so a bytemuck cast
-/// produces an `R8G8B8A8_UNORM` attribute with R in the low byte.
-pub const WARM_WHITE_PACKED: u32 = 0xFFF8F0FF;
-
-/// Pack a `(R, G, B)` triplet as `u32` for `R8G8B8A8_UNORM` upload
-/// (low byte = R, high byte = alpha). The chunk meshes pass this straight
-/// to the vertex shader; only the mesher and `light::compute_torchlight`
-/// need to call it.
-#[inline]
-pub fn pack_rgb(r: u8, g: u8, b: u8) -> u32 {
-    (0xFFu32 << 24) | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32)
-}
-
-/// Convenience: warm-white packed color (sunlight default).
-#[inline]
-pub fn default_sunlight_color() -> u32 {
-    WARM_WHITE_PACKED
-}
-
 /// One cubic chunk section: 16×16×16 blocks.
 #[derive(Clone)]
 pub struct Chunk {
@@ -50,21 +30,10 @@ pub struct Chunk {
     /// Cached count of non-air blocks, kept O(1) for the mesher's per-remesh
     /// capacity reservation instead of scanning all 4096 voxels each time.
     non_air: usize,
-    /// Sunlight level 0–15 per block.
-    pub(crate) sunlight: Box<[u8]>,
-    /// Torchlight level 0–15 per block.
-    pub(crate) torchlight: Box<[u8]>,
-    /// Per-block packed RGBA8 torchlight tint, `(A << 24) | (B << 16) | (G << 8) | R`
-    /// so a bytemuck cast is a valid `R8G8B8A8_UNORM` vertex attribute. A=0
-    /// means "no colour stored" and the mesher substitutes warm white.
-    /// Only meaningful when torchlight > 0.
-    pub(crate) torchlight_color: Box<[u32]>,
     /// Water level 0–8 per block. 0 = no water, 1 = shallowest flow, 8 = source.
     pub(crate) water_level: Box<[u8]>,
     /// Set whenever a block changes so the mesher/streamer knows to remesh.
     pub dirty: bool,
-    /// Set whenever lighting changes and needs recomputation.
-    pub light_dirty: bool,
     /// True once `TerrainGenerator` has populated this chunk.
     pub generated: bool,
 }
@@ -79,15 +48,8 @@ impl Chunk {
             palette_mode: false,
             // A fresh chunk is entirely air.
             non_air: 0,
-            sunlight: vec![0u8; CHUNK_CUBED].into_boxed_slice(),
-            torchlight: vec![0u8; CHUNK_CUBED].into_boxed_slice(),
-            // Start every voxel's color as 0 (transparent / "no color"). The
-            // mesher translates that sentinel into warm white at draw time so
-            // unlit or sunlight-dominated cells render normally.
-            torchlight_color: vec![0u32; CHUNK_CUBED].into_boxed_slice(),
             water_level: vec![0u8; CHUNK_CUBED].into_boxed_slice(),
             dirty: false,
-            light_dirty: true,
             generated: false,
         }
     }
@@ -237,105 +199,7 @@ impl Chunk {
         self.palette_mode = false;
     }
 
-    /// Get sunlight (0–15) at local coords. Returns 0 out of bounds.
-    #[inline]
-    pub fn get_sunlight(&self, x: i32, y: i32, z: i32) -> u8 {
-        if !in_bounds(x, y, z) {
-            return 0;
-        }
-        self.sunlight[voxel_core::math::local_index(x, y, z)]
-    }
-
-    /// Set sunlight (0–15) at local coords. Ignores out of bounds.
-    #[inline]
-    pub fn set_sunlight(&mut self, x: i32, y: i32, z: i32, v: u8) {
-        if !in_bounds(x, y, z) {
-            return;
-        }
-        let idx = voxel_core::math::local_index(x, y, z);
-        if self.sunlight[idx] != v {
-            self.sunlight[idx] = v;
-            self.light_dirty = true;
-        }
-    }
-
-    /// Get torchlight (0–15) at local coords. Returns 0 out of bounds.
-    #[inline]
-    pub fn get_torchlight(&self, x: i32, y: i32, z: i32) -> u8 {
-        if !in_bounds(x, y, z) {
-            return 0;
-        }
-        self.torchlight[voxel_core::math::local_index(x, y, z)]
-    }
-
-    /// Set torchlight (0–15) at local coords. Ignores out of bounds.
-    #[inline]
-    pub fn set_torchlight(&mut self, x: i32, y: i32, z: i32, v: u8) {
-        if !in_bounds(x, y, z) {
-            return;
-        }
-        let idx = voxel_core::math::local_index(x, y, z);
-        if self.torchlight[idx] != v {
-            self.torchlight[idx] = v;
-            self.light_dirty = true;
-        }
-    }
-
-    /// Get the packed RGBA8 torchlight tint at local coords. 0 means "no
-    /// stored colour" (e.g. sunlight-only). Out-of-bounds queries return 0
-    /// (transparent) so callers can `<= 0` check it.
-    #[inline]
-    pub fn get_torchlight_color(&self, x: i32, y: i32, z: i32) -> u32 {
-        if !in_bounds(x, y, z) {
-            return 0;
-        }
-        self.torchlight_color[voxel_core::math::local_index(x, y, z)]
-    }
-
-    /// Set the packed RGBA8 torchlight tint at local coords. Pass `0` to
-    /// clear the colour (sunlight-only cell). Out-of-bounds writes are
-    /// silently dropped (matches the rest of the `set_*` accessors).
-    #[inline]
-    pub fn set_torchlight_color(&mut self, x: i32, y: i32, z: i32, color: u32) {
-        if !in_bounds(x, y, z) {
-            return;
-        }
-        let idx = voxel_core::math::local_index(x, y, z);
-        if self.torchlight_color[idx] != color {
-            self.torchlight_color[idx] = color;
-            self.light_dirty = true;
-        }
-    }
-
-    /// Get the colour that should hit the surface at local coords, packed
-    /// RGBA8 in the same layout the vertex shader expects. We bias toward
-    /// torchlight when it dominates (so colored light actually wins)
-    /// and fall through to warm white when sunlight is the dominant
-    /// contribution. `WARM_WHITE` (RGBA `[255, 248, 240, 255]`) is the
-    /// default sunlight tint so the new saturated shader pass works for
-    /// daylight too.
-    #[inline]
-    pub fn get_combined_light_color(&self, x: i32, y: i32, z: i32) -> u32 {
-        if !in_bounds(x, y, z) {
-            return default_sunlight_color();
-        }
-        let idx = voxel_core::math::local_index(x, y, z);
-        if self.torchlight[idx] >= self.sunlight[idx] {
-            // Torchlight colour was explicitly set; if for some reason it
-            // is still the sentinel 0 (e.g. legacy save with no colour),
-            // substitute warm white so we never render black.
-            let c = self.torchlight_color[idx];
-            if c == 0 {
-                default_sunlight_color()
-            } else {
-                c
-            }
-        } else {
-            default_sunlight_color()
-        }
-    }
-
-    /// Get water level (0–8) at local coords. 0 = no water, 8 = source.
+    /// Get water level (0-8) at local coords. 0 = no water, 8 = source.
     #[inline]
     pub fn get_water_level(&self, x: i32, y: i32, z: i32) -> u8 {
         if !in_bounds(x, y, z) {
@@ -344,11 +208,10 @@ impl Chunk {
         self.water_level[voxel_core::math::local_index(x, y, z)]
     }
 
-    /// Set liquid level (0–8) at local coords. Ignores out of bounds.
+    /// Set liquid level (0-8) at local coords. Ignores out of bounds.
     ///
     /// Despite the name, this stores the level for any liquid block (water,
-    /// lava, etc.) so the fluid meshing/lighting paths can treat them
-    /// uniformly.
+    /// lava, etc.) so the fluid meshing paths can treat them uniformly.
     #[inline]
     pub fn set_water_level(&mut self, x: i32, y: i32, z: i32, v: u8) {
         if !in_bounds(x, y, z) {
@@ -358,32 +221,7 @@ impl Chunk {
         if self.water_level[idx] != v {
             self.water_level[idx] = v;
             self.dirty = true;
-            self.light_dirty = true; // Water changes light absorption.
         }
-    }
-
-    /// Combined light = max(sunlight, torchlight), used by the mesher.
-    #[inline]
-    pub fn get_combined_light(&self, x: i32, y: i32, z: i32) -> u8 {
-        self.get_sunlight(x, y, z).max(self.get_torchlight(x, y, z))
-    }
-
-    /// Reset all light to 0 (call before recomputing).
-    pub fn clear_light(&mut self) {
-        for s in self.sunlight.iter_mut() {
-            *s = 0;
-        }
-        for t in self.torchlight.iter_mut() {
-            *t = 0;
-        }
-        // Note: torchlight_color is cleared by the recompute path too.
-        // We keep them in sync so that meshing before recompute (e.g. for
-        // a remesh between two recompute passes) doesn't surface stale
-        // tints on voxels whose torchlight has just gone to 0.
-        for c in self.torchlight_color.iter_mut() {
-            *c = 0;
-        }
-        self.light_dirty = true;
     }
 
     /// Count non-air blocks (used for empty-chunk culling in the mesher).
@@ -498,21 +336,6 @@ impl Chunk {
         &self.indices
     }
 
-    /// Get sunlight data (for save).
-    pub fn sunlight_data(&self) -> &[u8] {
-        &self.sunlight
-    }
-
-    /// Get torchlight data (for save).
-    pub fn torchlight_data(&self) -> &[u8] {
-        &self.torchlight
-    }
-
-    /// Get packed RGBA8 torchlight colour data (for save).
-    pub fn torchlight_color_data(&self) -> &[u32] {
-        &self.torchlight_color
-    }
-
     /// Get water level data (for save).
     pub fn water_level_data(&self) -> &[u8] {
         &self.water_level
@@ -538,33 +361,9 @@ impl Chunk {
         self.recompute_non_air();
     }
 
-    /// Restore sunlight data (for load).
-    pub fn restore_sunlight(&mut self, data: Vec<u8>) {
-        self.sunlight = data.into_boxed_slice();
-        self.light_dirty = true;
-        self.dirty = true;
-    }
-
-    /// Restore torchlight data (for load).
-    pub fn restore_torchlight(&mut self, data: Vec<u8>) {
-        self.torchlight = data.into_boxed_slice();
-        self.light_dirty = true;
-        self.dirty = true;
-    }
-
-    /// Restore packed RGBA8 torchlight colour data (for load). The provided
-    /// `data` is converted to a boxed slice and stored verbatim — caller
-    /// is responsible for the bit layout (low byte = R, etc.).
-    pub fn restore_torchlight_color(&mut self, data: Vec<u32>) {
-        self.torchlight_color = data.into_boxed_slice();
-        self.light_dirty = true;
-        self.dirty = true;
-    }
-
     /// Restore water level data (for load).
     pub fn restore_water_level(&mut self, data: Vec<u8>) {
         self.water_level = data.into_boxed_slice();
-        self.light_dirty = true;
         self.dirty = true;
     }
 }
@@ -642,48 +441,6 @@ mod tests {
         c.fill_with(|x, y, z| BlockId((x + y + z) as u16));
         assert_eq!(c.get(0, 0, 0), BlockId(0));
         assert_eq!(c.get(1, 2, 3), BlockId(6));
-    }
-
-    #[test]
-    fn sunlight_defaults() {
-        let c = test_chunk();
-        for y in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
-                for x in 0..CHUNK_SIZE {
-                    assert_eq!(c.get_sunlight(x, y, z), 0);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn set_get_sunlight() {
-        let mut c = test_chunk();
-        c.set_sunlight(3, 5, 7, 15);
-        assert_eq!(c.get_sunlight(3, 5, 7), 15);
-    }
-
-    #[test]
-    fn torchlight_defaults() {
-        let c = test_chunk();
-        assert_eq!(c.get_torchlight(0, 0, 0), 0);
-    }
-
-    #[test]
-    fn set_get_torchlight() {
-        let mut c = test_chunk();
-        c.set_torchlight(2, 3, 4, 12);
-        assert_eq!(c.get_torchlight(2, 3, 4), 12);
-    }
-
-    #[test]
-    fn clear_light() {
-        let mut c = test_chunk();
-        c.set_sunlight(0, 0, 0, 15);
-        c.set_torchlight(1, 1, 1, 10);
-        c.clear_light();
-        assert_eq!(c.get_sunlight(0, 0, 0), 0);
-        assert_eq!(c.get_torchlight(1, 1, 1), 0);
     }
 
     #[test]
@@ -856,19 +613,7 @@ mod proptests {
         }
 
         #[test]
-        fn sunlight_get_set(x in 0i32..16, y in 0i32..16, z in 0i32..16, lvl in 0u8..16) {
-            let mut c = Chunk::new(ChunkPos::new(0, 0, 0));
-            c.set_sunlight(x, y, z, lvl);
-            prop_assert_eq!(c.get_sunlight(x, y, z), lvl);
-        }
-
         #[test]
-        fn torchlight_get_set(x in 0i32..16, y in 0i32..16, z in 0i32..16, lvl in 0u8..16) {
-            let mut c = Chunk::new(ChunkPos::new(0, 0, 0));
-            c.set_torchlight(x, y, z, lvl);
-            prop_assert_eq!(c.get_torchlight(x, y, z), lvl);
-        }
-
         #[test]
         fn water_level_get_set(x in 0i32..16, y in 0i32..16, z in 0i32..16, lvl in 0u8..9) {
             let mut c = Chunk::new(ChunkPos::new(0, 0, 0));

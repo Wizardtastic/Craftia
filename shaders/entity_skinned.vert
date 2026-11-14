@@ -23,16 +23,14 @@
 
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec2 in_uv;
-layout(location = 2) in float in_light;
-layout(location = 3) in uint in_tile;
+layout(location = 2) in uint in_tile;
 // Skinning attributes (binding 1)
-layout(location = 4) in uvec4 in_joint_indices;
-layout(location = 5) in vec4 in_joint_weights;
+layout(location = 3) in uvec4 in_joint_indices;
+layout(location = 4) in vec4 in_joint_weights;
 
 layout(location = 0) out vec2 frag_uv;
-layout(location = 1) out float frag_light;
-layout(location = 2) out float frag_fog;
-layout(location = 3) flat out uint frag_tile;
+layout(location = 1) out float frag_fog;
+layout(location = 2) flat out uint frag_tile;
 
 layout(push_constant) uniform Push {
     mat4 model;
@@ -80,7 +78,6 @@ void main() {
     }
 
     frag_uv = in_uv;
-    frag_light = in_light;
     frag_tile = push.tile;
 
     // Fog distance.

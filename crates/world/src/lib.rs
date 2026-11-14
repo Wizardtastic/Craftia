@@ -11,7 +11,6 @@
 pub mod chunk;
 pub mod error;
 pub mod gen;
-pub mod light;
 pub mod map;
 pub mod mesh;
 pub mod registry;

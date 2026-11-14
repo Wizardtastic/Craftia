@@ -40,15 +40,6 @@ impl crate::EngineApp {
                 index_count: bundle.transparent.indices.len() as u32,
             });
         }
-        if !bundle.shadow.is_empty() {
-            out.push(voxel_render::ChunkUpload {
-                pos,
-                pass: voxel_render::MeshPass::Shadow,
-                vertices: bytemuck::cast_slice(&bundle.shadow.vertices).to_vec(),
-                indices: bytemuck::cast_slice(&bundle.shadow.indices).to_vec(),
-                index_count: bundle.shadow.indices.len() as u32,
-            });
-        }
     }
 
     /// Run one render frame: drain hot-reload + streamer events, upload meshes,
@@ -292,11 +283,23 @@ impl crate::EngineApp {
                         // stale results instead.
                         if self.world_state.world.is_chunk_loaded(pos) {
                             Self::extend_uploads(&mut uploads, pos, &bundle);
+                            // Keep the ray-tracing voxel grid in sync with
+                            // edits: every remesh re-uploads the chunk's IDs.
+                            let voxels = self.world_state.world.gpu_light_voxels(pos);
+                            if let (Some(voxels), Some(r)) =
+                                (voxels, self.render.renderer.as_mut())
+                            {
+                                r.queue_light_chunk(
+                                    voxel_core::math::chunk_origin(pos),
+                                    &voxels,
+                                );
+                            }
                         }
                     }
                     ChunkStreamEvent::Unloaded(pos) => {
                         if let Some(r) = self.render.renderer.as_mut() {
                             r.remove_chunk(pos);
+                            r.clear_light_chunk(voxel_core::math::chunk_origin(pos));
                         }
                     }
                     ChunkStreamEvent::Generated(_) => {}
@@ -681,6 +684,7 @@ impl crate::EngineApp {
             .player_pos()
             .unwrap_or(self.gameplay.spawn_pos);
         let camera_now = self.simulation.player_camera().unwrap_or_default();
+        self.update_light_grid(player_pos_now);
         if let Some(streamer) = &self.world_state.streamer {
             // Only send focus if player moved to a different chunk.
             let player_chunk =
@@ -689,13 +693,6 @@ impl crate::EngineApp {
             if (player_chunk_v - self.input.last_focus_pos).length_squared() > 1.0 {
                 streamer.set_focus(player_pos_now);
                 self.input.last_focus_pos = player_chunk_v;
-            }
-            // Only send sun_dir if it changed.
-            let dp = self.day_params();
-            let sun_dir = glam::Vec3::from_array(dp.sun_dir);
-            if (sun_dir - self.input.last_sun_dir).length_squared() > 0.0001 {
-                streamer.set_sun_dir(sun_dir);
-                self.input.last_sun_dir = sun_dir;
             }
             // Send frustum for mesh-building culling.
             let mut cam = camera_now;
@@ -775,14 +772,16 @@ impl crate::EngineApp {
                 // to interact with.
                 if let Some(result) = self.simulation.inventory_mut().map(|inventory| {
                     voxel_game::BlockAction::apply(
-                        &self.world_state.world,
-                        streamer,
+                        &voxel_game::BlockInteraction {
+                            world: &self.world_state.world,
+                            streamer,
+                            eye,
+                            look_dir: camera_now.forward(),
+                            player_pos: player_pos_now,
+                            mode: block_mode,
+                        },
                         inventory,
-                        eye,
-                        camera_now.forward(),
                         clicks,
-                        player_pos_now,
-                        block_mode,
                     )
                 }) {
                     if !result.edits.is_empty() {
@@ -1328,12 +1327,8 @@ impl crate::EngineApp {
             (opaque, held)
         };
 
-        // Update lighting parameters for the day/night cycle.
-        let dp = self.day_params();
-        let sun_dir = dp.sun_dir;
-        self.world_state
-            .world
-            .set_sun_dir(glam::Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]));
+        // Compute the physical sun/moon state for this frame.
+        let mut dp = self.day_params();
 
         // Detect actual water overlap at the camera point for visual effects;
         // a shallow liquid block should not tint the view above its surface.
@@ -1374,33 +1369,19 @@ impl crate::EngineApp {
         } else {
             1.0
         };
+        dp.lighting.underwater = underwater;
+        let block_light_table = {
+            let reg = self.world_state.world.registry();
+            Self::build_block_light_table(&reg)
+        };
         if let Some(r) = self.render.renderer.as_mut() {
-            r.set_lighting(
-                dp.sun_dir,
-                dp.sun_color,
-                dp.sun_visibility,
-                dp.sky_ambient,
-                dp.fog,
-                dp.night,
-                self.gameplay.game_time as f32,
-                underwater,
-            );
-            // Sun shadows are ray-traced into the chunk mesh at mesh time
-            // (`voxel_world::light::trace_sun_visibility`), so the cascaded
-            // shadow-map pass is no longer part of the lighting model and is
-            // kept switched off.
-            r.set_shadow_active(false);
+            r.set_raytrace_lighting(dp.lighting);
+            r.set_block_light_table(block_light_table);
             r.set_post_params(
                 self.config.exposure * dp.exposure,
                 self.config.vignette_strength,
                 self.gameplay.game_time as f32,
                 underwater,
-            );
-            r.set_ssao_params(
-                self.config.ssao_radius,
-                self.config.ssao_bias,
-                self.config.ssao_strength,
-                self.config.ssao_enabled,
             );
             r.set_reflection_strength(self.config.reflection_strength);
             {
@@ -1536,7 +1517,6 @@ impl crate::EngineApp {
                     cpu_frame_ms: (self.input.frame_time * 1000.0) as f32,
                     chunk_record_cpu_ms: r.chunk_record_cpu_ms(),
                     gpu_frame_ms: gpu.frame_ms,
-                    gpu_shadow_ms: gpu.shadow_ms,
                     gpu_sky_ms: gpu.sky_ms,
                     gpu_opaque_ms: gpu.opaque_ms,
                     gpu_transparent_ms: gpu.transparent_ms,
@@ -1615,27 +1595,22 @@ impl crate::EngineApp {
             .world
             .water_submersion(camera.pos - eye_extent, camera.pos + eye_extent)
             > 0.5;
+        let block_light_table = {
+            let reg = self.world_state.world.registry();
+            Self::build_block_light_table(&reg)
+        };
         let Some(r) = self.render.renderer.as_mut() else {
             return;
         };
-        r.set_lighting(
-            dp.sun_dir,
-            dp.sun_color,
-            dp.sun_visibility,
-            dp.sky_ambient,
-            dp.fog,
-            dp.night,
-            self.gameplay.game_time as f32,
-            underwater,
-        );
+        r.set_block_light_table(block_light_table);
+        let mut lighting = dp.lighting;
+        lighting.underwater = underwater;
+        r.set_raytrace_lighting(lighting);
         r.set_reflection_strength(self.config.reflection_strength);
         {
             let ext = r.extent();
             r.set_proj_params(camera.near, camera.far, ext.width as f32, ext.height as f32);
         }
-        // Sun shadows are ray-traced into the chunk mesh, so a capture needs
-        // no per-frame cascade data; just keep the shadow-map pass off.
-        r.set_shadow_active(false);
         match r.capture_frame(voxel_render::FrameInput {
             camera,
             ui: Some(&ui),
@@ -1684,7 +1659,6 @@ impl crate::EngineApp {
         let mut cpu_min = f32::MAX;
         let mut cpu_max = 0f32;
         let mut gpu_sum = 0f32;
-        let mut shadow_sum = 0f32;
         let mut chunk_sum = 0f32;
         let mut gen_sum = 0f32;
         let mut mesh_sum = 0f32;
@@ -1694,7 +1668,6 @@ impl crate::EngineApp {
             cpu_min = cpu_min.min(s.cpu_frame_ms);
             cpu_max = cpu_max.max(s.cpu_frame_ms);
             gpu_sum += s.gpu_frame_ms;
-            shadow_sum += s.gpu_shadow_ms;
             chunk_sum += s.chunk_record_cpu_ms;
             gen_sum += s.streamer_gen_ms;
             mesh_sum += s.streamer_mesh_ms;
@@ -1704,14 +1677,13 @@ impl crate::EngineApp {
         }
         let last = samples.back();
         log::info!(
-            "bench summary: frames={} avg_cpu={:.2}ms [{:.2}..{:.2}] avg_chunk_cpu={:.3}ms avg_gpu={:.2}ms avg_shadow={:.2}ms avg_gen={:.2}ms avg_mesh={:.2}ms | chunks gpu={} loaded={} meshed={} upload={:.2}ms",
+            "bench summary: frames={} avg_cpu={:.2}ms [{:.2}..{:.2}] avg_chunk_cpu={:.3}ms avg_gpu={:.2}ms avg_gen={:.2}ms avg_mesh={:.2}ms | chunks gpu={} loaded={} meshed={} upload={:.2}ms",
             count,
             cpu_sum / count as f32,
             cpu_min,
             cpu_max,
             chunk_sum / count as f32,
             gpu_sum / count as f32,
-            shadow_sum / count as f32,
             gen_sum / count as f32,
             mesh_sum / count as f32,
             last.map(|s| s.chunks_gpu).unwrap_or(0),
@@ -1739,6 +1711,74 @@ impl crate::EngineApp {
     /// `water_y / wet_edge / caustics / leaves` are the global master
     /// scalars from `GraphicsSettings`, packed into `world_params.wxyz`
     /// matching the GLSL std430 layout in `shaders/chunk.frag`.
+    /// Re-centre the renderer's voxel grid on the player when they travel a
+    /// few chunks, and repopulate it with every loaded chunk. Between recentres
+    /// the grid is updated incrementally by the streamer's remesh events.
+    fn update_light_grid(&mut self, player_pos: glam::Vec3) {
+        const GRID_HALF_XZ: i32 = 96;
+        const RECENTER_CHUNKS: i32 = 4;
+        let center = voxel_core::math::block_to_chunk(voxel_core::math::world_to_block(player_pos));
+        let needs = self.input.light_grid_center.map_or(true, |c| {
+            (c.x() - center.x())
+                .abs()
+                .max((c.y() - center.y()).abs())
+                .max((c.z() - center.z()).abs())
+                >= RECENTER_CHUNKS
+        });
+        if !needs {
+            return;
+        }
+        let world = self.world_state.world.clone();
+        if let Some(r) = self.render.renderer.as_mut() {
+            let chunk = voxel_core::math::chunk_origin(center);
+            // Y starts at 0: the grid spans the full 256-block world height.
+            let origin = glam::IVec3::new(chunk.x - GRID_HALF_XZ, 0, chunk.z - GRID_HALF_XZ);
+            r.reset_light_grid(origin);
+            for pos in world.loaded_chunk_positions() {
+                if let Some(voxels) = world.gpu_light_voxels(pos) {
+                    r.queue_light_chunk(voxel_core::math::chunk_origin(pos), &voxels);
+                }
+            }
+        }
+        self.input.light_grid_center = Some(center);
+    }
+
+    /// Build the per-block ray-tracing table (opacity kind, emission and
+    /// roughness) indexed by block ID, consumed by `chunk.frag` binding 9.
+    pub(crate) fn build_block_light_table(
+        reg: &voxel_world::BlockRegistry,
+    ) -> voxel_render::BlockLightTable {
+        use voxel_render::{BlockLightGpu, BlockLightTable};
+        let mut table = BlockLightTable::default();
+        let count = reg.count().min(256);
+        for i in 0..count {
+            let def = reg.get(voxel_core::BlockId(i as u16));
+            let kind = match def.kind {
+                voxel_world::BlockKind::Air => BlockLightGpu::KIND_AIR,
+                voxel_world::BlockKind::Solid | voxel_world::BlockKind::Cactus => {
+                    BlockLightGpu::KIND_OPAQUE
+                }
+                voxel_world::BlockKind::Liquid => BlockLightGpu::KIND_WATER,
+                voxel_world::BlockKind::Transparent => BlockLightGpu::KIND_TRANSLUCENT,
+                voxel_world::BlockKind::Foliage => BlockLightGpu::KIND_FOLIAGE,
+            };
+            let roughness = match kind {
+                BlockLightGpu::KIND_OPAQUE => 235,
+                BlockLightGpu::KIND_FOLIAGE => 205,
+                BlockLightGpu::KIND_TRANSLUCENT => 55,
+                BlockLightGpu::KIND_WATER => 30,
+                _ => 255,
+            };
+            table.blocks[i] = BlockLightGpu::new(
+                kind,
+                def.emission,
+                def.emission_color,
+                roughness,
+            );
+        }
+        table
+    }
+
     pub(crate) fn build_material_table_from_registry(
         reg: &voxel_world::BlockRegistry,
         water_y: f32,

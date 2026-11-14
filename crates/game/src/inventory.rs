@@ -338,7 +338,7 @@ impl SurvivalInventory {
                 None => {
                     if !target.is_empty() {
                         let taken = match click {
-                            InventoryClick::Left => std::mem::replace(target, ItemStack::empty()),
+                            InventoryClick::Left => std::mem::take(target),
                             InventoryClick::Right => target.split(target.count.div_ceil(2)),
                         };
                         *held = Some(taken);
@@ -354,7 +354,7 @@ impl SurvivalInventory {
                     return;
                 }
                 let taken = match click {
-                    InventoryClick::Left => std::mem::replace(target, ItemStack::empty()),
+                    InventoryClick::Left => std::mem::take(target),
                     InventoryClick::Right => target.split(target.count.div_ceil(2)),
                 };
                 *held = Some(taken);

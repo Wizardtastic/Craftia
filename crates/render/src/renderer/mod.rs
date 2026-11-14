@@ -19,10 +19,11 @@ mod hiz;
 mod indirect;
 mod init;
 mod pipeline;
+mod raytrace;
 mod swapchain;
 
 pub(crate) use pipeline::spirv_to_u32;
-use pipeline::{CameraUbo, FogUbo, ShadowUbo, SkyUbo};
+use pipeline::{CameraUbo, FogUbo, RaytraceUbo, SkyUbo};
 use swapchain::create_framebuffer_with;
 
 use crate::MaterialTable;
@@ -39,7 +40,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::path::Path;
 
 use voxel_core::{
-    math::{chunk_origin, ChunkPos},
+    math::ChunkPos,
     Camera, Frustum,
 };
 
@@ -52,15 +53,20 @@ use crate::ui::UiDrawData;
 use gpu_allocator::MemoryLocation;
 
 const FRAMES_IN_FLIGHT: usize = 2;
-const GPU_TIMESTAMP_COUNT: u32 = 8; // frame_start, shadow_end, sky_end, opaque_end, transparent_end, ui_end, main_pass_end, post_end
-const GPU_TIMESTAMP_TRANSPARENT_END: usize = 4;
-const GPU_TIMESTAMP_UI_END: usize = 5;
+/// Hermite smoothstep, used to fade the sun disc/visibility near the horizon.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+const GPU_TIMESTAMP_COUNT: u32 = 7; // frame_start, sky_end, opaque_end, transparent_end, ui_end, main_pass_end, post_end
+const GPU_TIMESTAMP_TRANSPARENT_END: usize = 3;
+const GPU_TIMESTAMP_UI_END: usize = 4;
 
 /// GPU timing results for a single frame (in milliseconds).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GpuTimings {
     pub frame_ms: f32,
-    pub shadow_ms: f32,
     pub sky_ms: f32,
     pub opaque_ms: f32,
     pub transparent_ms: f32,
@@ -73,8 +79,6 @@ pub struct GpuTimings {
 pub enum MeshPass {
     Opaque,
     Transparent,
-    /// Cutout geometry (leaves, foliage) rendered only into the shadow map.
-    Shadow,
 }
 
 /// Vertex + index data for one chunk pass, as raw bytes ready to upload.
@@ -119,14 +123,6 @@ pub struct RendererConfig {
     pub msaa_samples: u32,
     /// Enable hardware occlusion culling for chunk rendering.
     pub occlusion_culling: bool,
-    /// Enable screen-space ambient occlusion (SSAO). Requires MSAA disabled.
-    pub ssao_enabled: bool,
-
-    /// Apply the chunk mesher's ray-traced sun visibility in the chunk
-    /// shader. Shadows are baked per vertex at mesh time, so this is a plain
-    /// lighting switch (uploaded as `FogUbo::sun_dir_pad.w`) and costs no
-    /// per-frame GPU work; toggling it never requires a re-mesh.
-    pub shadow_enabled: bool,
     /// Enable the Phase-2 GPU compute chunk mesher. The chunk renderer itself
     /// is always GPU-driven (indirect multi-draw + Hi-Z culling).
     /// When `true`, distant chunks are meshed on the GPU via a compute shader
@@ -148,8 +144,6 @@ impl Default for RendererConfig {
             particle_softness: 0.3,
             msaa_samples: 4,
             occlusion_culling: false,
-            ssao_enabled: true,
-            shadow_enabled: true,
             gpu_meshing: false,
         }
     }
@@ -182,7 +176,6 @@ struct Frame {
     image_available: vk::Semaphore,
     render_finished: vk::Semaphore,
     camera_ubo: GpuBuffer,
-    shadow_ubo: GpuBuffer,
     descriptor_set: vk::DescriptorSet,
     /// Tile remap UBO + descriptor set (set 1, binding 0 of the chunk
     /// pipeline layout). Currently holds an identity mapping (`map[i] = i`)
@@ -283,8 +276,6 @@ pub struct Renderer {
     ui_frag_spirv: Vec<u8>,
     sky_vert_spirv: Vec<u8>,
     sky_frag_spirv: Vec<u8>,
-    shadow_vert_spirv: Vec<u8>,
-    shadow_frag_spirv: Vec<u8>,
     post_vert_spirv: Vec<u8>,
     post_frag_spirv: Vec<u8>,
     entity_vert_spirv: Vec<u8>,
@@ -379,19 +370,21 @@ pub struct Renderer {
     // Model registry: loaded glTF models indexed by model_id.
     models: Vec<crate::model::Model>,
 
-    // â”€â”€ Shadow pass â”€â”€
-    shadow_render_pass: vk::RenderPass,
-    shadow_pipeline: vk::Pipeline,
-    shadow_pipeline_layout: vk::PipelineLayout,
-    shadow_image: GpuImage,
-    shadow_layer_views: Vec<vk::ImageView>,
-    shadow_sampler: vk::Sampler,
-    shadow_framebuffers: Vec<vk::Framebuffer>,
-    shadow_ubo_data: ShadowUbo,
-    /// Whether the shadow pass should run this frame. Shadows are skipped
-    /// when disabled or when the sun is below the horizon (the shader already
-    /// ignores them there, so rendering four cascades would be pure waste).
-    shadow_active: bool,
+    // ── Ray-traced lighting ──
+    /// GPU voxel grid (block IDs) ray marched by `chunk.frag`.
+    voxel_grid: raytrace::VoxelGrid,
+    /// Per-frame ray-tracing uniform (chunk descriptor binding 4).
+    raytrace_ubo: GpuBuffer,
+    /// Current frame's lighting state, flushed into `raytrace_ubo`.
+    raytrace_state: crate::RaytraceLighting,
+    /// Per-block opacity/emission/roughness table (binding 9).
+    block_light_ubo: GpuBuffer,
+    pending_block_light: crate::BlockLightTable,
+    block_light_dirty: bool,
+    /// Chunks waiting to be copied into the voxel grid.
+    pending_light_chunks: Vec<(glam::IVec3, Vec<u8>)>,
+    /// Pending re-centre of the grid, cleared + repopulated next frame.
+    light_grid_reset: Option<glam::IVec3>,
 
     // â”€â”€ Offscreen color (for post-processing) â”€â”€
     offscreen_images: Vec<GpuImage>,
@@ -405,15 +398,14 @@ pub struct Renderer {
     post_descriptor_pool: vk::DescriptorPool,
     post_descriptor_sets: Vec<vk::DescriptorSet>,
     post_sampler: vk::Sampler,
-    /// NEAREST sampler for depth buffer (SSAO).
+    /// NEAREST sampler for the scene depth copy.
     depth_sampler: vk::Sampler,
     post_framebuffers: Vec<vk::Framebuffer>,
     post_params: [f32; 4],
-    /// SSAO push constants: [radius, bias, strength, enabled].
-    ssao_params: [f32; 4],
-    /// Projection params for SSAO depth linearization: [near, far, screen_w, screen_h].
+    /// Near/far and screen size, used by the water/reflection shader paths.
     proj_params: [f32; 4],
-
+    /// View-projection matrix of the frame being recorded.
+    view_proj_cache: glam::Mat4,
     // --- Slice 2: scene-opaque-color copy + transparent render pass ---
     /// Slice 2's `scene_opaque_color` image: a single-sample colour image
     /// (TRANSFER_DST + SAMPLED) sized to the offscreen colour extent. After
@@ -656,8 +648,6 @@ impl Renderer {
         let ui_frag_spirv = spirv.ui_frag;
         let sky_vert_spirv = spirv.sky_vert;
         let sky_frag_spirv = spirv.sky_frag;
-        let shadow_vert_spirv = spirv.shadow_vert;
-        let shadow_frag_spirv = spirv.shadow_frag;
         let post_vert_spirv = spirv.post_vert;
         let post_frag_spirv = spirv.post_frag;
         let entity_vert_spirv = spirv.entity_vert;
@@ -801,7 +791,6 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples,
                 depth_write: true,
-                shadow_enabled: config.shadow_enabled,
             },
         )?;
         let wireframe_pipeline = pipeline::create_graphics_pipeline(
@@ -815,7 +804,6 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples,
                 depth_write: true,
-                shadow_enabled: config.shadow_enabled,
             },
         )?;
         // The transparent pipeline is created against the TRANSPARENT render
@@ -841,7 +829,6 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples: vk::SampleCountFlags::TYPE_1,
                 depth_write: false,
-                shadow_enabled: config.shadow_enabled,
             },
         )?;
 
@@ -977,78 +964,27 @@ impl Renderer {
                 .collect::<Result<Vec<_>>>()?
         };
 
-        // â”€â”€ Shadow pass init â”€â”€
-        let shadow_extent = vk::Extent2D {
-            width: 2048,
-            height: 2048,
-        };
-        let shadow_render_pass = pipeline::create_shadow_render_pass(&device, depth_format)?;
-        let shadow_pipeline_layout = pipeline::create_shadow_pipeline_layout(&device)?;
-        let shadow_pipeline = pipeline::create_shadow_pipeline(
-            &device,
-            shadow_render_pass,
-            shadow_pipeline_layout,
-            &shadow_vert_spirv,
-            &shadow_frag_spirv,
-        )?;
-        let shadow_image = GpuImage::depth_array(
+        // ── Ray-traced lighting resources ──
+        let voxel_grid = raytrace::VoxelGrid::new(
             &device,
             &alloc,
-            shadow_extent,
-            depth_format,
-            4,
-            "shadow_map",
+            command_pool,
+            graphics_queue,
         )?;
-        let shadow_layer_views: Vec<vk::ImageView> = (0..4u32)
-            .map(|i| {
-                pipeline::create_shadow_layer_view(&device, shadow_image.image, depth_format, i)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let shadow_sampler = unsafe {
-            device.create_sampler(
-                // Plain (non-compare) sampler: the chunk fragment shader does
-                // its own depth compare so it can run a multi-tap Poisson
-                // kernel instead of the hardware's single compare fetch.
-                &vk::SamplerCreateInfo::default()
-                    .compare_enable(false)
-                    .mag_filter(vk::Filter::NEAREST)
-                    .min_filter(vk::Filter::NEAREST)
-                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_BORDER)
-                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_BORDER)
-                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_BORDER)
-                    .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE),
-                None,
-            )
-        }
-        .map_err(|e| anyhow!("create_shadow_sampler: {e:?}"))?;
-        let shadow_framebuffers: Vec<vk::Framebuffer> = (0..4u32)
-            .map(|i| {
-                create_framebuffer_with(
-                    &device,
-                    shadow_render_pass,
-                    &[shadow_layer_views[i as usize]],
-                    shadow_extent,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        {
-            let cmd_init = begin_one_time(&device, command_pool)?;
-            transition_image_layout(
-                &device,
-                cmd_init,
-                shadow_image.image,
-                vk::ImageLayout::UNDEFINED,
-                // Start in the layout the chunk shader samples. The shadow
-                // pass transitions it per frame (initial layout UNDEFINED), so
-                // a frame with shadows disabled still binds a valid image.
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::ImageAspectFlags::DEPTH,
-                1,
-                4,
-            );
-            end_and_submit(&device, command_pool, graphics_queue, cmd_init)?;
-        }
+        let raytrace_ubo = GpuBuffer::host_visible(
+            &device,
+            &alloc,
+            std::mem::size_of::<RaytraceUbo>() as vk::DeviceSize,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            "raytrace_ubo",
+        )?;
+        let block_light_ubo = GpuBuffer::host_visible(
+            &device,
+            &alloc,
+            crate::BlockLightTable::SIZE_BYTES as vk::DeviceSize,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            "block_light_ubo",
+        )?;
 
         // --- per-frame resources ---
         // Allocate FRAMES_IN_FLIGHT chunk material descriptor sets (one per
@@ -1208,16 +1144,9 @@ impl Renderer {
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
                 "camera_ubo",
             )?;
-            let shadow_ubo = GpuBuffer::host_visible(
-                &device,
-                &alloc,
-                std::mem::size_of::<ShadowUbo>() as vk::DeviceSize,
-                vk::BufferUsageFlags::UNIFORM_BUFFER,
-                "shadow_ubo",
-            )?;
-            // Bind this frame's camera UBO + shared atlas + shared fog + shadow
-            // map + shadow UBO + material table + slot-6/7 scene_opaque
-            // color+depth samplers + slot-8 reflection UBO.
+            // Bind this frame's camera UBO + shared atlas + shared fog + voxel
+            // grid + ray-trace UBO + material and block-light tables + slot-6/7
+            // scene copies + slot-8 reflection UBO.
             pipeline::update_descriptor_set(
                 &device,
                 descriptor_set,
@@ -1226,9 +1155,9 @@ impl Renderer {
                     fog_buffer: fog_ubo.buffer,
                     atlas_view: atlas.view,
                     atlas_sampler: atlas.sampler,
-                    shadow_view: shadow_image.view,
-                    shadow_sampler,
-                    shadow_buffer: shadow_ubo.buffer,
+                    voxel_view: voxel_grid.view(),
+                    voxel_sampler: voxel_grid.sampler(),
+                    raytrace_buffer: raytrace_ubo.buffer,
                     material_table_buffer: tile_material_ubo.buffer,
                     material_table_size: MaterialTable::SIZE_BYTES as vk::DeviceSize,
                     scene_opaque_view: scene_opaque_color.view,
@@ -1236,6 +1165,8 @@ impl Renderer {
                     scene_depth_view: scene_opaque_depth.view,
                     scene_depth_sampler,
                     reflection_buffer: reflection_ubo.buffer,
+                    block_light_buffer: block_light_ubo.buffer,
+                    block_light_size: crate::BlockLightTable::SIZE_BYTES as vk::DeviceSize,
                 },
             );
             // Tile-remap UBO: 256 u32 entries (= 1024 B). Currently an
@@ -1268,7 +1199,6 @@ impl Renderer {
                 image_available,
                 render_finished,
                 camera_ubo,
-                shadow_ubo,
                 descriptor_set,
                 tile_remap_ubo,
                 tile_remap_descriptor_set: tile_remap_descriptor_sets[idx_within_fif],
@@ -1787,7 +1717,6 @@ impl Renderer {
                 chunk_set_layout: descriptor_set_layout,
                 msaa_samples,
                 gpu_meshing: config.gpu_meshing,
-                shadow_enabled: config.shadow_enabled,
                 hiz_view: hiz_ref.sampled_view(),
                 hiz_sampler: hiz_ref.sampler(),
                 hiz_params,
@@ -1837,8 +1766,6 @@ impl Renderer {
             ui_frag_spirv,
             sky_vert_spirv,
             sky_frag_spirv,
-            shadow_vert_spirv,
-            shadow_frag_spirv,
             post_vert_spirv,
             post_frag_spirv,
             entity_vert_spirv,
@@ -1893,15 +1820,14 @@ impl Renderer {
             overlay_frag_spirv,
             overlay_data: crate::overlay::OverlayData::default(),
             models: Vec::new(),
-            shadow_render_pass,
-            shadow_pipeline,
-            shadow_pipeline_layout,
-            shadow_image,
-            shadow_layer_views,
-            shadow_sampler,
-            shadow_framebuffers,
-            shadow_ubo_data: ShadowUbo::default(),
-            shadow_active: true,
+            voxel_grid,
+            raytrace_ubo,
+            raytrace_state: crate::RaytraceLighting::default(),
+            block_light_ubo,
+            pending_block_light: crate::BlockLightTable::default(),
+            block_light_dirty: true,
+            pending_light_chunks: Vec::new(),
+            light_grid_reset: None,
             offscreen_images,
             post_render_pass,
             post_pipeline,
@@ -1913,8 +1839,8 @@ impl Renderer {
             depth_sampler,
             post_framebuffers,
             post_params: [1.0, 0.0, 0.0, 0.0],
-            ssao_params: [1.5, 0.025, 1.0, 1.0],
             proj_params: [0.1, 500.0, 0.0, 0.0],
+            view_proj_cache: glam::Mat4::IDENTITY,
             // Slice 2 fields
             scene_opaque_color,
             scene_opaque_sampler,
@@ -2021,9 +1947,9 @@ impl Renderer {
                     fog_buffer: self.fog_ubo.buffer,
                     atlas_view: new_atlas.view,
                     atlas_sampler: new_atlas.sampler,
-                    shadow_view: self.shadow_image.view,
-                    shadow_sampler: self.shadow_sampler,
-                    shadow_buffer: frame.shadow_ubo.buffer,
+                    voxel_view: self.voxel_grid.view(),
+                    voxel_sampler: self.voxel_grid.sampler(),
+                    raytrace_buffer: self.raytrace_ubo.buffer,
                     material_table_buffer: self.tile_material_ubo.buffer,
                     material_table_size: MaterialTable::SIZE_BYTES as vk::DeviceSize,
                     scene_opaque_view: self.scene_opaque_color.view,
@@ -2031,6 +1957,8 @@ impl Renderer {
                     scene_depth_view: self.scene_opaque_depth.view,
                     scene_depth_sampler: self.scene_depth_sampler,
                     reflection_buffer: self.reflection_ubo.buffer,
+                    block_light_buffer: self.block_light_ubo.buffer,
+                    block_light_size: crate::BlockLightTable::SIZE_BYTES as vk::DeviceSize,
                 },
             );
         }
@@ -2094,7 +2022,6 @@ impl Renderer {
     ///   * `chunk.{vert,frag}` -> all 3 chunk pipelines (FILL, LINE, transparent)
     ///   * `ui.{vert,frag}` -> ui pipeline
     ///   * `sky.{vert,frag}` -> sky pipeline
-    ///   * `shadow.{vert,frag}` -> shadow pipeline
     ///   * `post.{vert,frag}` -> post pipeline
     ///
     /// Callers must invoke this on the renderer's own thread (i.e. from the
@@ -2135,14 +2062,6 @@ impl Renderer {
             "sky.frag" => {
                 self.sky_frag_spirv = bytes;
                 self.recreate_sky_pipeline()
-            }
-            "shadow.vert" => {
-                self.shadow_vert_spirv = bytes;
-                self.recreate_shadow_pipeline()
-            }
-            "shadow.frag" => {
-                self.shadow_frag_spirv = bytes;
-                self.recreate_shadow_pipeline()
             }
             "entity.vert" => {
                 self.entity_vert_spirv = bytes;
@@ -2212,7 +2131,6 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: self.msaa_samples,
                 depth_write: true,
-                shadow_enabled: self.config.shadow_enabled,
             },
         )?;
         self.wireframe_pipeline = pipeline::create_graphics_pipeline(
@@ -2226,7 +2144,6 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: self.msaa_samples,
                 depth_write: true,
-                shadow_enabled: self.config.shadow_enabled,
             },
         )?;
         self.transparent_pipeline = pipeline::create_graphics_pipeline(
@@ -2240,7 +2157,6 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: vk::SampleCountFlags::TYPE_1,
                 depth_write: false,
-                shadow_enabled: self.config.shadow_enabled,
             },
         )?;
         Ok(())
@@ -2346,21 +2262,6 @@ impl Renderer {
         Ok(())
     }
 
-    fn recreate_shadow_pipeline(&mut self) -> Result<()> {
-        unsafe {
-            self.device.destroy_pipeline(self.shadow_pipeline, None);
-        }
-        self.shadow_pipeline = vk::Pipeline::null();
-        self.shadow_pipeline = pipeline::create_shadow_pipeline(
-            &self.device,
-            self.shadow_render_pass,
-            self.shadow_pipeline_layout,
-            &self.shadow_vert_spirv,
-            &self.shadow_frag_spirv,
-        )?;
-        Ok(())
-    }
-
     fn recreate_post_pipeline(&mut self) -> Result<()> {
         unsafe {
             self.device.destroy_pipeline(self.post_pipeline, None);
@@ -2376,171 +2277,150 @@ impl Renderer {
         Ok(())
     }
 
-    /// Set the dynamic lighting state for the day/night cycle. Called each
-    /// frame by the engine.
+    /// Set the ray-traced lighting state for this frame. Called by the
+    /// engine's astronomical day/night model.
     ///
-    /// * `sun_dir` — direction *towards* the sun (normalised).
-    /// * `sun_color` — direct sun radiance in linear HDR units; goes to zero
-    ///   as the sun sets, which is what makes night genuinely dark.
-    /// * `sun_visibility` — smooth 0..1 term used to gate direct sun, shadow
-    ///   rays and the sky shader's sun disc.
-    /// * `sky_ambient` — hemispherical sky irradiance (blue by day, deep
-    ///   navy by night).
-    /// * `fog_color` — horizon/fog colour, also used for the clear colour.
-    /// * `night` — 0 at day, 1 at night (drives stars/moon and the ambient
-    ///   luminance floor).
-    /// * `time` — game time in seconds, for star twinkle.
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_lighting(
-        &mut self,
-        sun_dir: [f32; 3],
-        sun_color: [f32; 3],
-        sun_visibility: f32,
-        sky_ambient: [f32; 3],
-        fog_color: [f32; 3],
-        night: f32,
-        time: f32,
-        underwater: bool,
-    ) {
-        self.sun_dir = sun_dir;
-        self.sun_color = sun_color;
-        self.sun_visibility = sun_visibility.clamp(0.0, 1.0);
-        self.sky_ambient_color = sky_ambient;
-        self.sky_fog = fog_color;
-        self.night_factor = night.clamp(0.0, 1.0);
-        self.game_time = time;
-        self.sky_underwater = underwater;
-
-        // The sky pass paints the whole background, so the clear colour is
-        // only visible for a frame after a resize. Keep it in the same
-        // colour family as the fog to avoid a flash.
-        if underwater {
+    /// Every term is physical and dynamic: sun/moon direction and radiance,
+    /// angular size (which sets shadow penumbra width), moon phase, sky
+    /// radiance and fog. Nothing is baked into chunk meshes.
+    pub fn set_raytrace_lighting(&mut self, l: crate::RaytraceLighting) {
+        self.raytrace_state = l;
+        // The sky disc visibility follows the sun elevation; the direct
+        // radiance already falls to zero at night, this only fades the disc
+        // and the analytic sky term.
+        let sun_vis = smoothstep(-0.08, 0.06, l.sun_dir[1]);
+        self.sun_dir = l.sun_dir;
+        self.sun_color = l.sun_color;
+        self.sun_visibility = sun_vis;
+        // Hemisphere irradiance is roughly pi times the average sky radiance;
+        // 1.6 approximates that for the horizon-to-zenith gradient.
+        self.sky_ambient_color = [
+            l.sky_horizon[0] * 1.6,
+            l.sky_horizon[1] * 1.6,
+            l.sky_horizon[2] * 1.6,
+        ];
+        self.sky_fog = l.fog_color;
+        self.night_factor = l.night.clamp(0.0, 1.0);
+        self.game_time = l.time;
+        self.sky_underwater = l.underwater;
+        self.reflection_strength = l.reflection_strength.clamp(0.0, 1.0);
+        if l.underwater {
             self.config.clear_color = [0.01, 0.05, 0.15, 1.0];
         } else {
-            self.config.clear_color = [fog_color[0], fog_color[1], fog_color[2], 1.0];
+            self.config.clear_color = [l.fog_color[0], l.fog_color[1], l.fog_color[2], 1.0];
         }
     }
 
-    /// Enable or disable the shadow pass for subsequent frames. Disabled
-    /// shadows also skip the per-frame cascade render entirely.
-    pub fn set_shadow_active(&mut self, active: bool) {
-        self.shadow_active = active;
+    /// Push the per-block ray-tracing table (descriptor binding 9): opacity
+    /// kind, emission level/colour and roughness indexed by block ID.
+    pub fn set_block_light_table(&mut self, table: crate::BlockLightTable) {
+        if !self.block_light_dirty
+            && bytemuck::bytes_of(&self.pending_block_light) == bytemuck::bytes_of(&table)
+        {
+            return;
+        }
+        self.pending_block_light = table;
+        self.block_light_dirty = true;
     }
 
-    /// Set cascaded shadow map data (4 light-space VP matrices + cascade splits).
-    pub fn set_shadow_data(
-        &mut self,
-        cascade_vps: [[f32; 16]; 4],
-        cascade_splits: [f32; 4],
-        light_dir_and_bias: [f32; 4],
-    ) {
-        self.shadow_ubo_data = ShadowUbo {
-            cascade_vps,
-            cascade_splits,
-            light_dir_and_bias,
+    /// Queue one 16³ chunk of block IDs for the ray-tracing voxel grid. The
+    /// copy is uploaded on the next `flush_light_grid` (which `draw_frame`
+    /// calls automatically). `voxels` must hold at least 4096 entries.
+    pub fn queue_light_chunk(&mut self, world_origin: glam::IVec3, voxels: &[u8]) {
+        if voxels.len() < raytrace::CHUNK_BYTES {
+            return;
+        }
+        self.pending_light_chunks
+            .push((world_origin, voxels[..raytrace::CHUNK_BYTES].to_vec()));
+    }
+
+    /// Queue a chunk for removal: fill its grid region with air.
+    pub fn clear_light_chunk(&mut self, world_origin: glam::IVec3) {
+        self.pending_light_chunks
+            .push((world_origin, vec![0u8; raytrace::CHUNK_BYTES]));
+    }
+
+    /// Re-centre the voxel grid. The grid is cleared and must be repopulated
+    /// by the caller with `queue_light_chunk` for every loaded chunk.
+    pub fn reset_light_grid(&mut self, origin: glam::IVec3) {
+        self.light_grid_reset = Some(origin);
+        self.pending_light_chunks.clear();
+    }
+
+    /// World-space origin of the ray-tracing voxel grid.
+    pub fn light_grid_origin(&self) -> glam::IVec3 {
+        self.light_grid_reset.unwrap_or_else(|| self.voxel_grid.origin())
+    }
+
+    /// Grid extent in blocks (x, y, z).
+    pub fn light_grid_extent(&self) -> [u32; 3] {
+        raytrace::EXTENT
+    }
+
+    /// Upload queued chunk voxel data into the grid. Batched into one
+    /// transfer-only submission; cheap when nothing is pending.
+    pub fn flush_light_grid(&mut self) -> Result<()> {
+        let reset = self.light_grid_reset.take();
+        if reset.is_none() && self.pending_light_chunks.is_empty() {
+            return Ok(());
+        }
+        if let Some(origin) = reset {
+            self.voxel_grid.set_origin(origin);
+        }
+        let pending = std::mem::take(&mut self.pending_light_chunks);
+        let batch = pending.len().min(128);
+        let staging = if batch > 0 {
+            let mut staging = GpuBuffer::host_visible(
+                &self.device,
+                &self.alloc,
+                (batch * raytrace::CHUNK_BYTES) as vk::DeviceSize,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                "light_grid_staging",
+            )?;
+            {
+                let slice = staging.mapped_slice_mut()?;
+                for (i, (_, data)) in pending[..batch].iter().enumerate() {
+                    let off = i * raytrace::CHUNK_BYTES;
+                    slice[off..off + raytrace::CHUNK_BYTES].copy_from_slice(data);
+                }
+            }
+            staging.flush_whole(&self.device)?;
+            Some(staging)
+        } else {
+            None
         };
-    }
 
-    /// Diagnostic: read back a 64x64 window from the centre of shadow
-    /// cascade 0 and report (min, max, mean) depth. `1.0` everywhere means the
-    /// shadow pass wrote nothing; a spread of values means casters are present.
-    pub fn debug_shadow_map_dump(&self) -> Result<Vec<f32>> {
-        let extent = 2048u32;
-        let sample = extent;
-        let size = (sample * sample * 4) as vk::DeviceSize;
-        let buffer = GpuBuffer::host_visible(
-            &self.device,
-            &self.alloc,
-            size,
-            vk::BufferUsageFlags::TRANSFER_DST,
-            "shadow_debug_readback",
-        )?;
         let cmd = begin_one_time(&self.device, self.command_pool)?;
-        let range = vk::ImageSubresourceRange::default()
-            .aspect_mask(vk::ImageAspectFlags::DEPTH)
-            .base_mip_level(0)
-            .level_count(1)
-            .base_array_layer(0)
-            .layer_count(1);
-        let to_transfer = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .src_access_mask(vk::AccessFlags::SHADER_READ)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(self.shadow_image.image)
-            .subresource_range(range);
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[to_transfer],
-            );
-            let region = vk::BufferImageCopy::default()
-                .buffer_offset(0)
-                .buffer_row_length(0)
-                .buffer_image_height(0)
-                .image_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                        .mip_level(0)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                )
-                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                .image_extent(vk::Extent3D {
-                    width: sample,
-                    height: sample,
-                    depth: 1,
-                });
-            self.device.cmd_copy_image_to_buffer(
-                cmd,
-                self.shadow_image.image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                buffer.buffer,
-                &[region],
-            );
-            let to_sample = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(self.shadow_image.image)
-                .subresource_range(range);
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[to_sample],
-            );
+        raytrace::VoxelGrid::begin_writes(&self.device, cmd);
+        if reset.is_some() {
+            self.voxel_grid.record_clear(&self.device, cmd);
         }
+        if let Some(staging) = staging.as_ref() {
+            for (i, (origin, _)) in pending[..batch].iter().enumerate() {
+                self.voxel_grid.record_upload(
+                    &self.device,
+                    cmd,
+                    staging.buffer,
+                    (i * raytrace::CHUNK_BYTES) as u64,
+                    *origin,
+                );
+            }
+        }
+        raytrace::VoxelGrid::end_writes(&self.device, cmd);
         end_and_submit(&self.device, self.command_pool, self.graphics_queue, cmd)?;
-        let mut buffer = buffer;
-        let bytes = buffer.mapped_slice_mut()?;
-        let values: &[f32] = bytemuck::cast_slice(&bytes[..(sample * sample * 4) as usize]);
-        Ok(values.to_vec())
+        if let Some(mut staging) = staging {
+            staging.destroy_in_place(&self.device, &self.alloc);
+        }
+
+        if batch < pending.len() {
+            self.pending_light_chunks.extend(pending[batch..].iter().cloned());
+        }
+        Ok(())
     }
 
     /// Set post-processing parameters (exposure, vignette strength, time, underwater).
     pub fn set_post_params(&mut self, exposure: f32, vignette: f32, time: f32, underwater: bool) {
         self.post_params = [exposure, vignette, time, if underwater { 1.0 } else { 0.0 }];
-    }
-
-    /// Set SSAO parameters (radius, bias, strength, enabled).
-    pub fn set_ssao_params(&mut self, radius: f32, bias: f32, strength: f32, enabled: bool) {
-        // SSAO requires single-sample depth buffer; disable when MSAA is active.
-        let effective = enabled && self.msaa_samples == vk::SampleCountFlags::TYPE_1;
-        self.ssao_params = [radius, bias, strength, if effective { 1.0 } else { 0.0 }];
     }
 
     /// Push the tile material lookup table (descriptor binding 5) for the
@@ -2613,14 +2493,7 @@ impl Renderer {
                 ambient_color[2],
                 self.night_factor,
             ],
-            // `w` carries the user-facing "Shadows" setting: 1 = apply the
-            // mesher's ray-traced sun visibility, 0 = treat every face as lit.
-            sun_dir_pad: [
-                self.sun_dir[0],
-                self.sun_dir[1],
-                self.sun_dir[2],
-                if self.config.shadow_enabled { 1.0 } else { 0.0 },
-            ],
+            sun_dir_pad: [self.sun_dir[0], self.sun_dir[1], self.sun_dir[2], 1.0],
         };
         if let Ok(slice) = self.fog_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&fog_data);
@@ -2630,27 +2503,30 @@ impl Renderer {
             }
         }
 
-        // Sky UBO
+        // Sky UBO: astronomical sun + moon, sky radiance and fog.
+        let rt = self.raytrace_state;
+        let (zh, ho) = if self.sky_underwater {
+            ([0.02f32, 0.09, 0.20], [0.03, 0.13, 0.30])
+        } else {
+            (rt.sky_zenith, rt.sky_horizon)
+        };
         let data = SkyUbo {
-            sun_dir_vis: [
-                self.sun_dir[0],
-                self.sun_dir[1],
-                self.sun_dir[2],
-                self.sun_visibility,
-            ],
+            sun_dir_vis: [rt.sun_dir[0], rt.sun_dir[1], rt.sun_dir[2], self.sun_visibility],
             sun_color: [
-                self.sun_color[0],
-                self.sun_color[1],
-                self.sun_color[2],
-                1.0,
+                rt.sun_color[0],
+                rt.sun_color[1],
+                rt.sun_color[2],
+                rt.sun_angular_radius,
             ],
-            sky_ambient: [
-                self.sky_ambient_color[0],
-                self.sky_ambient_color[1],
-                self.sky_ambient_color[2],
-                self.night_factor,
+            moon_dir_phase: [rt.moon_dir[0], rt.moon_dir[1], rt.moon_dir[2], rt.moon_phase],
+            moon_color: [
+                rt.moon_color[0],
+                rt.moon_color[1],
+                rt.moon_color[2],
+                rt.moon_angular_radius,
             ],
-            fog_time: [self.sky_fog[0], self.sky_fog[1], self.sky_fog[2], self.game_time],
+            sky_ambient: [zh[0], zh[1], zh[2], self.night_factor],
+            fog_time: [ho[0], ho[1], ho[2], self.game_time],
         };
         if let Ok(slice) = self.sky_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&data);
@@ -2689,6 +2565,7 @@ impl Renderer {
                 if self.sky_underwater { 1.0 } else { 0.0 },
                 if self.ssr_depth_valid { 1.0 } else { 0.0 },
             ],
+            view_proj: self.view_proj_cache.to_cols_array_2d(),
         };
         if let Ok(slice) = self.reflection_ubo.mapped_slice_mut() {
             let bytes: &[u8] = bytemuck::bytes_of(&refl_data);
@@ -2698,16 +2575,68 @@ impl Renderer {
             }
         }
 
-        // Shadow UBO (per-frame).
-        let shadow_bytes: &[u8] = bytemuck::bytes_of(&self.shadow_ubo_data);
-        for frame in self.frames.iter_mut() {
-            if let Ok(slice) = frame.shadow_ubo.mapped_slice_mut() {
-                slice[..shadow_bytes.len()].copy_from_slice(shadow_bytes);
-                if let Err(e) = frame.shadow_ubo.flush_whole(&self.device) {
-                    log::warn!("shadow_ubo flush failed: {e}");
-                }
+        // Ray-tracing UBO (chunk binding 4): the full per-frame lighting
+        // state, plus the voxel-grid placement the shader ray marches.
+        let rt = self.raytrace_state;
+        let origin = self.voxel_grid.origin();
+        let extent = raytrace::EXTENT;
+        let rt_data = RaytraceUbo {
+            sun_dir_vis: [rt.sun_dir[0], rt.sun_dir[1], rt.sun_dir[2], self.sun_visibility],
+            sun_color_radius: [
+                rt.sun_color[0],
+                rt.sun_color[1],
+                rt.sun_color[2],
+                rt.sun_angular_radius,
+            ],
+            moon_dir_phase: [rt.moon_dir[0], rt.moon_dir[1], rt.moon_dir[2], rt.moon_phase],
+            moon_color_radius: [
+                rt.moon_color[0],
+                rt.moon_color[1],
+                rt.moon_color[2],
+                rt.moon_angular_radius,
+            ],
+            sky_zenith: [rt.sky_zenith[0], rt.sky_zenith[1], rt.sky_zenith[2], rt.night],
+            sky_horizon: [rt.sky_horizon[0], rt.sky_horizon[1], rt.sky_horizon[2], rt.time],
+            fog_density: [
+                rt.fog_color[0],
+                rt.fog_color[1],
+                rt.fog_color[2],
+                rt.fog_density,
+            ],
+            grid_origin: [origin.x as f32, origin.y as f32, origin.z as f32, 0.0],
+            grid_extent: [
+                extent[0] as f32,
+                extent[1] as f32,
+                extent[2] as f32,
+                rt.quality.clamp(0.0, 1.0),
+            ],
+            params: [
+                rt.reflection_strength.clamp(0.0, 1.0),
+                rt.shadow_softness.max(0.0),
+                0.35 + 0.65 * rt.quality.clamp(0.0, 1.0),
+                rt.time,
+            ],
+        };
+        if let Ok(slice) = self.raytrace_ubo.mapped_slice_mut() {
+            let bytes: &[u8] = bytemuck::bytes_of(&rt_data);
+            slice[..bytes.len()].copy_from_slice(bytes);
+            if let Err(e) = self.raytrace_ubo.flush_whole(&self.device) {
+                log::warn!("raytrace_ubo flush failed: {e}");
             }
         }
+
+        // Per-block ray-tracing table.
+        if self.block_light_dirty {
+            if let Ok(slice) = self.block_light_ubo.mapped_slice_mut() {
+                let bytes: &[u8] = bytemuck::bytes_of(&self.pending_block_light);
+                slice[..bytes.len()].copy_from_slice(bytes);
+                if let Err(e) = self.block_light_ubo.flush_whole(&self.device) {
+                    log::warn!("block_light_ubo flush failed: {e}");
+                }
+            }
+            self.block_light_dirty = false;
+        }
+
     }
 
     /// Upload (or replace) a batch of chunk meshes. Done via a single one-time
@@ -2914,6 +2843,10 @@ impl Renderer {
         // Wait for this frame's previous use to finish.
         self.wait_for_fence_reset(in_flight_fence)?;
 
+        // Voxel-grid uploads may write memory the previous frame sampled, so
+        // they only start after that frame's fence has signalled. This runs
+        // before the UBO flush so a re-centre is published in the same frame.
+        self.flush_light_grid()?;
         // Write UBO data now that the previous frame is done with this slot.
         self.flush_pending_ubos();
 
@@ -2937,17 +2870,15 @@ impl Renderer {
                 * GPU_TIMESTAMP_COUNT;
             if frame_idx > 0 {
                 let mut timestamps = [0u64; GPU_TIMESTAMP_COUNT as usize];
-                // WAIT flag: blocks the CPU until the GPU has finished processing
-                // the previous frame's cmd_reset_query_pool + timestamps. Without
-                // it, frame N's readback can race the GPU and trip
-                // VUID-vkGetQueryPoolResults-None-09401 ("query not reset") on
-                // the first query of the batch.
+                // Non-blocking read: if the previous frame's timestamps are
+                // not ready yet we keep the last values instead of stalling
+                // the whole frame loop on the GPU.
                 let read_ok = unsafe {
                     self.device.get_query_pool_results(
                         self.query_pool,
                         prev_offset,
                         &mut timestamps,
-                        vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                        vk::QueryResultFlags::TYPE_64,
                     )
                 };
                 if let Ok(()) = read_ok {
@@ -2957,18 +2888,17 @@ impl Renderer {
                     // query-pool slot with non-monotonic timestamps; clamp to
                     // 0 instead of panicking on underflow.
                     self.timings = GpuTimings {
-                        shadow_ms: t[1].saturating_sub(t[0]) as f32 * ns_to_ms,
-                        sky_ms: t[2].saturating_sub(t[1]) as f32 * ns_to_ms,
-                        opaque_ms: t[3].saturating_sub(t[2]) as f32 * ns_to_ms,
-                        transparent_ms: t[GPU_TIMESTAMP_TRANSPARENT_END].saturating_sub(t[3])
+                        sky_ms: t[1].saturating_sub(t[0]) as f32 * ns_to_ms,
+                        opaque_ms: t[2].saturating_sub(t[1]) as f32 * ns_to_ms,
+                        transparent_ms: t[GPU_TIMESTAMP_TRANSPARENT_END].saturating_sub(t[2])
                             as f32
                             * ns_to_ms,
                         ui_ms: t[GPU_TIMESTAMP_UI_END]
                             .saturating_sub(t[GPU_TIMESTAMP_TRANSPARENT_END])
                             as f32
                             * ns_to_ms,
-                        post_ms: t[7].saturating_sub(t[6]) as f32 * ns_to_ms,
-                        frame_ms: t[7].saturating_sub(t[0]) as f32 * ns_to_ms,
+                        post_ms: t[6].saturating_sub(t[5]) as f32 * ns_to_ms,
+                        frame_ms: t[6].saturating_sub(t[0]) as f32 * ns_to_ms,
                     };
                 }
                 // On error (queries not yet available), keep previous timings.
@@ -3028,8 +2958,6 @@ impl Renderer {
             );
         }
 
-        // â”€â”€ Shadow pass: render chunk depth from the light's perspective â”€â”€
-        self.record_shadow_pass(device, cmd, Some(query_offset + 1));
 
         // GPU-driven frustum cull runs OUTSIDE the main render pass (a compute
         // dispatch inside a render pass is illegal). It must precede
@@ -3062,7 +2990,7 @@ impl Renderer {
                 view_proj,
                 camera.pos,
                 panorama_rotation,
-                Some(query_offset + 2),
+                Some(query_offset + 1),
             );
         } else {
             self.record_sky_pass(
@@ -3071,23 +2999,25 @@ impl Renderer {
                 view_proj,
                 camera.pos,
                 descriptor_set,
-                Some(query_offset + 2),
+                Some(query_offset + 1),
             );
         }
 
         // Chunk passes: one indirect multi-draw from the GPU-driven buffers.
         // Transparent geometry (water/foliage) renders in
-        // `record_transparent_pass`, so query 4 is written there.
+        // `record_transparent_pass`, so query 3 is written there.
         let chunk_t0 = std::time::Instant::now();
         self.gpu_driven.record_opaque(
-                &self.device,
-                cmd,
-                descriptor_set,
-                &vp_cols,
+            &self.device,
+            cmd,
+            &indirect::OpaqueDrawParams {
+                chunk_descriptor_set: descriptor_set,
+                vp_cols: &vp_cols,
                 game_time,
-                self.query_pool,
-                Some(query_offset + 3),
-            );
+                query_pool: self.query_pool,
+                opaque_end_ts: Some(query_offset + 2),
+            },
+        );
         self.chunk_record_cpu_ms = chunk_t0.elapsed().as_secs_f32() * 1000.0;
 
         // Entity pass: upload quad vertices then draw entity meshes.
@@ -3178,7 +3108,7 @@ impl Renderer {
                 cmd,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 self.query_pool,
-                query_offset + 6,
+                query_offset + 5,
             );
         }
 
@@ -3189,7 +3119,7 @@ impl Renderer {
         // unconditionally (the binding exists for SSAO + depth-of-field +
         // any future consumer, so it must always be in a shader-readable
         // layout). Previously this barrier was gated on
-        // `ssao_params[3] > 0.5`, which skipped the transition when SSAO
+        // (scene depth is sampled by the water/reflection paths).
         // was disabled and tripped VUID-00344 on the post pass's
         // `vkCmdDraw` ("doesn't match the previous known layout
         // DEPTH_STENCIL_ATTACHMENT_OPTIMAL").
@@ -3206,7 +3136,7 @@ impl Renderer {
             );
         }
 
-        self.record_post_pass(device, cmd, image_index, Some(query_offset + 7));
+        self.record_post_pass(device, cmd, image_index, Some(query_offset + 6));
         unsafe {
             device.end_command_buffer(cmd)?;
         }
@@ -3248,6 +3178,8 @@ impl Renderer {
         // write to its UBO and descriptor set.
         self.wait_for_fence_reset(self.frames[0].in_flight_fence)?;
 
+        // Apply any grid re-centre / chunk uploads, then publish UBOs.
+        self.flush_light_grid()?;
         // Write UBO data now that the previous frame is done.
         self.flush_pending_ubos();
 
@@ -3286,8 +3218,6 @@ impl Renderer {
         self.update_camera_ubo(&camera, underwater, 0)?;
         let device = &self.device;
 
-        // â”€â”€ Shadow pass (capture) â”€â”€
-        self.record_shadow_pass(device, cmd, None);
 
         // GPU-driven frustum cull runs OUTSIDE the main render pass.
         {
@@ -3327,14 +3257,16 @@ impl Renderer {
         // Chunk passes: one indirect multi-draw from the GPU-driven buffers.
         let chunk_ds = self.frames[0].descriptor_set;
         self.gpu_driven.record_opaque(
-                &self.device,
-                cmd,
-                chunk_ds,
-                &vp_cols,
+            &self.device,
+            cmd,
+            &indirect::OpaqueDrawParams {
+                chunk_descriptor_set: chunk_ds,
+                vp_cols: &vp_cols,
                 game_time,
-                self.query_pool,
-                None,
-            );
+                query_pool: self.query_pool,
+                opaque_end_ts: None,
+            },
+        );
 
         // â”€â”€ UI overlay pass â”€â”€
         unsafe {
@@ -3364,22 +3296,6 @@ impl Renderer {
             None,
             None,
         );
-
-        // SSAO depth barrier for capture.
-        if self.ssao_params[3] > 0.5 {
-            if let Some(ref depth_img) = self.depth {
-                crate::texture::transition_image_layout(
-                    device,
-                    cmd,
-                    depth_img.image,
-                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    vk::ImageAspectFlags::DEPTH,
-                    1,
-                    1,
-                );
-            }
-        }
 
         // â”€â”€ Post pass (capture) â”€â”€
         self.record_post_pass(device, cmd, image_index, None);
@@ -3698,7 +3614,6 @@ impl Renderer {
         self.particle_manager.len()
     }
 
-    /// Record the held item pass: draw held items with ALWAYS depth compare.
     fn record_held_item_pass(
         &self,
         device: &ash::Device,
@@ -3749,179 +3664,6 @@ impl Renderer {
         }
     }
 
-    fn record_shadow_pass(
-        &self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        shadow_end_timestamp_query: Option<u32>,
-    ) {
-        if !self.shadow_active {
-            // The timestamp pool readback waits for every slot, so publish the
-            // shadow-end slot even on a skipped pass or the capture/bench run
-            // blocks forever on an unwritten query.
-            if let Some(query) = shadow_end_timestamp_query {
-                unsafe {
-                    device.cmd_write_timestamp(
-                        cmd,
-                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                        self.query_pool,
-                        query,
-                    );
-                }
-            }
-            return;
-        }
-
-        let shadow_extent = vk::Extent2D {
-            width: 2048,
-            height: 2048,
-        };
-        let shadow_vp = vk::Viewport::default()
-            .x(0.0)
-            .y(0.0)
-            .width(2048.0)
-            .height(2048.0)
-            .min_depth(0.0)
-            .max_depth(1.0);
-        let shadow_scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: shadow_extent,
-        };
-        let vertex_stride = std::mem::size_of::<crate::Vertex>() as vk::DeviceSize;
-        for cascade in 0..4u32 {
-            let clear_values = [vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
-            }];
-            let shadow_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(self.shadow_render_pass)
-                .framebuffer(self.shadow_framebuffers[cascade as usize])
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: shadow_extent,
-                })
-                .clear_values(&clear_values);
-            unsafe {
-                device.cmd_begin_render_pass(cmd, &shadow_begin, vk::SubpassContents::INLINE);
-                device.cmd_set_viewport(cmd, 0, &[shadow_vp]);
-                device.cmd_set_scissor(cmd, 0, &[shadow_scissor]);
-                device.cmd_bind_pipeline(
-                    cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.shadow_pipeline,
-                );
-
-                let vp = self.shadow_ubo_data.cascade_vps[cascade as usize];
-                // Every loaded caster is submitted to every cascade. The
-                // per-cascade frustum rejection here was dropping all casters
-                // from the outer cascades (their orthographic light frustum
-                // does not follow the OpenGL-style plane extraction used by
-                // `Frustum`), which left those shadow layers empty. At this
-                // scene size the pass is only ~0.1 ms; correctness wins.
-                {
-                    let gpu = &self.gpu_driven;
-                    let (mega_vbo, mega_ibo) = gpu.mega_buffers();
-                    let vbo = [mega_vbo];
-                    device.cmd_bind_vertex_buffers(cmd, 0, &vbo, &[0]);
-                    device.cmd_bind_index_buffer(
-                        cmd,
-                        mega_ibo,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    gpu.for_each_shadow_caster(
-                        |pos, vbo_offset, ibo_offset, index_count, _cutout| {
-                            if !self.config.shadow_enabled {
-                                return;
-                            }
-                            let origin = chunk_origin(pos);
-                            let mut push = [0f32; 20];
-                            push[..16].copy_from_slice(&vp);
-                            push[16] = origin.x as f32;
-                            push[17] = origin.y as f32;
-                            push[18] = origin.z as f32;
-                            device.cmd_push_constants(
-                                cmd,
-                                self.shadow_pipeline_layout,
-                                vk::ShaderStageFlags::VERTEX,
-                                0,
-                                bytemuck::cast_slice(&push),
-                            );
-                            device.cmd_draw_indexed(
-                                cmd,
-                                index_count,
-                                1,
-                                (ibo_offset / 4) as u32,
-                                (vbo_offset / vertex_stride) as i32,
-                                0,
-                            );
-                        },
-                    );
-                }
-                device.cmd_end_render_pass(cmd);
-            }
-        }
-
-        // Make the depth writes visible to the chunk fragment shader that
-        // samples the map this frame. The render pass's final layout keeps
-        // the image SHADER_READ_ONLY_OPTIMAL, but the layout transition alone
-        // does not publish the LATE_FRAGMENT_TESTS writes to FRAGMENT_SHADER:
-        // without this barrier the sampler reads stale (usually zero) depth
-        // and every fragment comes out shadowed.
-        let read_barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(self.shadow_image.image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(4),
-            );
-        unsafe {
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[read_barrier],
-            );
-        }
-
-        if let Some(q) = shadow_end_timestamp_query {
-            unsafe {
-                device.cmd_write_timestamp(
-                    cmd,
-                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                    self.query_pool,
-                    q,
-                );
-            }
-        }
-    }
-
-    /// Record the sky pass (full-screen gradient) into `cmd` and then
-    /// re-bind the chunk graphics pipeline + descriptor set so the
-    /// subsequent chunk draws see the right state.
-    ///
-    /// Both `draw_frame` and `capture_frame` need identical sky rendering;
-    /// this is the shared implementation. If `sky_end_timestamp_query` is
-    /// `Some`, a `cmd_write_timestamp` is emitted on `COLOR_ATTACHMENT_OUTPUT`
-    /// after the sky draw (used by the GPU profiling path in `draw_frame`;
-    /// capture skips it).
-    ///
-    /// `chunk_descriptor_set` is restored after the sky draw so the chunk
-    /// pass binds to the right per-frame resources.
     fn record_sky_pass(
         &self,
         device: &ash::Device,
@@ -4109,7 +3851,7 @@ impl Renderer {
     /// `capture_frame` need the same offscreen â†’ swapchain blit; this is
     /// the shared implementation.
     ///
-    /// `post_end_timestamp_query` is `Some(query_offset + 7)` from
+    /// `post_end_timestamp_query` is `Some(query_offset + 6)` from
     /// `draw_frame` (GPU profiling). Capture frames pass `None` because
     /// they don't run the timing pool.
     fn record_post_pass(
@@ -4151,10 +3893,9 @@ impl Renderer {
                 &[self.post_descriptor_sets[image_index as usize]],
                 &[],
             );
-            let mut post_push = [0.0f32; 12];
+            let mut post_push = [0.0f32; 8];
             post_push[0..4].copy_from_slice(&self.post_params);
-            post_push[4..8].copy_from_slice(&self.ssao_params);
-            post_push[8..12].copy_from_slice(&self.proj_params);
+            post_push[4..8].copy_from_slice(&self.proj_params);
             device.cmd_push_constants(
                 cmd,
                 self.post_pipeline_layout,
@@ -4301,6 +4042,7 @@ impl Renderer {
         }
         let ui_index_count = ui.map(|u| self.upload_ui(u)).unwrap_or(0);
         let view_proj = camera.view_projection();
+        self.view_proj_cache = view_proj;
         let vp_cols = view_proj.to_cols_array(); // 16 floats, column-major
         let frustum = Frustum::from_view_projection(view_proj);
         Ok((view_proj, vp_cols, frustum, ui_index_count))
@@ -5130,7 +4872,6 @@ impl Drop for Renderer {
                 device.destroy_fence(f.in_flight_fence, None);
             }
             f.camera_ubo.destroy(device, &self.alloc);
-            f.shadow_ubo.destroy(device, &self.alloc);
             // Tile-remap UBO was added in cluster A so the chunk pipeline
             // layout has set-1 binding 0 wired up; without this destroy it
             // leaks `FRAMES_IN_FLIGHT` host-visible UBOs (each 1024 B + a
@@ -5212,21 +4953,10 @@ impl Drop for Renderer {
             device.destroy_descriptor_pool(self.panorama_descriptor_pool, None);
         }
 
-        // Shadow sampler.
-        unsafe {
-            device.destroy_sampler(self.shadow_sampler, None);
-        }
-
-        // Shadow resources.
-        for &fb in &self.shadow_framebuffers {
-            unsafe { device.destroy_framebuffer(fb, None) };
-        }
-        self.shadow_framebuffers.clear();
-        for &v in &self.shadow_layer_views {
-            unsafe { device.destroy_image_view(v, None) };
-        }
-        self.shadow_layer_views.clear();
-        self.shadow_image.destroy_in_place(device, &self.alloc);
+        // Ray-traced lighting resources.
+        self.voxel_grid.destroy(device, &self.alloc);
+        self.raytrace_ubo.destroy_in_place(device, &self.alloc);
+        self.block_light_ubo.destroy_in_place(device, &self.alloc);
 
         // Offscreen resources.
         for &fb in &self.offscreen_framebuffers {

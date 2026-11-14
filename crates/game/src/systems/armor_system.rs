@@ -240,6 +240,6 @@ mod tests {
         assert_eq!(iron.durability, [165, 240, 225, 195]);
         let diamond = armor_material("diamond_leggings").unwrap();
         assert_eq!(diamond.toughness, 2);
-        assert_eq!(armor_material("stone").is_none(), true);
+        assert!(armor_material("stone").is_none());
     }
 }

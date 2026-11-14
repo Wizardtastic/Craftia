@@ -33,19 +33,33 @@ pub struct ActionResult {
 
 pub struct BlockAction;
 
+/// Where and how the player is interacting this frame.
+pub struct BlockInteraction<'a> {
+    pub world: &'a Arc<World>,
+    pub streamer: &'a ChunkStreamer,
+    /// Camera/eye position the interaction ray starts from.
+    pub eye: glam::Vec3,
+    /// Normalised view direction.
+    pub look_dir: glam::Vec3,
+    pub player_pos: glam::Vec3,
+    pub mode: GameMode,
+}
+
 impl BlockAction {
-    /// Apply this frame's clicks against the world. `eye` is the camera/eye
-    /// position; `look_dir` the view direction. Returns what happened.
+    /// Apply this frame's clicks against the world. Returns what happened.
     pub fn apply(
-        world: &Arc<World>,
-        streamer: &ChunkStreamer,
+        interaction: &BlockInteraction<'_>,
         inventory: &mut SurvivalInventory,
-        eye: glam::Vec3,
-        look_dir: glam::Vec3,
         clicks: Clicks,
-        player_pos: glam::Vec3,
-        mode: GameMode,
     ) -> ActionResult {
+        let BlockInteraction {
+            world,
+            streamer,
+            eye,
+            look_dir,
+            player_pos,
+            mode,
+        } = *interaction;
         let reach = if mode == GameMode::Creative {
             REACH_CREATIVE
         } else {
@@ -210,17 +224,19 @@ mod tests {
         let streamer = ChunkStreamer::spawn(world.clone(), Default::default()).unwrap();
         let mut inventory = SurvivalInventory::new();
         let result = BlockAction::apply(
-            &world,
-            &streamer,
+            &BlockInteraction {
+                world: &world,
+                streamer: &streamer,
+                eye: glam::Vec3::new(5.5, 10.0, 5.5),
+                look_dir: glam::Vec3::new(0.0, -1.0, 0.0),
+                player_pos: glam::Vec3::new(5.5, 50.0, 5.5),
+                mode: GameMode::Creative,
+            },
             &mut inventory,
-            glam::Vec3::new(5.5, 10.0, 5.5),
-            glam::Vec3::new(0.0, -1.0, 0.0),
             Clicks {
                 left: true,
                 right: false,
             },
-            glam::Vec3::new(5.5, 50.0, 5.5),
-            GameMode::Creative,
         );
         assert!(result.broke);
         assert_eq!(world.get_block(5, 5, 5), BlockId::AIR);
@@ -237,17 +253,19 @@ mod tests {
         let streamer = ChunkStreamer::spawn(world.clone(), Default::default()).unwrap();
         let mut inventory = SurvivalInventory::new();
         let result = BlockAction::apply(
-            &world,
-            &streamer,
+            &BlockInteraction {
+                world: &world,
+                streamer: &streamer,
+                eye: glam::Vec3::new(5.5, 10.0, 5.5),
+                look_dir: glam::Vec3::new(0.0, -1.0, 0.0),
+                player_pos: glam::Vec3::new(5.5, 50.0, 5.5),
+                mode: GameMode::Creative,
+            },
             &mut inventory,
-            glam::Vec3::new(5.5, 10.0, 5.5),
-            glam::Vec3::new(0.0, -1.0, 0.0),
             Clicks {
                 left: true,
                 right: false,
             },
-            glam::Vec3::new(5.5, 50.0, 5.5),
-            GameMode::Creative,
         );
         assert!(!result.broke);
         assert_eq!(world.get_block(5, 5, 5), bedrock_id);
@@ -266,17 +284,19 @@ mod tests {
         // Look at the stone from the side (positive X direction). The place
         // position would be (4, 5, 5) which is air — placing should succeed.
         let result = BlockAction::apply(
-            &world,
-            &streamer,
+            &BlockInteraction {
+                world: &world,
+                streamer: &streamer,
+                eye: glam::Vec3::new(0.5, 5.5, 5.5),
+                look_dir: glam::Vec3::new(1.0, 0.0, 0.0),
+                player_pos: glam::Vec3::new(0.5, 50.0, 5.5),
+                mode: GameMode::Creative,
+            },
             &mut inventory,
-            glam::Vec3::new(0.5, 5.5, 5.5),
-            glam::Vec3::new(1.0, 0.0, 0.0),
             Clicks {
                 left: false,
                 right: true,
             },
-            glam::Vec3::new(0.5, 50.0, 5.5),
-            GameMode::Creative,
         );
         assert!(result.placed);
         // The placed block is at hit.block + hit.normal = (5,5,5) + (-1,0,0) = (4,5,5).

@@ -73,24 +73,13 @@ pub(crate) enum GameState {
 
 /// Computed physical lighting parameters for the current game time.
 ///
-/// These feed the renderer's `set_lighting` and drive both the sky shader's
-/// atmospheric model and the chunk shader's sun/sky/torch split. Colours are
-/// linear HDR — the renderer's offscreen target is RGBA16F and the post pass
+/// These feed the renderer's ray-traced lighting and drive the sky shader's
+/// atmospheric model plus every ray-traced shadow/AO/GI/reflection term.
+/// Colours are linear HDR — the offscreen target is RGBA16F and the post pass
 /// applies exposure + ACES tone mapping.
 struct DayParams {
-    /// Normalised direction towards the sun.
-    sun_dir: [f32; 3],
-    /// Direct sun radiance (tint * intensity), zero once the sun sets.
-    sun_color: [f32; 3],
-    /// Smooth 0..1 term: 0 at night, 1 in full daylight. Gates direct sun,
-    /// shadow rays and the sky shader's sun disc.
-    sun_visibility: f32,
-    /// Hemispherical sky irradiance (blue by day, deep navy by night).
-    sky_ambient: [f32; 3],
-    /// Horizon/fog colour.
-    fog: [f32; 3],
-    /// 0 at day, 1 at night. Drives stars/moon and the auto-exposure lift.
-    night: f32,
+    /// Physical sun/moon/sky state fed to the renderer's ray tracer.
+    lighting: voxel_render::RaytraceLighting,
     /// Auto-exposure multiplier applied on top of the user's exposure slider.
     exposure: f32,
 }
@@ -230,8 +219,8 @@ struct EngineInputState {
     pub spawned: bool,
     /// Resolved keybind map: KeyCode → Action.
     pub keybinds: settings::KeybindMap,
-    /// Last sun_dir sent to streamer (avoid redundant sends).
-    pub last_sun_dir: Vec3,
+    /// Chunk the ray-tracing voxel grid is centred on.
+    pub light_grid_center: Option<voxel_core::ChunkPos>,
     /// Last player position sent to streamer focus (avoid redundant sends).
     pub last_focus_pos: Vec3,
 }
@@ -249,7 +238,7 @@ impl EngineInputState {
             running: false,
             spawned: false,
             keybinds,
-            last_sun_dir: Vec3::ZERO,
+            light_grid_center: None,
             last_focus_pos: Vec3::new(f32::MAX, f32::MAX, f32::MAX),
         }
     }
@@ -633,22 +622,18 @@ pub struct EngineConfig {
     pub keybinds: settings::KeybindSettings,
     /// Path to the assets directory (for data-driven block definitions).
     pub assets_path: Option<PathBuf>,
-    /// Enable cascaded shadow mapping.
-    pub shadow_enabled: bool,
-    /// Shadow map resolution per cascade (texels per side).
-    pub shadow_resolution: u32,
     /// HDR tonemapping exposure.
     pub exposure: f32,
     /// Vignette darkening strength at screen edges.
     pub vignette_strength: f32,
-    /// Enable screen-space ambient occlusion.
-    pub ssao_enabled: bool,
-    /// SSAO sampling radius (world-space distance).
-    pub ssao_radius: f32,
-    /// SSAO depth bias to prevent self-occlusion.
-    pub ssao_bias: f32,
-    /// SSAO darkening strength multiplier.
-    pub ssao_strength: f32,
+    /// Ray-tracing quality 0..1 (ray budgets for shadows/AO/GI/reflections).
+    pub raytrace_quality: f32,
+    /// Extra shadow penumbra width in radians (0 = physical angular size).
+    pub raytrace_softness: f32,
+    /// World latitude in degrees (north positive), drives the sun's arc.
+    pub latitude: f32,
+    /// World longitude in degrees (east positive), shifts local solar time.
+    pub longitude: f32,
     /// Global water surface Y (world units). Drives the chunk shader's
     /// caustics path + wet-edge band. Defaults to sea level at chunk Y=0.
     pub water_y: f32,
@@ -938,26 +923,44 @@ impl EngineApp {
             .push_message(format!("Pin: e[{}:{}]", chosen.index, chosen.generation));
     }
 
+    /// Compute the physical sun/moon/sky state for the current game time,
+    /// date and world location. The renderer ray-traces this state per pixel;
+    /// nothing here is baked.
     fn day_params(&self) -> DayParams {
-        let t = (self.gameplay.game_time % self.gameplay.day_length) / self.gameplay.day_length; // 0..1
-        let sun_angle = (t as f32) * std::f32::consts::TAU;
-        let sun_altitude = (sun_angle - std::f32::consts::FRAC_PI_2).sin(); // -1..1
+        use std::f32::consts::{PI, TAU};
 
-        // Slight azimuth tilt so the sun (and its shadows) never travels
-        // exactly along a world axis.
-        let sun_dir = glam::Vec3::new(
-            sun_angle.cos() * 0.3,
-            sun_altitude,
-            sun_angle.sin() * 0.3,
-        )
-        .normalize()
-        .to_array();
+        let day_len = self.gameplay.day_length.max(1.0);
+        let days = self.gameplay.game_time / day_len;
+        let day_index = days.floor();
+        // 0 = midnight, 0.5 = local solar noon.
+        let t = (days - day_index) as f32;
+        let day_of_year = day_index.rem_euclid(365.0) as f32;
+
+        let lat = self.config.latitude.to_radians();
+        // Axial tilt: solar declination for the current day of year.
+        let decl = -23.44f32.to_radians() * ((day_of_year + 10.0) * TAU / 365.0).cos();
+        // Longitude shifts local solar time (15° per hour).
+        let hour_angle = (t - 0.5 + self.config.longitude / 360.0) * TAU;
+
+        let sin_alt = (lat.sin() * decl.sin() + lat.cos() * decl.cos() * hour_angle.cos())
+            .clamp(-1.0, 1.0);
+        let alt = sin_alt.asin();
+        let cos_az = ((decl.sin() - sin_alt * lat.sin())
+            / (alt.cos() * lat.cos()).max(1e-4))
+        .clamp(-1.0, 1.0);
+        let mut az = cos_az.acos(); // 0 = north, PI = south
+        if hour_angle.sin() > 0.0 {
+            az = TAU - az; // afternoon: west of south
+        }
+        // World basis: +X east, +Y up, -Z north.
+        let sun_dir = glam::Vec3::new(az.sin() * alt.cos(), sin_alt, -az.cos() * alt.cos())
+            .normalize();
 
         let smoothstep = |edge0: f32, edge1: f32, x: f32| {
             let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
             t * t * (3.0 - 2.0 * t)
         };
-        let lerp = |a: [f32; 3], b: [f32; 3], t: f32| {
+        let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| {
             [
                 a[0] + (b[0] - a[0]) * t,
                 a[1] + (b[1] - a[1]) * t,
@@ -965,68 +968,86 @@ impl EngineApp {
             ]
         };
 
-        // Two independent ramps:
-        //  - `sun_visibility` reaches zero as the disc dips below the
-        //    horizon and controls direct sunlight / shadow rays / sun disc.
-        //  - `day` is slightly softer and drives the sky palette so twilight
-        //    lingers a little after sunset.
-        let sun_visibility = smoothstep(-0.06, 0.12, sun_altitude);
-        let day = smoothstep(-0.12, 0.28, sun_altitude);
-        let night = 1.0 - smoothstep(-0.22, 0.02, sun_altitude);
+        let day = smoothstep(-0.09, 0.22, sin_alt);
+        let night = 1.0 - smoothstep(-0.20, 0.03, sin_alt);
+        let twilight = (1.0 - day) * smoothstep(-0.20, 0.12, sin_alt);
 
-        // Direct sun radiance. 3.3 in linear HDR reads as a bright but not
-        // clipped noon after the default 0.6 exposure and ACES curve; it
-        // falls to exactly zero at night, which is what makes nights dark
-        // instead of a dimmed copy of day.
-        let intensity = 3.3 * day.powf(0.85);
-        let horizon_tint = [1.0, 0.42, 0.16];
-        let noon_tint = [1.0, 0.96, 0.90];
-        let tint = lerp(horizon_tint, noon_tint, smoothstep(0.0, 0.55, sun_altitude));
-        let sun_color = [
-            tint[0] * intensity,
-            tint[1] * intensity,
-            tint[2] * intensity,
+        // Direct sun radiance (linear HDR). Reddens and dims towards the
+        // horizon as the optical air mass grows.
+        let intensity = 3.4 * smoothstep(-0.02, 0.20, sin_alt);
+        let tint = lerp3(
+            [1.0, 0.38, 0.12],
+            [1.0, 0.96, 0.90],
+            smoothstep(0.0, 0.45, sin_alt),
+        );
+        let sun_color = [tint[0] * intensity, tint[1] * intensity, tint[2] * intensity];
+
+        // Moon: opposite the sun in azimuth, with its own declination tilt,
+        // and a synodic phase cycle (0 = new, 1 = full).
+        let lunar_day = (days + 6.0) / 29.530_588;
+        let lunar_angle = lunar_day.fract() as f32 * TAU;
+        let moon_phase = 0.5 * (1.0 - lunar_angle.cos());
+        let moon_alt = -alt + 0.09 * (day_of_year * TAU / 27.3).sin();
+        let moon_sin = moon_alt.sin();
+        let moon_az = az + PI;
+        let moon_dir = glam::Vec3::new(
+            moon_az.sin() * moon_alt.cos(),
+            moon_sin,
+            -moon_az.cos() * moon_alt.cos(),
+        )
+        .normalize();
+        let moon_up = smoothstep(-0.02, 0.16, moon_sin);
+        let moon_intensity = 0.20 * moon_phase.powf(1.35) * moon_up;
+        let moon_color = [
+            moon_intensity * 0.72,
+            moon_intensity * 0.82,
+            moon_intensity,
         ];
 
-        // Sky irradiance: warm-ish at the horizon, blue overhead, and a
-        // deep navy moonlight floor at night.
-        // Ambient irradiance is the only light reaching shadowed and
-        // overcast surfaces, so it carries most of the readability budget.
-        // Day values are tuned against the 3.3 sun radiance and 0.6 exposure:
-        // canopy shade lands near a third of full sun instead of black. Night
-        // keeps a cool moonlit floor that auto-exposure lifts just enough to
-        // see silhouettes.
-        let day_ambient = [1.35, 1.55, 1.95];
-        let dusk_ambient = [0.55, 0.40, 0.46];
-        let night_ambient = [0.085, 0.105, 0.17];
-        let twilight = (1.0 - day) * sun_visibility;
-        let mut sky_ambient = lerp(night_ambient, day_ambient, day);
+        // Sky radiance: blue zenith, pale horizon by day, amber at twilight,
+        // deep navy at night.
+        let day_zenith = [0.14, 0.33, 0.82];
+        let day_horizon = [0.58, 0.74, 0.98];
+        let dusk_zenith = [0.16, 0.12, 0.26];
+        let dusk_horizon = [0.82, 0.36, 0.16];
+        let night_zenith = [0.010, 0.016, 0.038];
+        let night_horizon = [0.022, 0.030, 0.060];
+
+        let mut zenith = lerp3(night_zenith, day_zenith, day);
+        let mut horizon = lerp3(night_horizon, day_horizon, day);
         for c in 0..3 {
-            sky_ambient[c] += dusk_ambient[c] * twilight * 0.30;
+            zenith[c] += dusk_zenith[c] * twilight * 0.35;
+            horizon[c] += dusk_horizon[c] * twilight * 0.55;
+        }
+        // Moonlight lifts the night sky slightly so shadowed sides read.
+        for c in 0..3 {
+            zenith[c] += moon_color[c] * 0.10;
+            horizon[c] += moon_color[c] * 0.16;
         }
 
-        // Fog follows the sky's horizon: pale blue by day, warm at dusk,
-        // near-black at night.
-        let day_fog = [0.62, 0.78, 0.96];
-        let dusk_fog = [0.78, 0.44, 0.28];
-        let night_fog = [0.010, 0.014, 0.030];
-        let fog = lerp(
-            night_fog,
-            lerp(dusk_fog, day_fog, day),
-            sun_visibility,
-        );
-
-        // Auto-exposure: lift slightly at night so the moonlit world stays
-        // readable, never enough to make night look like day.
-        let exposure = 1.0 + night * 1.10;
+        let fog_color = lerp3(horizon, day_horizon, 0.35);
+        let exposure = 1.0 + night * 0.95;
 
         DayParams {
-            sun_dir,
-            sun_color,
-            sun_visibility,
-            sky_ambient,
-            fog,
-            night,
+            lighting: voxel_render::RaytraceLighting {
+                sun_dir: sun_dir.to_array(),
+                sun_color,
+                sun_angular_radius: 0.00465,
+                moon_dir: moon_dir.to_array(),
+                moon_color,
+                moon_angular_radius: 0.00452,
+                moon_phase,
+                sky_zenith: zenith,
+                sky_horizon: horizon,
+                night,
+                fog_color,
+                fog_density: 1.0,
+                quality: self.config.raytrace_quality.clamp(0.0, 1.0),
+                shadow_softness: self.config.raytrace_softness.max(0.0),
+                reflection_strength: self.config.reflection_strength.clamp(0.0, 1.0),
+                time: self.gameplay.game_time as f32,
+                underwater: false,
+            },
             exposure,
         }
     }

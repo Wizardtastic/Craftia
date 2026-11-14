@@ -26,27 +26,52 @@ pub(super) struct FogUbo {
     pub(super) sun_dir_pad: [f32; 4],
 }
 
-/// Per-frame sky uniform: sun state + ambient + fog, consumed by `sky.frag`.
+/// Per-frame sky uniform: sun/moon state + ambient + fog, consumed by
+/// `sky.frag`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub(super) struct SkyUbo {
     /// xyz = sun direction, w = visibility 0..1.
     pub(super) sun_dir_vis: [f32; 4],
-    /// rgb = sun tint * intensity (HDR), a = unused.
+    /// rgb = sun radiance, a = angular radius (radians).
     pub(super) sun_color: [f32; 4],
-    /// rgb = sky ambient irradiance, a = night factor 0..1.
+    /// xyz = moon direction, w = illuminated fraction (phase).
+    pub(super) moon_dir_phase: [f32; 4],
+    /// rgb = moon radiance, a = angular radius (radians).
+    pub(super) moon_color: [f32; 4],
+    /// rgb = night ambient floor, a = night factor 0..1.
     pub(super) sky_ambient: [f32; 4],
-    /// rgb = fog colour, a = game time in seconds (star twinkle).
+    /// rgb = fog colour, a = game time in seconds.
     pub(super) fog_time: [f32; 4],
 }
 
-/// Per-frame shadow uniform for cascaded shadow maps (binding 4 of the chunk set).
+/// Per-frame ray-tracing uniform (chunk descriptor binding 4).
+///
+/// Layout matches `Raytrace` in `shaders/chunk.frag` exactly: ten `vec4`s.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
-pub(super) struct ShadowUbo {
-    pub(super) cascade_vps: [[f32; 16]; 4],
-    pub(super) cascade_splits: [f32; 4],
-    pub(super) light_dir_and_bias: [f32; 4],
+pub(super) struct RaytraceUbo {
+    /// xyz = direction to sun, w = visibility 0..1.
+    pub(super) sun_dir_vis: [f32; 4],
+    /// rgb = sun radiance, a = angular radius in radians.
+    pub(super) sun_color_radius: [f32; 4],
+    /// xyz = direction to moon, w = illuminated fraction.
+    pub(super) moon_dir_phase: [f32; 4],
+    /// rgb = moon radiance, a = angular radius in radians.
+    pub(super) moon_color_radius: [f32; 4],
+    /// rgb = sky zenith radiance, a = night factor.
+    pub(super) sky_zenith: [f32; 4],
+    /// rgb = sky horizon radiance, a = game time.
+    pub(super) sky_horizon: [f32; 4],
+    /// rgb = fog colour, a = fog density scale.
+    pub(super) fog_density: [f32; 4],
+    /// xyz = voxel grid world origin, w unused.
+    pub(super) grid_origin: [f32; 4],
+    /// xyz = voxel grid extent, w = ray-tracing quality 0..1.
+    pub(super) grid_extent: [f32; 4],
+    /// x = reflection strength, y = shadow softness, z = AO strength,
+    /// w = game time.
+    pub(super) params: [f32; 4],
 }
 
 /// Per-frame tile remap (set 1, binding 0). Maps canonical tile IDs to
@@ -96,6 +121,9 @@ pub(super) struct ReflectionUbo {
     /// (0/1), w = SSR-valid flag (0 when no single-sample scene depth exists,
     /// e.g. MSAA without depth-stencil-resolve support → sky-only fallback).
     pub(super) proj_misc: [f32; 4],
+    /// Current frame's view-projection matrix (column-major), used by the
+    /// fragment shader's SSR reprojection.
+    pub(super) view_proj: [[f32; 4]; 4],
 }
 
 // ── Render pass / descriptor / pipeline helpers ─────────────────────────
@@ -479,6 +507,9 @@ pub(super) fn create_descriptor_set_layout(
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        // Binding 3 = GPU voxel grid (R8_UINT 3D texture). The fragment
+        // shader ray marches this for shadows, AO, sky GI, reflections and
+        // emissive light gathering.
         vk::DescriptorSetLayoutBinding::default()
             .binding(3)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -528,6 +559,14 @@ pub(super) fn create_descriptor_set_layout(
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        // Binding 9 = per-block ray-tracing material table (opacity kind,
+        // emissive level/colour, roughness), indexed by the block ID stored in
+        // the voxel grid.
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(9)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
     ];
     let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     unsafe { device.create_descriptor_set_layout(&create_info, None) }
@@ -539,14 +578,13 @@ pub(super) fn create_descriptor_pool(
     max_sets: usize,
 ) -> Result<vk::DescriptorPool> {
     let pool_sizes = [
-        // 6 chunk UBOs (camera + fog + shadow + material table + reflection
-        // + tile_remap) per frame set. The extra UBO is the set-1 tile_remap
-        // binding the chunk fragment shader reads, see `TileRemapUbo`.
+        // 7 chunk UBOs per frame set: camera, fog, raytrace, material table,
+        // reflection, block-light table and the set-1 tile remap.
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: (max_sets * 6) as u32,
+            descriptor_count: (max_sets * 7) as u32,
         },
-        // 4 combined image samplers per frame set (atlas + shadow +
+        // 4 combined image samplers per frame set (atlas + voxel grid +
         // scene_opaque_color + scene_opaque_depth).
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -583,9 +621,9 @@ pub(super) struct DescriptorResources {
     pub fog_buffer: vk::Buffer,
     pub atlas_view: vk::ImageView,
     pub atlas_sampler: vk::Sampler,
-    pub shadow_view: vk::ImageView,
-    pub shadow_sampler: vk::Sampler,
-    pub shadow_buffer: vk::Buffer,
+    pub voxel_view: vk::ImageView,
+    pub voxel_sampler: vk::Sampler,
+    pub raytrace_buffer: vk::Buffer,
     pub material_table_buffer: vk::Buffer,
     pub material_table_size: vk::DeviceSize,
     pub scene_opaque_view: vk::ImageView,
@@ -593,6 +631,8 @@ pub(super) struct DescriptorResources {
     pub scene_depth_view: vk::ImageView,
     pub scene_depth_sampler: vk::Sampler,
     pub reflection_buffer: vk::Buffer,
+    pub block_light_buffer: vk::Buffer,
+    pub block_light_size: vk::DeviceSize,
 }
 
 pub(super) fn update_descriptor_set(
@@ -605,9 +645,9 @@ pub(super) fn update_descriptor_set(
         fog_buffer,
         atlas_view,
         atlas_sampler,
-        shadow_view,
-        shadow_sampler,
-        shadow_buffer,
+        voxel_view,
+        voxel_sampler,
+        raytrace_buffer,
         material_table_buffer,
         material_table_size,
         scene_opaque_view,
@@ -615,6 +655,8 @@ pub(super) fn update_descriptor_set(
         scene_depth_view,
         scene_depth_sampler,
         reflection_buffer,
+        block_light_buffer,
+        block_light_size,
     } = res;
     let cam_info = vk::DescriptorBufferInfo::default()
         .buffer(camera_buffer)
@@ -624,10 +666,14 @@ pub(super) fn update_descriptor_set(
         .buffer(fog_buffer)
         .offset(0)
         .range(std::mem::size_of::<FogUbo>() as u64);
-    let shadow_info = vk::DescriptorBufferInfo::default()
-        .buffer(shadow_buffer)
+    let raytrace_info = vk::DescriptorBufferInfo::default()
+        .buffer(raytrace_buffer)
         .offset(0)
-        .range(std::mem::size_of::<ShadowUbo>() as u64);
+        .range(std::mem::size_of::<RaytraceUbo>() as u64);
+    let block_light_info = vk::DescriptorBufferInfo::default()
+        .buffer(block_light_buffer)
+        .offset(0)
+        .range(block_light_size);
     let material_info = vk::DescriptorBufferInfo::default()
         .buffer(material_table_buffer)
         .offset(0)
@@ -640,10 +686,10 @@ pub(super) fn update_descriptor_set(
         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
         .image_view(atlas_view)
         .sampler(atlas_sampler);
-    let shadow_img_info = vk::DescriptorImageInfo::default()
-        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-        .image_view(shadow_view)
-        .sampler(shadow_sampler);
+    let voxel_img_info = vk::DescriptorImageInfo::default()
+        .image_layout(vk::ImageLayout::GENERAL)
+        .image_view(voxel_view)
+        .sampler(voxel_sampler);
     let scene_opaque_info = vk::DescriptorImageInfo::default()
         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
         .image_view(scene_opaque_view)
@@ -656,8 +702,9 @@ pub(super) fn update_descriptor_set(
     let cam_infos = [cam_info];
     let atlas_infos = [atlas_info];
     let fog_infos = [fog_info];
-    let shadow_img_infos = [shadow_img_info];
-    let shadow_buf_infos = [shadow_info];
+    let voxel_img_infos = [voxel_img_info];
+    let raytrace_buf_infos = [raytrace_info];
+    let block_light_buf_infos = [block_light_info];
     let material_buf_infos = [material_info];
     let scene_opaque_infos = [scene_opaque_info];
     let scene_depth_infos = [scene_depth_info];
@@ -683,12 +730,12 @@ pub(super) fn update_descriptor_set(
             .dst_set(set)
             .dst_binding(3)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&shadow_img_infos),
+            .image_info(&voxel_img_infos),
         vk::WriteDescriptorSet::default()
             .dst_set(set)
             .dst_binding(4)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .buffer_info(&shadow_buf_infos),
+            .buffer_info(&raytrace_buf_infos),
         vk::WriteDescriptorSet::default()
             .dst_set(set)
             .dst_binding(5)
@@ -709,6 +756,11 @@ pub(super) fn update_descriptor_set(
             .dst_binding(8)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&reflection_buf_infos),
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(9)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&block_light_buf_infos),
     ];
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
@@ -821,8 +873,6 @@ pub(super) struct GraphicsPipelineConfig<'a> {
     pub fs_spirv: &'a [u8],
     pub msaa_samples: vk::SampleCountFlags,
     pub depth_write: bool,
-    /// Bakes `SHADOW_ENABLED` (constant_id 0) into the fragment shader.
-    pub shadow_enabled: bool,
 }
 
 pub(super) fn create_graphics_pipeline(
@@ -838,7 +888,6 @@ pub(super) fn create_graphics_pipeline(
         fs_spirv,
         msaa_samples,
         depth_write,
-        shadow_enabled,
     } = config;
     let vert_spv: &[u8] = vs_spirv;
     let frag_spv: &[u8] = fs_spirv;
@@ -859,20 +908,6 @@ pub(super) fn create_graphics_pipeline(
     }
     .map_err(|e| anyhow!("frag shader module: {e:?}"))?;
 
-    // `SHADOW_ENABLED` gates the sun-shadow term in chunk.frag. Cast shadows
-    // are ray-traced into the vertex data by the chunk mesher, so the shader
-    // samples no shadow map at all — the constant only exists so the shading
-    // path stays identical across pipeline variants. The user-facing toggle
-    // travels in `FogUbo::sun_dir_pad.w` and needs no pipeline rebuild.
-    let _ = shadow_enabled;
-    let shadow_enabled = [1u32];
-    let spec_map = [vk::SpecializationMapEntry::default()
-        .constant_id(0)
-        .size(std::mem::size_of::<u32>())
-        .offset(0)];
-    let spec_info = vk::SpecializationInfo::default()
-        .map_entries(&spec_map)
-        .data(bytemuck::cast_slice(&shadow_enabled));
     let stages = [
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
@@ -881,8 +916,7 @@ pub(super) fn create_graphics_pipeline(
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(frag_module)
-            .name(c"main")
-            .specialization_info(&spec_info),
+            .name(c"main"),
     ];
 
     let vertex_binding = vk::VertexInputBindingDescription::default()
@@ -903,18 +937,8 @@ pub(super) fn create_graphics_pipeline(
         vk::VertexInputAttributeDescription::default()
             .binding(0)
             .location(2)
-            .format(vk::Format::R32_SFLOAT)
-            .offset(20),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(3)
             .format(vk::Format::R32_UINT)
-            .offset(24),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(4)
-            .format(vk::Format::R8G8B8A8_UNORM)
-            .offset(28),
+            .offset(20),
     ];
     let vertex_bindings = [vertex_binding];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
@@ -1026,6 +1050,9 @@ pub(super) fn create_ui_descriptor_set_layout(
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         // Binding 3 = UI atlas: procedurally generated panel/button/slot
         // chrome (see `voxel_render::ui_atlas`). Drawn via tex_id = 3.
+        // Binding 3 = GPU voxel grid (R8_UINT 3D texture). The fragment
+        // shader ray marches this for shadows, AO, sky GI, reflections and
+        // emissive light gathering.
         vk::DescriptorSetLayoutBinding::default()
             .binding(3)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -1668,199 +1695,6 @@ pub(super) fn create_transparent_render_pass(
         .map_err(|e| anyhow!("create_transparent_render_pass: {e:?}"))
 }
 
-pub(super) fn create_shadow_render_pass(
-    device: &ash::Device,
-    depth_format: vk::Format,
-) -> Result<vk::RenderPass> {
-    let depth_attachment = vk::AttachmentDescription::default()
-        .format(depth_format)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
-        .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-
-    let depth_ref = vk::AttachmentReference::default()
-        .attachment(0)
-        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-
-    let subpass = vk::SubpassDescription::default()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .depth_stencil_attachment(&depth_ref);
-
-    let dependency = vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-        )
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_stage_mask(
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-        )
-        .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
-
-    let attachments = [depth_attachment];
-    let subpasses = [subpass];
-    let dependencies = [dependency];
-    let create_info = vk::RenderPassCreateInfo::default()
-        .attachments(&attachments)
-        .subpasses(&subpasses)
-        .dependencies(&dependencies);
-
-    unsafe { device.create_render_pass(&create_info, None) }
-        .map_err(|e| anyhow!("create_shadow_render_pass: {e:?}"))
-}
-
-pub(super) fn create_shadow_pipeline_layout(device: &ash::Device) -> Result<vk::PipelineLayout> {
-    let push_range = vk::PushConstantRange::default()
-        .stage_flags(vk::ShaderStageFlags::VERTEX)
-        .offset(0)
-        .size(80);
-    let push_ranges = [push_range];
-    let create_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push_ranges);
-    unsafe { device.create_pipeline_layout(&create_info, None) }
-        .map_err(|e| anyhow!("create_shadow_pipeline_layout: {e:?}"))
-}
-
-pub(super) fn create_shadow_pipeline(
-    device: &ash::Device,
-    render_pass: vk::RenderPass,
-    layout: vk::PipelineLayout,
-    vs_spirv: &[u8],
-    fs_spirv: &[u8],
-) -> Result<vk::Pipeline> {
-    let vert_spv: &[u8] = vs_spirv;
-    let frag_spv: &[u8] = fs_spirv;
-    let vert_code = spirv_to_u32(vert_spv);
-    let frag_code = spirv_to_u32(frag_spv);
-    let vert_module = unsafe {
-        device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(&vert_code),
-            None,
-        )
-    }
-    .map_err(|e| anyhow!("shadow vert shader: {e:?}"))?;
-    let frag_module = unsafe {
-        device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::default().code(&frag_code),
-            None,
-        )
-    }
-    .map_err(|e| anyhow!("shadow frag shader: {e:?}"))?;
-
-    let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_module)
-            .name(c"main"),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(frag_module)
-            .name(c"main"),
-    ];
-
-    let vertex_binding = vk::VertexInputBindingDescription::default()
-        .binding(0)
-        .stride(std::mem::size_of::<crate::Vertex>() as u32)
-        .input_rate(vk::VertexInputRate::VERTEX);
-    let vertex_attrs = [
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(0)
-            .format(vk::Format::R32G32B32_SFLOAT)
-            .offset(0),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(1)
-            .format(vk::Format::R32G32_SFLOAT)
-            .offset(12),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(2)
-            .format(vk::Format::R32_SFLOAT)
-            .offset(20),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(3)
-            .format(vk::Format::R32_UINT)
-            .offset(24),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(4)
-            .format(vk::Format::R8G8B8A8_UNORM)
-            .offset(28),
-    ];
-    let vertex_bindings = [vertex_binding];
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-        .vertex_binding_descriptions(&vertex_bindings)
-        .vertex_attribute_descriptions(&vertex_attrs);
-
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-        .viewport_count(1)
-        .scissor_count(1);
-
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-        .depth_clamp_enable(false)
-        .rasterizer_discard_enable(false)
-        .polygon_mode(vk::PolygonMode::FILL)
-        // No culling: voxel faces are single-sided quads, so culling either
-        // side drops real casters from the depth map and lets light leak
-        // through them. The depth test already keeps the nearest surface.
-        .cull_mode(vk::CullModeFlags::NONE)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .line_width(1.0)
-        .depth_bias_enable(true)
-        .depth_bias_constant_factor(2.0)
-        .depth_bias_slope_factor(1.5);
-
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(true)
-        .depth_write_enable(true)
-        .depth_compare_op(vk::CompareOp::LESS)
-        .depth_bounds_test_enable(false)
-        .stencil_test_enable(false);
-
-    let color_blend = vk::PipelineColorBlendStateCreateInfo::default().logic_op_enable(false);
-
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-
-    let create_info = vk::GraphicsPipelineCreateInfo::default()
-        .stages(&stages)
-        .vertex_input_state(&vertex_input)
-        .input_assembly_state(&input_assembly)
-        .viewport_state(&viewport_state)
-        .rasterization_state(&rasterizer)
-        .multisample_state(&multisampling)
-        .depth_stencil_state(&depth_stencil)
-        .color_blend_state(&color_blend)
-        .dynamic_state(&dynamic)
-        .layout(layout)
-        .render_pass(render_pass)
-        .subpass(0);
-
-    let result = unsafe {
-        device.create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
-    };
-    unsafe {
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(frag_module, None);
-    }
-    let pipelines = result.map_err(|(_p, e)| anyhow!("create_shadow_pipeline: {e:?}"))?;
-    Ok(pipelines.into_iter().next().unwrap())
-}
-
 pub(super) fn create_post_render_pass(
     device: &ash::Device,
     color_format: vk::Format,
@@ -1908,7 +1742,7 @@ pub(super) fn create_post_pipeline_layout(
     device: &ash::Device,
     descriptor_set_layout: vk::DescriptorSetLayout,
 ) -> Result<vk::PipelineLayout> {
-    // 48 bytes: vec4 params (16) + vec4 ssao (16) + vec4 proj (16).
+    // 32 bytes: vec4 params (16) + vec4 proj (16).
     let push_range = vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
@@ -2284,28 +2118,3 @@ pub(super) fn update_particle_descriptor_set(
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
 
-/// Create a depth-only occlusion query pipeline for AABB proxy cubes.
-///
-/// Uses the shared `pipeline_layout` (96-byte push constants). No vertex
-/// input (procedural cube from `gl_VertexIndex`), no colour writes, depth
-/// test + write enabled. The fragment shader is a no-op.
-pub(super) fn create_shadow_layer_view(
-    device: &ash::Device,
-    image: vk::Image,
-    format: vk::Format,
-    base_array_layer: u32,
-) -> Result<vk::ImageView> {
-    let create_info = vk::ImageViewCreateInfo::default()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(format)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::DEPTH,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer,
-            layer_count: 1,
-        });
-    unsafe { device.create_image_view(&create_info, None) }
-        .map_err(|e| anyhow!("create_shadow_layer_view: {e:?}"))
-}

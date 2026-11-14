@@ -17,11 +17,7 @@
 //!       [2 bytes]  Palette length p as u16 LE (max 4096)
 //!       [2p bytes] Palette entries as u16 LE
 //!       [4096 bytes] u8 indices into palette
-//!     [4096 bytes] Sunlight u8 × 4096
-//!     [4096 bytes] Torchlight u8 × 4096
 //!     [4096 bytes] Water level u8 × 4096
-//!     [v3 and later only]
-//!     [4096 * 4 bytes] Packed RGBA8 torchlight color u32 × 4096 little-endian
 //! ```
 //!
 //! Format versioning
@@ -30,10 +26,10 @@
 //! v2: added `torchlight_color` in chunk save? Actually v2 was the version that
 //!     did NOT save torchlight colour, which is why reloads reverted all
 //!     voxels to warm white.
-//! v3: **current**. Persists packed RGBA8 torchlight colour for every voxel
-//!     after torchlight/water_level. v2 saves still load cleanly (the new
-//!     field defaults to all-zero, which `Chunk::get_combined_light_color`
-//!     transparently translates to warm white — same behaviour as before).
+//! v3: persisted packed RGBA8 torchlight colour.
+//! v4: **current**. Lighting is fully dynamic on the GPU, so only block data +
+//!     water level are stored. Older saves still load; their baked light arrays
+//!     are skipped.
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -48,7 +44,7 @@ use crate::error::{Result, WorldError};
 use crate::world::World;
 
 const MAGIC: &[u8; 9] = b"VOXELSAV2";
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 
 /// Save the entire world to a directory. Each chunk is a separate compressed
 /// blob keyed by (cx, cy, cz).
@@ -130,7 +126,7 @@ pub fn load_world(path: &Path) -> Result<(i32, Vec<(voxel_core::ChunkPos, Chunk)
                         let chunk_path = entry.path().join("chunk.bin");
                         if chunk_path.exists() {
                             let mut cf = BufReader::new(File::open(&chunk_path)?);
-                            let chunk = read_chunk(&mut cf)?;
+                            let chunk = read_chunk(&mut cf, version)?;
                             chunks.push((voxel_core::ChunkPos::new(cx, cy, cz), chunk));
                         }
                     }
@@ -178,23 +174,16 @@ fn write_chunk(chunk: &Chunk, writer: &mut impl Write) -> Result<()> {
         }
     }
 
-    // Write sunlight, torchlight, water_level.
-    encoder.write_all(chunk.sunlight_data())?;
-    encoder.write_all(chunk.torchlight_data())?;
+    // v4: water level only. Lighting is no longer stored — the GPU ray
+    // tracer derives everything from the block data at runtime.
     encoder.write_all(chunk.water_level_data())?;
-
-    // Write packed RGBA8 torchlight colour (v3+). Saved as little-endian
-    // u32 × 4096 so a bytemuck::cast_slice of &[u32] produces the exact
-    // byte pattern `R8G8B8A8_UNORM` upload expects.
-    let tc_bytes: &[u8] = bytemuck::cast_slice(chunk.torchlight_color_data());
-    encoder.write_all(tc_bytes)?;
 
     encoder.finish()?;
     Ok(())
 }
 
 /// Read a single chunk from a reader (compressed).
-fn read_chunk(reader: &mut impl Read) -> Result<Chunk> {
+fn read_chunk(reader: &mut impl Read, version: u32) -> Result<Chunk> {
     let mut decoder = DeflateDecoder::new(reader);
 
     let mut mode_buf = [0u8; 1];
@@ -237,21 +226,13 @@ fn read_chunk(reader: &mut impl Read) -> Result<Chunk> {
         chunk.restore_flat(blocks);
     }
 
-    // Read sunlight.
-    let mut sunlight = vec![0u8; voxel_core::CHUNK_CUBED];
-    decoder.read_exact(&mut sunlight)?;
-    for v in sunlight.iter_mut() {
-        *v = (*v).min(15);
+    // v1..v3 stored baked sunlight + torchlight. Skip those arrays; v3 also
+    // appended a packed torchlight-colour array after the water level.
+    if version < 4 {
+        let mut legacy = vec![0u8; voxel_core::CHUNK_CUBED * 2];
+        decoder.read_exact(&mut legacy)?;
+        let _ = &legacy;
     }
-    chunk.restore_sunlight(sunlight);
-
-    // Read torchlight.
-    let mut torchlight = vec![0u8; voxel_core::CHUNK_CUBED];
-    decoder.read_exact(&mut torchlight)?;
-    for v in torchlight.iter_mut() {
-        *v = (*v).min(15);
-    }
-    chunk.restore_torchlight(torchlight);
 
     // Read water_level.
     let mut water_level = vec![0u8; voxel_core::CHUNK_CUBED];
@@ -261,27 +242,9 @@ fn read_chunk(reader: &mut impl Read) -> Result<Chunk> {
     }
     chunk.restore_water_level(water_level);
 
-    // Read packed RGBA8 torchlight colour (added in v3). Older v2 saves
-    // don't have this field — when EOF hits before we've read it, we leave
-    // the colour at all-zero (warm white via `Chunk::get_combined_light_color`).
-    //
-    // We use `try_read_exact`-style fallback: read into a stack buffer, only
-    // commit if we got all the bytes. This makes v2 loads degrade gracefully
-    // instead of erroring on EOF.
-    let mut tc_bytes = vec![0u8; voxel_core::CHUNK_CUBED * 4];
-    match decoder.read_exact(&mut tc_bytes) {
-        Ok(()) => {
-            let mut tc = vec![0u32; voxel_core::CHUNK_CUBED];
-            bytemuck::cast_slice_mut(&mut tc[..]).copy_from_slice(&tc_bytes);
-            chunk.restore_torchlight_color(tc);
-        }
-        Err(_) => {
-            // EOF / partial read: assume v2 layout; leave colour as zero.
-            log::debug!(
-                "save v2 chunk detected (no torchlight_color field); restoring with warm-white default"
-            );
-            chunk.restore_torchlight_color(vec![0u32; voxel_core::CHUNK_CUBED]);
-        }
+    if version == 3 {
+        let mut legacy_color = vec![0u8; voxel_core::CHUNK_CUBED * 4];
+        let _ = decoder.read_exact(&mut legacy_color);
     }
 
     Ok(chunk)
@@ -301,7 +264,7 @@ mod tests {
         let mut buf = Vec::new();
         write_chunk(&chunk, &mut buf).unwrap();
 
-        let loaded = read_chunk(&mut buf.as_slice()).unwrap();
+        let loaded = read_chunk(&mut buf.as_slice(), FORMAT_VERSION).unwrap();
         assert_eq!(loaded.get(0, 0, 0), BlockId(2));
         assert_eq!(loaded.get(5, 10, 15), BlockId(5));
         assert!(loaded.get(1, 0, 0).is_air());
@@ -319,74 +282,22 @@ mod tests {
         let mut buf = Vec::new();
         write_chunk(&chunk, &mut buf).unwrap();
 
-        let loaded = read_chunk(&mut buf.as_slice()).unwrap();
+        let loaded = read_chunk(&mut buf.as_slice(), FORMAT_VERSION).unwrap();
         assert_eq!(loaded.get(0, 0, 0), BlockId(3));
         assert_eq!(loaded.get(5, 0, 0), BlockId(3));
         assert_eq!(loaded.get(0, 1, 0), BlockId(7));
     }
 
     #[test]
-    fn save_load_light_and_water() {
+    fn save_load_water() {
         let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0));
-        chunk.set_sunlight(3, 3, 3, 15);
-        chunk.set_torchlight(5, 5, 5, 12);
         chunk.set_water_level(7, 7, 7, 6);
 
         let mut buf = Vec::new();
         write_chunk(&chunk, &mut buf).unwrap();
 
-        let loaded = read_chunk(&mut buf.as_slice()).unwrap();
-        assert_eq!(loaded.get_sunlight(3, 3, 3), 15);
-        assert_eq!(loaded.get_torchlight(5, 5, 5), 12);
+        let loaded = read_chunk(&mut buf.as_slice(), FORMAT_VERSION).unwrap();
         assert_eq!(loaded.get_water_level(7, 7, 7), 6);
-    }
-
-    #[test]
-    fn save_load_torchlight_color_roundtrip_v3() {
-        // Regression test for v3 save format: packed RGBA8 torchlight color
-        // per voxel must survive write_chunk/read_chunk unchanged so colored
-        // lighting actually persists across save/load (previously `torchlight_color`
-        // was completely absent from the save file, so reloaded worlds reverted
-        // every voxel to warm white).
-        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0));
-        // A few saturated test colors. Each is packed RGBA8 little-endian.
-        let blue = crate::chunk::pack_rgb(60, 120, 255);
-        let red = crate::chunk::pack_rgb(255, 40, 40);
-        let green = crate::chunk::pack_rgb(40, 255, 80);
-        chunk.set_torchlight_color(2, 3, 4, blue);
-        chunk.set_torchlight_color(5, 6, 7, red);
-        chunk.set_torchlight_color(8, 9, 10, green);
-        // Pair one cell with a non-zero torchlight so combined-light lookup
-        // picks torchlight over the warm-white default.
-        chunk.set_torchlight(2, 3, 4, 12);
-        chunk.set_torchlight(5, 6, 7, 8);
-        chunk.set_torchlight(8, 9, 10, 6);
-
-        let mut buf = Vec::new();
-        write_chunk(&chunk, &mut buf).unwrap();
-
-        let loaded = read_chunk(&mut buf.as_slice()).unwrap();
-        assert_eq!(
-            loaded.get_torchlight_color(2, 3, 4),
-            blue,
-            "blue torchlight color lost"
-        );
-        assert_eq!(
-            loaded.get_torchlight_color(5, 6, 7),
-            red,
-            "red torchlight color lost"
-        );
-        assert_eq!(
-            loaded.get_torchlight_color(8, 9, 10),
-            green,
-            "green torchlight color lost"
-        );
-        // Untouched cells must still be the 0-sentinel (warm-white fallback).
-        assert_eq!(loaded.get_torchlight_color(0, 0, 0), 0);
-        // Combined-light lookup should return the explicit color when
-        // torchlight dominates, warm white when sunlight dominates.
-        assert_eq!(loaded.get_combined_light_color(2, 3, 4), blue);
-        assert_eq!(loaded.get_combined_light_color(5, 6, 7), red);
     }
 
     #[test]
@@ -426,7 +337,7 @@ mod tests {
         }
         let mut buf = Vec::new();
         write_chunk(&chunk, &mut buf).unwrap();
-        let loaded = read_chunk(&mut buf.as_slice()).unwrap();
+        let loaded = read_chunk(&mut buf.as_slice(), FORMAT_VERSION).unwrap();
         for i in 0..300u16 {
             let x = (i % 16) as i32;
             let y = ((i / 16) % 16) as i32;
@@ -443,13 +354,13 @@ mod tests {
     fn read_chunk_invalid_mode_errors() {
         // Write a chunk with mode byte = 99 (invalid).
         let buf: Vec<u8> = vec![99u8];
-        assert!(read_chunk(&mut buf.as_slice()).is_err());
+        assert!(read_chunk(&mut buf.as_slice(), FORMAT_VERSION).is_err());
     }
 
     #[test]
     fn read_chunk_truncated_errors() {
         // Empty input.
         let buf: Vec<u8> = vec![];
-        assert!(read_chunk(&mut buf.as_slice()).is_err());
+        assert!(read_chunk(&mut buf.as_slice(), FORMAT_VERSION).is_err());
     }
 }

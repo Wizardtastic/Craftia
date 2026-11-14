@@ -7,10 +7,8 @@
 const float ATLAS_TILES = 16.0;
 
 layout(location = 0) in vec2 frag_uv;
-layout(location = 1) in float frag_light;
-layout(location = 2) in float frag_fog;
-layout(location = 3) flat in uint frag_tile;
-layout(location = 4) flat in vec4 frag_light_color;
+layout(location = 1) in float frag_fog;
+layout(location = 2) flat in uint frag_tile;
 
 layout(location = 0) out vec4 out_color;
 
@@ -36,12 +34,11 @@ void main() {
         discard;
     }
 
-    // `frag_light` is sky visibility; torch level rides in the tint's alpha.
-    float sky_vis = clamp(frag_light, 0.0, 1.0);
-    float torch_level = frag_light_color.a;
-
-    vec3 lighting = (fog.sun_color.rgb * fog.sun_color.a + fog.sky_ambient.rgb) * sky_vis
-                  + frag_light_color.rgb * (torch_level * torch_level) * 2.4;
+    // Entities are lit by the same dynamic sun/moon + sky irradiance as the
+    // world. They have no world-space normal in this forward path, so use a
+    // soft wrapped lambert term.
+    vec3 lighting = fog.sun_color.rgb * fog.sun_color.a * 0.72
+                  + fog.sky_ambient.rgb;
     // Same sRGB → linear albedo conversion as chunk.frag.
     vec3 albedo = pow(tex.rgb, vec3(2.2));
     vec3 final_color = mix(albedo * lighting, fog.color_and_density.rgb, frag_fog);

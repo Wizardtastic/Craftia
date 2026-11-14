@@ -19,15 +19,11 @@
 
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec2 in_uv;
-layout(location = 2) in float in_light;
-layout(location = 3) in uint in_tile;
-layout(location = 4) in vec4 in_light_color;
+layout(location = 2) in uint in_tile;
 
 layout(location = 0) out vec2 frag_uv;
-layout(location = 1) out float frag_light;
-layout(location = 2) out float frag_fog;
-layout(location = 3) flat out uint frag_tile;
-layout(location = 4) flat out vec4 frag_light_color;
+layout(location = 1) out float frag_fog;
+layout(location = 2) flat out uint frag_tile;
 
 layout(push_constant) uniform Push {
     mat4 model;
@@ -92,9 +88,7 @@ void main() {
     }
 
     frag_uv = in_uv;
-    frag_light = in_light;
     frag_tile = push.tile;
-    frag_light_color = in_light_color;
 
     // Fog: compute from world position (extract from model matrix translation).
     vec3 entity_pos = vec3(push.model[3][0], push.model[3][1], push.model[3][2]);

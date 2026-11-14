@@ -2814,7 +2814,6 @@ impl crate::EngineApp {
             if toggle.rect.contains(mouse) {
                 match toggle.label {
                     "VSync" => self.config.render.vsync = !self.config.render.vsync,
-                    "Shadows" => self.config.shadow_enabled = !self.config.shadow_enabled,
                     "Vignette" => {
                         if self.config.vignette_strength > 0.0 {
                             self.config.vignette_strength = 0.0;
@@ -2822,7 +2821,6 @@ impl crate::EngineApp {
                             self.config.vignette_strength = 0.15;
                         }
                     }
-                    "SSAO" => self.config.ssao_enabled = !self.config.ssao_enabled,
                     _ => {}
                 }
                 return;
@@ -2867,14 +2865,12 @@ impl crate::EngineApp {
             self.config.player = defaults.to_player_config();
             self.config.keybinds = defaults.keys.clone();
             self.config.world = defaults.world.clone();
-            self.config.shadow_enabled = defaults.graphics.shadow_enabled;
-            self.config.shadow_resolution = defaults.graphics.shadow_resolution;
             self.config.exposure = defaults.graphics.exposure;
             self.config.vignette_strength = defaults.graphics.vignette_strength;
-            self.config.ssao_enabled = defaults.graphics.ssao_enabled;
-            self.config.ssao_radius = defaults.graphics.ssao_radius;
-            self.config.ssao_bias = defaults.graphics.ssao_bias;
-            self.config.ssao_strength = defaults.graphics.ssao_strength;
+            self.config.raytrace_quality = defaults.graphics.raytrace_quality;
+            self.config.raytrace_softness = defaults.graphics.raytrace_softness;
+            self.config.latitude = defaults.world.latitude;
+            self.config.longitude = defaults.world.longitude;
             let path = self.config.config_path.clone();
             match defaults.save(&path) {
                 Ok(()) => self
@@ -2898,8 +2894,6 @@ impl crate::EngineApp {
                 height: self.render.window_size.1,
                 vsync: self.config.render.vsync,
                 fog_distance: self.config.render.fog_distance,
-                shadow_enabled: self.config.shadow_enabled,
-                shadow_resolution: self.config.shadow_resolution,
                 exposure: self.config.exposure,
                 vignette_strength: self.config.vignette_strength,
                 textures_dir: self
@@ -2916,11 +2910,9 @@ impl crate::EngineApp {
                     .map(|p| p.to_string_lossy().to_string()),
                 msaa_samples: self.config.render.msaa_samples,
                 occlusion_culling: self.config.render.occlusion_culling,
-                ssao_enabled: self.config.ssao_enabled,
                 gpu_meshing: self.config.render.gpu_meshing,
-                ssao_radius: self.config.ssao_radius,
-                ssao_bias: self.config.ssao_bias,
-                ssao_strength: self.config.ssao_strength,
+                raytrace_quality: self.config.raytrace_quality,
+                raytrace_softness: self.config.raytrace_softness,
                 water_y: self.config.water_y,
                 wet_edge_strength: self.config.wet_edge_strength,
                 caustics_strength: self.config.caustics_strength,
@@ -2955,9 +2947,9 @@ impl crate::EngineApp {
             "Walk Speed" => self.config.player.walk_speed = new_val,
             "Fly Speed" => self.config.player.fly_speed = new_val,
             "MSAA Samples" => self.config.render.msaa_samples = 1 << new_val.round() as u32,
-            "SSAO Radius" => self.config.ssao_radius = new_val,
-            "SSAO Bias" => self.config.ssao_bias = new_val,
-            "SSAO Strength" => self.config.ssao_strength = new_val,
+            "Raytrace Quality" => self.config.raytrace_quality = new_val,
+            "Shadow Softness" => self.config.raytrace_softness = new_val,
+            "Reflections" => self.config.reflection_strength = new_val,
             _ => {}
         }
     }
@@ -2971,9 +2963,9 @@ impl crate::EngineApp {
             "Mouse Sensitivity" => self.config.player.mouse_sensitivity * 1000.0,
             "Walk Speed" => self.config.player.walk_speed,
             "Fly Speed" => self.config.player.fly_speed,
-            "SSAO Radius" => self.config.ssao_radius,
-            "SSAO Bias" => self.config.ssao_bias,
-            "SSAO Strength" => self.config.ssao_strength,
+            "Raytrace Quality" => self.config.raytrace_quality,
+            "Shadow Softness" => self.config.raytrace_softness,
+            "Reflections" => self.config.reflection_strength,
             "MSAA Samples" => match self.config.render.msaa_samples {
                 8 => 3.0,
                 4 => 2.0,
@@ -2988,9 +2980,7 @@ impl crate::EngineApp {
     fn toggle_on(&self, label: &str) -> bool {
         match label {
             "VSync" => self.config.render.vsync,
-            "Shadows" => self.config.shadow_enabled,
             "Vignette" => self.config.vignette_strength > 0.0,
-            "SSAO" => self.config.ssao_enabled,
             _ => false,
         }
     }
@@ -3590,7 +3580,6 @@ impl crate::EngineApp {
         );
 
         let series_data = [
-            collector.extract_f32(crate::telemetry::MetricSelector::GpuShadowMs, 300),
             collector.extract_f32(crate::telemetry::MetricSelector::GpuSkyMs, 300),
             collector.extract_f32(crate::telemetry::MetricSelector::GpuOpaqueMs, 300),
             collector.extract_f32(crate::telemetry::MetricSelector::GpuTransparentMs, 300),
@@ -3599,7 +3588,6 @@ impl crate::EngineApp {
         ];
         let series_refs: Vec<&[f32]> = series_data.iter().map(|s| s.as_slice()).collect();
         let colors = [
-            [200, 150, 80, 200],
             [150, 200, 80, 200],
             [80, 200, 150, 200],
             [80, 150, 200, 200],
@@ -4283,7 +4271,6 @@ impl crate::EngineApp {
                 ("Opaque", latest.opaque_ms),
                 ("Trans.", latest.transparent_ms),
                 ("UI", latest.ui_ms),
-                ("Shadow", latest.shadow_ms),
                 ("Post", latest.post_ms),
             ];
             for (name, ms) in &passes {

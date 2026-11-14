@@ -1,42 +1,31 @@
 #version 450
 
-// Chunk vertex shader. Vertex layout (32 bytes):
-//   location 0: vec3  pos    — local block corner in [0, 16]
-//   location 1: vec2  uv     — LOCAL tile-repeat UV in `[0, w] × [0, h]`
-//                              (the fragment shader applies `fract()` and
-//                              adds the tile origin before sampling).
-//   location 2: float light  — baked face shading in [0, 1]
-//                              (values > 1.0 signal water: 1.0 + (level/8)*0.5)
-//   location 3: uint  tile   — bits 0..7 atlas tile index, bits 8..15
-//                              ray-traced sun visibility (passed `flat` so
-//                              the fragment shader can use the per-quad
-//                              values).
-//   location 4: vec4  light_color — packed RGBA light tint (passed `flat`)
+// Chunk vertex shader. Vertex layout (24 bytes):
+//   location 0: vec3  pos   - local block corner in [0, 16]
+//   location 1: vec2  uv    - local tile-repeat UV in [0, w] x [0, h]
+//   location 2: uint  tile  - atlas tile index (passed flat)
 //
-// Push constants (offset 0): vec4 chunk_origin_and_pad = (originX, originY, originZ, _)
-// Push constants (offset 16): mat4 view_proj
-// Push constants (offset 80): vec4 time_and_pad = (game_time, _, _, _)
+// All lighting is evaluated per pixel in chunk.frag by the GPU voxel ray
+// tracer; nothing is baked into the geometry.
 //
-// World position = chunk_origin + local_pos. Clip = view_proj * world_pos.
+// Push constants:
+//   offset  0: vec4 origin_pad (xyz = chunk world origin)
+//   offset 16: mat4 view_proj
+//   offset 80: vec4 time_and_pad (x = game_time seconds)
 
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec2 in_uv;
-layout(location = 2) in float in_light;
-layout(location = 3) in uint in_tile;
-layout(location = 4) in vec4 in_light_color;
+layout(location = 2) in uint in_tile;
 
 layout(location = 0) out vec2 frag_uv;
-layout(location = 1) out float frag_light;
-layout(location = 2) out float frag_fog;
-layout(location = 3) out vec3 frag_world_pos;
-layout(location = 4) flat out uint frag_tile;
-layout(location = 5) flat out vec4 frag_light_color;
-layout(location = 6) flat out float frag_sun;
+layout(location = 1) out float frag_fog;
+layout(location = 2) out vec3 frag_world_pos;
+layout(location = 3) flat out uint frag_tile;
 
 layout(push_constant) uniform Push {
-    vec4 origin_pad;   // xyz = chunk world origin, w unused
+    vec4 origin_pad;
     mat4 view_proj;
-    vec4 time_and_pad; // x = game_time (seconds)
+    vec4 time_and_pad;
 } push;
 
 layout(set = 0, binding = 0) uniform Camera {
@@ -44,25 +33,13 @@ layout(set = 0, binding = 0) uniform Camera {
 } cam;
 
 void main() {
-    vec3 local = in_pos;
-
-    // Liquid geometry is kept fixed; water ripples remain in the fragment
-    // shader's normals/reflections without moving submerged block textures.
-
-    vec3 world = push.origin_pad.xyz + local;
+    vec3 world = push.origin_pad.xyz + in_pos;
     gl_Position = push.view_proj * vec4(world, 1.0);
     frag_uv = in_uv;
-    frag_light = in_light;
-    // Unpack the mesher's per-quad words: low byte = atlas tile index,
-    // second byte = ray-traced sun visibility (0 = shadowed, 255 = lit).
-    frag_tile = in_tile & 0xFFu;
-    frag_sun = float((in_tile >> 8u) & 0xFu) / 15.0;
     frag_world_pos = world;
-    frag_light_color = in_light_color;
+    frag_tile = in_tile;
 
     // Fog starts at 55% of the view distance and saturates at the far plane.
-    // The old `1 - exp(-3 d / maxdist)` curve was already ~60% fogged at a
-    // third of the render distance, which washed out the whole scene.
     float dist = length(world - cam.cam_pos_and_maxdist.xyz);
     float maxdist = max(cam.cam_pos_and_maxdist.w, 1.0);
     float fog_t = clamp((dist - maxdist * 0.55) / (maxdist * 0.45), 0.0, 1.0);

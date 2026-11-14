@@ -45,10 +45,6 @@ pub struct GraphicsSettings {
 
     pub fog_distance: f32,
 
-    pub shadow_enabled: bool,
-
-    pub shadow_resolution: u32,
-
     pub exposure: f32,
 
     pub vignette_strength: f32,
@@ -66,20 +62,15 @@ pub struct GraphicsSettings {
     /// Enable hardware occlusion culling for chunks.
     pub occlusion_culling: bool,
 
-    /// Enable screen-space ambient occlusion (SSAO).
-    pub ssao_enabled: bool,
-
     /// Enable the Phase-2 GPU compute chunk mesher.
     pub gpu_meshing: bool,
 
-    /// SSAO sampling radius (world-space distance).
-    pub ssao_radius: f32,
+    /// Ray-tracing quality 0..1: scales ray budgets for shadows, AO, sky
+    /// GI, reflections and volumetric fog.
+    pub raytrace_quality: f32,
 
-    /// SSAO depth bias to prevent self-occlusion.
-    pub ssao_bias: f32,
-
-    /// SSAO darkening strength multiplier.
-    pub ssao_strength: f32,
+    /// Extra shadow penumbra width in radians (0 = physical sun/moon size).
+    pub raytrace_softness: f32,
 
     /// Global water surface Y (world units). Feeds the chunk shader's
     /// submerged-terrain caustics path and the cheap wet-edge band
@@ -114,6 +105,13 @@ pub struct WorldSettings {
     pub gpu_mesh_distance: i32,
 
     pub day_length: f64,
+
+    /// Latitude in degrees (north positive). Drives the sun/moon altitude as
+    /// the seasons and time of day advance.
+    pub latitude: f32,
+
+    /// Longitude in degrees (east positive). Shifts local solar time.
+    pub longitude: f32,
 
     pub assets_path: Option<String>,
 }
@@ -589,19 +587,15 @@ impl Default for GraphicsSettings {
             height: 720,
             vsync: true,
             fog_distance: 320.0,
-            shadow_enabled: true,
-            shadow_resolution: 2048,
             exposure: 0.6,
             vignette_strength: 0.15,
             textures_dir: Some("assets/textures".into()),
             texture_packs_dir: None,
             msaa_samples: 4,
             occlusion_culling: false,
-            ssao_enabled: true,
             gpu_meshing: false,
-            ssao_radius: 1.5,
-            ssao_bias: 0.025,
-            ssao_strength: 1.0,
+            raytrace_quality: 1.0,
+            raytrace_softness: 0.0,
             // Water + translucency upgrade defaults. Master scalars shipped
             // at modest values so the visual effects show up gently on first
             // boot; users can dial each to taste from the settings UI.
@@ -631,6 +625,8 @@ impl Default for WorldSettings {
             gpu_mesh_distance: 0,
 
             day_length: 1200.0,
+            latitude: 40.0,
+            longitude: 0.0,
 
             assets_path: None,
         }
@@ -721,14 +717,12 @@ macro_rules! graphics_fields {
         let g = &$settings.graphics;
         crate::EngineConfig {
             // Graphics fields (copied from GraphicsSettings).
-            shadow_enabled: g.shadow_enabled,
-            shadow_resolution: g.shadow_resolution,
             exposure: g.exposure,
             vignette_strength: g.vignette_strength,
-            ssao_enabled: g.ssao_enabled,
-            ssao_radius: g.ssao_radius,
-            ssao_bias: g.ssao_bias,
-            ssao_strength: g.ssao_strength,
+            raytrace_quality: g.raytrace_quality,
+            raytrace_softness: g.raytrace_softness,
+            latitude: 40.0,
+            longitude: 0.0,
             water_y: g.water_y,
             wet_edge_strength: g.wet_edge_strength,
             caustics_strength: g.caustics_strength,
@@ -828,10 +822,6 @@ impl GameSettings {
 
             occlusion_culling: self.graphics.occlusion_culling,
 
-            ssao_enabled: self.graphics.ssao_enabled,
-
-            shadow_enabled: self.graphics.shadow_enabled,
-
             // Phase-2 meshing implies Phase-1 rendering; auto-enable so a
             // `gpu_meshing`/`gpu_mesh_distance` config never silently no-ops.
 
@@ -915,6 +905,8 @@ impl GameSettings {
         cfg.capture_time = None;
         cfg.spawn = None;
         cfg.day_length = self.world.day_length;
+        cfg.latitude = self.world.latitude;
+        cfg.longitude = self.world.longitude;
         cfg.keybinds = keybinds;
         cfg.assets_path = assets_path;
         cfg.fullscreen = false;
