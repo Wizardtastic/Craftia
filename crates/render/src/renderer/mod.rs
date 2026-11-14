@@ -85,7 +85,7 @@ pub enum MeshPass {
 pub struct ChunkUpload {
     pub pos: ChunkPos,
     pub pass: MeshPass,
-    /// Vertex bytes (24 bytes each, layout = [`crate::Vertex`]).
+    /// Vertex bytes (28 bytes each, layout = [`crate::Vertex`]).
     pub vertices: Vec<u8>,
     /// Index bytes (4 bytes each, `u32`).
     pub indices: Vec<u8>,
@@ -155,6 +155,9 @@ pub struct FrameInput<'a> {
     pub camera: Camera,
     pub ui: Option<&'a UiDrawData>,
     pub game_time: f32,
+    /// Clock of the analytic water field. Shared by CPU buoyancy and the
+    /// shader so a floating object rides exactly the rendered wave.
+    pub water_time: f32,
     pub underwater: bool,
     pub world_entities: &'a [crate::entity::EntityRenderData],
     pub held_items: &'a [crate::entity::EntityRenderData],
@@ -170,11 +173,24 @@ struct ParticleCamera {
     far: f32,
 }
 
+/// Resolution of the local water-body grid uploaded for the caustics /
+/// wet-edge shader path, in blocks per side.
+pub const WATER_SURFACE_GRID_SIZE: usize = 128;
+/// Vertically stacked bodies per grid cell. Must match
+/// `voxel_world::water::WATER_SURFACE_LAYERS` and `shaders/chunk.frag`.
+pub const WATER_SURFACE_GRID_LAYERS: usize = 2;
+/// Sentinel for "no water in this layer"; matches `shaders/chunk.frag`.
+pub const WATER_SURFACE_GRID_NONE: f32 = -1000.0;
+const WATER_SURFACE_GRID_HEADER: u64 = 16;
+const WATER_SURFACE_GRID_FLOATS: usize =
+    WATER_SURFACE_GRID_SIZE * WATER_SURFACE_GRID_SIZE * WATER_SURFACE_GRID_LAYERS * 2;
+const WATER_SURFACE_GRID_BYTES: u64 =
+    WATER_SURFACE_GRID_HEADER + (WATER_SURFACE_GRID_FLOATS * 4) as u64;
+
 struct Frame {
     cmd: vk::CommandBuffer,
     in_flight_fence: vk::Fence,
     image_available: vk::Semaphore,
-    render_finished: vk::Semaphore,
     camera_ubo: GpuBuffer,
     descriptor_set: vk::DescriptorSet,
     /// Tile remap UBO + descriptor set (set 1, binding 0 of the chunk
@@ -264,6 +280,7 @@ pub struct Renderer {
     wireframe_enabled: bool,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set_layout: vk::DescriptorSetLayout,
+    tile_remap_set_layout: vk::DescriptorSetLayout,
 
     command_pool: vk::CommandPool,
     // Cached shader SPIR-V blobs. Populated at startup from build.rs-compiled
@@ -295,6 +312,17 @@ pub struct Renderer {
     /// decide WHEN to push (it owns the registry) without taking a borrow
     /// on the renderer at hot-path time.
     material_table_dirty: bool,
+
+    /// Local water-surface height grid (chunk binding 11), laid out as a
+    /// 16-byte header (`origin.x`, `origin.z`, `size`, `valid`) followed by
+    /// row-major `size * size` f32 surfaces. Positive = actual water, negative
+    /// = dry shore within two blocks (wet edges only), sentinel = no water.
+    water_surface_ubo: GpuBuffer,
+    pending_water_surface: Vec<f32>,
+    pending_water_surface_origin: [f32; 2],
+    water_surface_dirty: bool,
+    /// CPU ms spent on the most recent water-grid mapped write + flush.
+    last_water_surface_upload_ms: f32,
 
     // â”€â”€ UI pipeline â”€â”€
     ui_pipeline: vk::Pipeline,
@@ -465,6 +493,12 @@ pub struct Renderer {
     depth_resolve_active: bool,
 
     frames: Vec<Frame>,
+    /// One render-finished semaphore per swapchain image. A per-frame
+    /// semaphore would be signalled again while the presentation engine might
+    /// still be waiting on its previous signal (VUID-vkQueueSubmit-
+    /// pSignalSemaphores-00067); tying the semaphore to the image guarantees
+    /// it is only reused after that image is acquired again.
+    present_semaphores: Vec<vk::Semaphore>,
     /// GPU-driven chunk pipeline: every chunk draws from its mega-buffers via
     /// indirect multi-draw, with Hi-Z occlusion culling. Always `Some`; kept
     /// optional so `Drop` can take ownership and destroy its Vulkan handles.
@@ -718,6 +752,26 @@ impl Renderer {
         // MaterialTable::empty() if nothing was pushed yet). This avoids
         // the "init seeds zeros + first flush overwrites" double-upload
         // on frame 0.
+
+        // Local water-surface grid (binding 11). Seeded with the sentinel and
+        // valid=0 so the shader falls back to the global water-level scalar
+        // until the engine pushes its first grid.
+        let mut water_surface_ubo = GpuBuffer::host_visible(
+            &device,
+            &alloc,
+            WATER_SURFACE_GRID_BYTES,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            "water_surface_ubo",
+        )?;
+        {
+            let mut bytes = vec![0u8; WATER_SURFACE_GRID_BYTES as usize];
+            for i in 0..WATER_SURFACE_GRID_FLOATS {
+                let offset = WATER_SURFACE_GRID_HEADER as usize + i * 4;
+                bytes[offset..offset + 4]
+                    .copy_from_slice(bytemuck::bytes_of(&WATER_SURFACE_GRID_NONE));
+            }
+            water_surface_ubo.upload(&device, &bytes)?;
+        }
 
         // --- render pass ---
         // We need the swapchain before framebuffers, and the render pass before
@@ -1126,6 +1180,12 @@ impl Renderer {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        let mut present_semaphores = Vec::with_capacity(swapchain_images.len());
+        for _ in 0..swapchain_images.len() {
+            present_semaphores.push(unsafe {
+                device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            }?);
+        }
         let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for (idx_within_fif, &descriptor_set) in
             descriptor_sets.iter().take(FRAMES_IN_FLIGHT).enumerate()
@@ -1144,8 +1204,6 @@ impl Renderer {
                 )
             }?;
             let image_available =
-                unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }?;
-            let render_finished =
                 unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }?;
             let camera_ubo = GpuBuffer::host_visible(
                 &device,
@@ -1180,6 +1238,8 @@ impl Renderer {
                     emissive_lights_buffer: emissive_lights_ubo.buffer,
                     emissive_lights_size: std::mem::size_of::<pipeline::EmissiveLightsUbo>()
                         as vk::DeviceSize,
+                    water_surface_buffer: water_surface_ubo.buffer,
+                    water_surface_size: WATER_SURFACE_GRID_BYTES,
                 },
             );
             // Tile-remap UBO: 256 u32 entries (= 1024 B). Currently an
@@ -1210,7 +1270,6 @@ impl Renderer {
                 cmd,
                 in_flight_fence,
                 image_available,
-                render_finished,
                 camera_ubo,
                 descriptor_set,
                 tile_remap_ubo,
@@ -1768,6 +1827,7 @@ impl Renderer {
             wireframe_enabled: false,
             descriptor_pool,
             descriptor_set_layout,
+            tile_remap_set_layout,
             command_pool,
             atlas,
             chunk_vert_spirv,
@@ -1775,6 +1835,11 @@ impl Renderer {
             tile_material_ubo,
             pending_material_table: MaterialTable::empty(),
             material_table_dirty: true,
+            water_surface_ubo,
+            pending_water_surface: vec![WATER_SURFACE_GRID_NONE; WATER_SURFACE_GRID_FLOATS],
+            pending_water_surface_origin: [0.0, 0.0],
+            water_surface_dirty: false,
+            last_water_surface_upload_ms: 0.0,
             ui_vert_spirv,
             ui_frag_spirv,
             sky_vert_spirv,
@@ -1871,6 +1936,7 @@ impl Renderer {
             depth_resolve_active: msaa_samples != vk::SampleCountFlags::TYPE_1
                 && depth_resolve_mode.is_some(),
             frames,
+            present_semaphores,
             gpu_driven,
             hiz,
             query_pool,
@@ -1920,6 +1986,10 @@ impl Renderer {
     }
 
     /// CPU time (ms) spent recording the opaque chunk pass last frame.
+    pub fn last_water_surface_upload_ms(&self) -> f32 {
+        self.last_water_surface_upload_ms
+    }
+
     pub fn chunk_record_cpu_ms(&self) -> f32 {
         self.chunk_record_cpu_ms
     }
@@ -1978,6 +2048,8 @@ impl Renderer {
                     emissive_lights_buffer: self.emissive_lights_ubo.buffer,
                     emissive_lights_size: std::mem::size_of::<pipeline::EmissiveLightsUbo>()
                         as vk::DeviceSize,
+                    water_surface_buffer: self.water_surface_ubo.buffer,
+                    water_surface_size: WATER_SURFACE_GRID_BYTES,
                 },
             );
         }
@@ -2487,6 +2559,33 @@ impl Renderer {
         self.material_table_dirty = true;
     }
 
+    /// Push a local water-body grid (chunk binding 11) for the next frame.
+    /// `bodies` is row-major with [`WATER_SURFACE_GRID_SIZE`]² cells, each
+    /// holding [`WATER_SURFACE_GRID_LAYERS`] `(surface, bed)` pairs. Positive
+    /// surfaces are real water; negative surfaces are dry shore cells used
+    /// only for wet edges; [`WATER_SURFACE_GRID_NONE`] means no body.
+    /// The actual upload happens in `flush_pending_ubos`.
+    pub fn set_water_surface_grid(&mut self, origin: [f32; 2], bodies: &[f32]) {
+        if bodies.len() != WATER_SURFACE_GRID_FLOATS {
+            log::warn!(
+                "set_water_surface_grid: expected {} floats, got {}",
+                WATER_SURFACE_GRID_FLOATS,
+                bodies.len()
+            );
+            return;
+        }
+        if !self.water_surface_dirty
+            && self.pending_water_surface_origin == origin
+            && self.pending_water_surface.as_slice() == bodies
+        {
+            return;
+        }
+        self.pending_water_surface.clear();
+        self.pending_water_surface.extend_from_slice(bodies);
+        self.pending_water_surface_origin = origin;
+        self.water_surface_dirty = true;
+    }
+
     /// Set projection parameters for SSAO depth linearization.
     pub fn set_proj_params(&mut self, near: f32, far: f32, screen_w: f32, screen_h: f32) {
         self.proj_params = [near, far, screen_w, screen_h];
@@ -2515,6 +2614,31 @@ impl Renderer {
                 }
             }
             self.material_table_dirty = false;
+        }
+
+        // Local water-surface height grid (chunk binding 11). The engine only
+        // pushes a new grid when the camera moves far enough or world water
+        // changes, so this is a no-op in the steady state.
+        self.last_water_surface_upload_ms = 0.0;
+        if self.water_surface_dirty {
+            let upload_start = std::time::Instant::now();
+            if let Ok(slice) = self.water_surface_ubo.mapped_slice_mut() {
+                let header = [
+                    self.pending_water_surface_origin[0],
+                    self.pending_water_surface_origin[1],
+                    WATER_SURFACE_GRID_SIZE as f32,
+                    1.0,
+                ];
+                slice[..16].copy_from_slice(bytemuck::bytes_of(&header));
+                let bodies = bytemuck::cast_slice(&self.pending_water_surface);
+                let offset = WATER_SURFACE_GRID_HEADER as usize;
+                slice[offset..offset + bodies.len()].copy_from_slice(bodies);
+                if let Err(e) = self.water_surface_ubo.flush_whole(&self.device) {
+                    log::warn!("water_surface_ubo flush failed: {e}");
+                }
+            }
+            self.last_water_surface_upload_ms = upload_start.elapsed().as_secs_f32() * 1000.0;
+            self.water_surface_dirty = false;
         }
 
         // Fog UBO. Underwater keeps a blue-tinted fog/ambient so submerged
@@ -2732,6 +2856,12 @@ impl Renderer {
         self.gpu_driven.chunk_count()
     }
 
+    /// Forget every uploaded chunk. Called when switching to a freshly
+    /// generated world so no meshes from the previous seed survive.
+    pub fn clear_chunks(&mut self) {
+        self.gpu_driven.clear(&self.device, self.command_pool);
+    }
+
     /// Update the block properties table for the Phase-2 GPU compute mesher.
     /// Call after the block registry is loaded or changes. No-op if GPU
     /// meshing is disabled.
@@ -2865,6 +2995,7 @@ impl Renderer {
             camera,
             ui,
             game_time,
+            water_time,
             underwater,
             world_entities,
             held_items,
@@ -2882,7 +3013,6 @@ impl Renderer {
             cmd,
             in_flight_fence,
             image_available,
-            render_finished,
             descriptor_set,
             tile_remap_descriptor_set,
         ) = {
@@ -2891,7 +3021,6 @@ impl Renderer {
                 f.cmd,
                 f.in_flight_fence,
                 f.image_available,
-                f.render_finished,
                 f.descriptor_set,
                 f.tile_remap_descriptor_set,
             )
@@ -3071,6 +3200,7 @@ impl Renderer {
                 chunk_descriptor_set: descriptor_set,
                 vp_cols: &vp_cols,
                 game_time,
+                water_time,
                 query_pool: self.query_pool,
                 opaque_end_ts: Some(query_offset + 2),
             },
@@ -3152,6 +3282,7 @@ impl Renderer {
             image_index,
             &vp_cols,
             game_time,
+            water_time,
             ui_index_count,
             descriptor_set,
             tile_remap_descriptor_set,
@@ -3198,18 +3329,21 @@ impl Renderer {
             device.end_command_buffer(cmd)?;
         }
 
-        // Submit.
+        // Submit. The render-finished semaphore belongs to the acquired
+        // swapchain image, not to the frame slot, so presentation can hold it
+        // until that image returns to the pool without blocking a later frame.
+        let present_semaphore = self.present_semaphores[image_index as usize];
         self.record_submit(
             device,
             cmd,
             &[image_available],
             &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
-            &[render_finished],
+            &[present_semaphore],
             in_flight_fence,
         )?;
 
         // Present.
-        self.record_present(image_index, &[render_finished], true)?;
+        self.record_present(image_index, &[present_semaphore], true)?;
 
         self.frame_counter += 1;
         Ok(())
@@ -3222,6 +3356,7 @@ impl Renderer {
             camera,
             ui,
             game_time,
+            water_time,
             underwater,
             world_entities,
             held_items,
@@ -3320,13 +3455,19 @@ impl Renderer {
                 chunk_descriptor_set: chunk_ds,
                 vp_cols: &vp_cols,
                 game_time,
+                water_time,
                 query_pool: self.query_pool,
                 opaque_end_ts: None,
             },
         );
 
         // â”€â”€ UI overlay pass â”€â”€
+        // Advance to the final (particle) subpass before ending the render
+        // pass. Ending from subpass 0 trips VUID-vkCmdEndRenderPass-None-00910;
+        // particles are empty in a capture, so only the subpass transition is
+        // needed.
         unsafe {
+            device.cmd_next_subpass(cmd, vk::SubpassContents::INLINE);
             device.cmd_end_render_pass(cmd);
         }
 
@@ -3347,6 +3488,7 @@ impl Renderer {
             image_index,
             &vp_cols,
             game_time,
+            water_time,
             ui_index_count,
             self.frames[0].descriptor_set,
             self.frames[0].tile_remap_descriptor_set,
@@ -4219,6 +4361,12 @@ impl Renderer {
         for &v in &self.swapchain_image_views {
             unsafe { self.device.destroy_image_view(v, None) };
         }
+        // These were tied to the old swapchain images. Device idle above
+        // ensures the graphics queue is done with them; the new image count
+        // may differ, so recreate one per new image below.
+        for semaphore in self.present_semaphores.drain(..) {
+            unsafe { self.device.destroy_semaphore(semaphore, None) };
+        }
         if let Some(depth) = self.depth.take() {
             depth.destroy(&self.device, &self.alloc);
         }
@@ -4242,6 +4390,12 @@ impl Renderer {
             )?;
         let swapchain_image_views =
             swapchain::create_image_views(&self.device, &swapchain_images, swapchain_format)?;
+        self.present_semaphores = (0..swapchain_images.len())
+            .map(|_| unsafe {
+                self.device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let depth_format = device::find_depth_format(&self.instance, self.physical_device);
         let depth = GpuImage::depth(&self.device, &self.alloc, swapchain_extent, depth_format)?;
 
@@ -4768,6 +4922,7 @@ impl Renderer {
         image_index: u32,
         vp_cols: &[f32],
         game_time: f32,
+        water_time: f32,
         ui_index_count: u32,
         descriptor_set: vk::DescriptorSet,
         tile_remap_descriptor_set: vk::DescriptorSet,
@@ -4864,7 +5019,14 @@ impl Renderer {
                 &[],
             );
             if gpu_transparent > 0 {
-                self.gpu_driven.record_transparent(device, cmd, descriptor_set, vp_cols, game_time);
+                self.gpu_driven.record_transparent(
+                    device,
+                    cmd,
+                    descriptor_set,
+                    vp_cols,
+                    game_time,
+                    water_time,
+                );
             }
             // Timestamp 4: transparent pass end. Written here — after the
             // water/foliage draws, before the UI — because that is where
@@ -4925,7 +5087,6 @@ impl Drop for Renderer {
         for f in self.frames.drain(..) {
             unsafe {
                 device.destroy_semaphore(f.image_available, None);
-                device.destroy_semaphore(f.render_finished, None);
                 device.destroy_fence(f.in_flight_fence, None);
             }
             f.camera_ubo.destroy(device, &self.alloc);
@@ -4934,6 +5095,11 @@ impl Drop for Renderer {
             // leaks `FRAMES_IN_FLIGHT` host-visible UBOs (each 1024 B + a
             // GPU allocation) every Renderer::drop.
             f.tile_remap_ubo.destroy(device, &self.alloc);
+        }
+        // Presentation semaphores are per swapchain image, so they are not
+        // part of a frame slot's cleanup above.
+        for semaphore in self.present_semaphores.drain(..) {
+            unsafe { device.destroy_semaphore(semaphore, None) };
         }
 
         // Atlas + fog UBO + UI resources + sky resources.
@@ -4950,6 +5116,7 @@ impl Drop for Renderer {
         // `set_tile_material_table`) but no Drop cleanup — leaked 4 KB
         // host-visible every Renderer::drop.
         self.tile_material_ubo.destroy_in_place(device, &self.alloc);
+        self.water_surface_ubo.destroy_in_place(device, &self.alloc);
 
         // MSAA images.
         if let Some(mut img) = self.msaa_color.take() {
@@ -5028,12 +5195,16 @@ impl Drop for Renderer {
         unsafe {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            device.destroy_descriptor_set_layout(self.tile_remap_set_layout, None);
             device.destroy_query_pool(self.query_pool, None); /*SLICE2_DROP*/
             // --- Slice 2 cleanup: scene_opaque_color + transparent render pass (framebuffers first, then render_pass, sampler, image) ---
             for fb in self.transparent_framebuffers.drain(..) {
                 device.destroy_framebuffer(fb, None);
             }
             device.destroy_render_pass(self.transparent_render_pass, None);
+            // The main offscreen render pass was previously left alive at
+            // shutdown; its framebuffers are destroyed above.
+            device.destroy_render_pass(self.render_pass, None);
             device.destroy_sampler(self.scene_opaque_sampler, None);
             self.scene_opaque_color
                 .destroy_in_place(&self.device, &self.alloc);
@@ -5053,10 +5224,13 @@ impl Drop for Renderer {
             device.destroy_descriptor_set_layout(self.ui_descriptor_set_layout, None);
             device.destroy_pipeline(self.sky_pipeline, None);
             device.destroy_pipeline_layout(self.sky_pipeline_layout, None);
+            device.destroy_pipeline(self.panorama_pipeline, None);
+            device.destroy_pipeline_layout(self.panorama_pipeline_layout, None);
             device.destroy_pipeline(self.entity_pipeline, None);
             device.destroy_pipeline_layout(self.entity_pipeline_layout, None);
             device.destroy_pipeline(self.entity_held_pipeline, None);
             device.destroy_pipeline(self.overlay_pipeline, None);
+            device.destroy_pipeline_layout(self.overlay_pipeline_layout, None);
 
             // Particle subpass resources.
             // Sets owned by `particle_depth_descriptor_pool` are freed when
@@ -5066,6 +5240,18 @@ impl Drop for Renderer {
             device.destroy_pipeline_layout(self.particle_pipeline_layout, None);
             device.destroy_descriptor_set_layout(self.particle_depth_set_layout, None);
             device.destroy_descriptor_pool(self.particle_depth_descriptor_pool, None);
+        }
+
+        // Swapchain image views are owned by the swapchain; destroy the views
+        // before the swapchain itself. The swapchain was also left alive in
+        // older shutdown paths.
+        unsafe {
+            for view in self.swapchain_image_views.drain(..) {
+                device.destroy_image_view(view, None);
+            }
+            self.swapchain_device
+                .destroy_swapchain(self.swapchain, None);
+            device.destroy_command_pool(self.command_pool, None);
         }
 
         // Drop the allocator (frees remaining allocations) BEFORE destroying the device.

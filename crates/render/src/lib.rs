@@ -27,7 +27,10 @@ pub mod ui_atlas;
 
 pub use atlas::{build_atlas_with_textures, Atlas};
 pub use hot_reload::{compile_shader, FileWatcher, HotReloadEvent};
-pub use renderer::{ChunkUpload, FrameInput, GpuTimings, MeshPass, Renderer, RendererConfig};
+pub use renderer::{
+    ChunkUpload, FrameInput, GpuTimings, MeshPass, Renderer, RendererConfig,
+    WATER_SURFACE_GRID_LAYERS, WATER_SURFACE_GRID_NONE, WATER_SURFACE_GRID_SIZE,
+};
 pub use texture::AtlasTexture;
 pub use ui::{FontAtlas, GraphStyle, UiDrawData, UiVertex};
 pub use ui_atlas::{
@@ -41,14 +44,14 @@ pub use ui_atlas::{
 
 use bytemuck::{Pod, Zeroable};
 
-/// GPU vertex layout (24 bytes), matching `voxel_world::mesh::ChunkVertex`.
+/// GPU vertex layout (28 bytes), matching `voxel_world::mesh::ChunkVertex`.
 ///
 /// Lighting is no longer carried in the vertex stream. The chunk fragment
-/// shader ray traces the voxel world per pixel, so the only per-vertex data is
-/// geometry, tile UVs and the atlas tile index.
+/// shader ray traces the voxel world per pixel, so the per-vertex data is
+/// geometry, tile UVs, the atlas tile index and packed water animation.
 ///
-/// Mirror changes here in `crates/render/src/renderer/pipeline.rs` vertex
-/// attribute arrays and in `shaders/chunk.vert` / `shaders/chunk_indirect.vert`.
+/// Mirror changes here in the vertex attribute arrays (chunk/entity pipelines)
+/// and in `shaders/chunk.vert` / `shaders/chunk_indirect.vert`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct Vertex {
@@ -56,6 +59,8 @@ pub struct Vertex {
     pub uv: [f32; 2],
     /// Atlas tile index; passed flat to the fragment shader.
     pub tile: u32,
+    /// Packed water animation (see `voxel_world::water::WaterVertexInfo`).
+    pub water: u32,
 }
 
 /// GPU vertex layout for skinned meshes (60 bytes).

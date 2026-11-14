@@ -194,6 +194,8 @@ pub struct OpaqueDrawParams<'a> {
     pub chunk_descriptor_set: vk::DescriptorSet,
     pub vp_cols: &'a [f32],
     pub game_time: f32,
+    /// Analytic water clock, matching `World::water_time`.
+    pub water_time: f32,
     pub query_pool: vk::QueryPool,
     pub opaque_end_ts: Option<u32>,
 }
@@ -474,6 +476,21 @@ impl GpuDriven {
     }
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Drop every chunk and queued/in-flight GPU-mesh job so a new world can
+    /// reuse the renderer without drawing stale chunks from the old seed.
+    pub fn clear(&mut self, device: &ash::Device, command_pool: vk::CommandPool) {
+        self.pending_meshes.clear();
+        self.cancel_inflight(device, command_pool);
+        self.chunks.clear();
+        self.order.clear();
+        self.mega_vbo_used = 0;
+        self.mega_ibo_used = 0;
+        self.opaque_slots = 0;
+        self.transparent_slots = 0;
+        self.dirty = true;
+        self.prev_view_proj = None;
     }
 
     /// Number of transparent draw slots in the current indirect command buffer.
@@ -1464,12 +1481,14 @@ impl GpuDriven {
             chunk_descriptor_set,
             vp_cols,
             game_time,
+            water_time,
             query_pool,
             opaque_end_ts,
         } = *params;
         let mut push = [0f32; 20];
         push[0..16].copy_from_slice(vp_cols);
         push[16] = game_time;
+        push[17] = water_time;
         let stride = std::mem::size_of::<DrawIndexedIndirectCommand>() as u32;
         let sets = [chunk_descriptor_set, self.indirect_descriptor_set];
         let vbo = [self.mega_vbo.buffer];
@@ -1528,6 +1547,7 @@ impl GpuDriven {
         chunk_descriptor_set: vk::DescriptorSet,
         vp_cols: &[f32],
         game_time: f32,
+        water_time: f32,
     ) {
         if self.transparent_slots == 0 {
             return;
@@ -1535,6 +1555,7 @@ impl GpuDriven {
         let mut push = [0f32; 20];
         push[0..16].copy_from_slice(vp_cols);
         push[16] = game_time;
+        push[17] = water_time;
         let stride = std::mem::size_of::<DrawIndexedIndirectCommand>() as u32;
         let sets = [chunk_descriptor_set, self.indirect_descriptor_set];
         let vbo = [self.mega_vbo.buffer];
@@ -1637,7 +1658,7 @@ impl GpuDriven {
 const VOXEL_TEX_SIZE: u32 = 18;
 const MESH_MAX_VERTS: vk::DeviceSize = (16 * 16 * 16) as vk::DeviceSize * 6 * 4;
 const MESH_MAX_IDXS: vk::DeviceSize = (16 * 16 * 16) as vk::DeviceSize * 6 * 6;
-const MESH_VERT_UINTS: vk::DeviceSize = 8;
+const MESH_VERT_UINTS: vk::DeviceSize = 7;
 /// Worst-case bytes the compute mesher can write into the mega buffers for a
 /// single 16³ chunk. Every visible face is emitted as a quad (4 verts / 6
 /// indices), so these maxima bound both the out_verts/out_idxs scratch buffers

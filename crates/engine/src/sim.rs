@@ -349,10 +349,9 @@ impl Simulation {
         if let Some(sched) = self.schedule.as_mut() {
             sched.run(&mut self.ecs_world, dt as f32);
         }
-        // Drive incremental water flow. Internal accumulator means
-        // the rate is governed by elapsed wall-clock seconds, not by
-        // step frequency — calling per fixed step vs per frame is
-        // equivalent for the simulation itself.
+        // Advance the analytic water clock. Internal accumulator means the
+        // rate is governed by elapsed wall-clock seconds, not by step
+        // frequency; waves are evaluated from this shared clock.
         let t0 = Instant::now();
         let affected = self.world.tick_water(dt as f32);
         self.water_tick_ms += t0.elapsed().as_secs_f32() * 1000.0;
@@ -458,6 +457,15 @@ impl Simulation {
             if let Some(v) = self.ecs_world.get_mut::<Velocity>(e) {
                 v.lin = Vec3::ZERO;
             }
+        }
+    }
+
+    /// Set the player's game mode in the ECS. Used by the capture camera
+    /// override so a verification shot can hover above the world even when
+    /// the loaded save starts in survival.
+    pub fn set_player_game_mode(&mut self, mode: voxel_game::GameMode) {
+        if let Some(e) = self.player_entity() {
+            self.ecs_world.set(e, mode);
         }
     }
 

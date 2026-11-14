@@ -7,13 +7,17 @@ use std::sync::{Arc, Weak};
 
 use parking_lot::RwLock;
 
-use glam::IVec3;
+use glam::{IVec2, IVec3};
 use voxel_core::{
     math::{block_to_chunk, chunk_origin, ChunkPos},
     BlockId, BlockPos, CHUNK_SIZE, WORLD_HEIGHT_BLOCKS,
 };
 
 use crate::schematic::{SchematicEntity, SchematicId};
+use crate::water::{
+    column_from_meta, infer_kind, WaterColumn, WaterColumnMeta, WaterKind, WaterSample,
+    WaterVertexInfo, MAX_FLOW_SPEED,
+};
 use crate::{chunk::Chunk, gen::TerrainGenerator, registry::BlockRegistry};
 
 /// Number of shards for the chunk storage. Must be a power of two.
@@ -95,6 +99,28 @@ pub(crate) enum ConditionalBlockWrite {
     Changed(BlockId),
 }
 
+/// Two water runs closer than this are contiguous slices of the same body.
+const WATER_BODY_EPS: f32 = 0.05;
+
+/// Sort bodies from highest surface to lowest and merge contiguous or
+/// overlapping runs. The top run's body metadata wins, which preserves the
+/// lake/ocean classification when a lower chunk supplies the rest of a deep
+/// body. Separated runs stay independent cave aquifers.
+fn normalize_water_bodies(mut bodies: Vec<WaterColumn>) -> Vec<WaterColumn> {
+    bodies.sort_by(|a, b| b.surface_y.total_cmp(&a.surface_y));
+    let mut out: Vec<WaterColumn> = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        if let Some(last) = out.last_mut() {
+            if body.surface_y >= last.bed_y - WATER_BODY_EPS {
+                last.bed_y = last.bed_y.min(body.bed_y);
+                continue;
+            }
+        }
+        out.push(body);
+    }
+    out
+}
+
 pub struct World {
     seed: i32,
     reg: Arc<BlockRegistry>,
@@ -104,19 +130,14 @@ pub struct World {
     /// travels to the renderer via `ChunkStreamEvent::MeshReady`; the world
     /// only tracks which chunks are meshed (for counts / debug overlays).
     meshes: RwLock<HashSet<ChunkPos>>,
-    /// Positions of water sources/flowing water still spreading. Drained and
-    /// refilled each water tick by `tick_water`.
-    pending_flow: RwLock<HashSet<IVec3>>,
-    /// Set of positions that are water sources (level 8). Used for O(1)
-    /// lookups during water simulation instead of scanning all chunks.
-    source_water: RwLock<HashSet<IVec3>>,
-    /// Chunks whose water mesh changed outside an active simulation tick
-    /// (e.g. source removal). Drained by `tick_water` for remeshing.
-    water_remesh: RwLock<HashSet<ChunkPos>>,
-    /// Accumulated wall-clock seconds since the last water tick.
-    water_tick_accumulator: RwLock<f32>,
-    /// Reusable scratch buffers for `simulate_flow_step` to avoid per-tick allocations.
-    water_sim_buf: RwLock<crate::water::SimulateBuffers>,
+    /// Live water bodies keyed by world `(x, z)`. Each entry contains every
+    /// disjoint body in that vertical column, sorted from highest surface to
+    /// lowest. Keeping all bodies (not just the top one) is what makes a cave
+    /// aquifer below a lake/ocean visible to physics.
+    water_columns: RwLock<HashMap<IVec2, Vec<WaterColumn>>>,
+    /// Accumulated time driving the analytic wave/current field. Advanced by
+    /// `tick_water` and sampled by both physics and the shader.
+    water_time: RwLock<f32>,
     /// Self-reference for safe cross-thread closure capture. Built once in
     /// `new_with_path` via `Arc::new_cyclic`; used by `with_chunk_for_mesh`,
     /// `recompute_lighting_at`, and `set_block` to hand closures an `Arc<World>`
@@ -135,10 +156,6 @@ pub struct World {
     /// a separate accessor layer for every operation.
     pub(crate) schematic_entities: RwLock<HashMap<SchematicId, SchematicEntity>>,
 }
-
-/// Seconds between water simulation steps. Minecraft ticks water every 5 game
-/// ticks (~0.25s at 20 TPS).
-pub const WATER_TICK_INTERVAL: f32 = 0.25;
 
 impl World {
     pub fn new(seed: i32) -> Arc<Self> {
@@ -178,11 +195,8 @@ impl World {
             gen,
             chunks: ShardedChunks::new(),
             meshes: RwLock::new(HashSet::new()),
-            pending_flow: RwLock::new(HashSet::new()),
-            source_water: RwLock::new(HashSet::new()),
-            water_remesh: RwLock::new(HashSet::new()),
-            water_tick_accumulator: RwLock::new(0.0),
-            water_sim_buf: RwLock::new(crate::water::SimulateBuffers::new()),
+            water_columns: RwLock::new(HashMap::new()),
+            water_time: RwLock::new(0.0),
             self_ref: Weak::clone(weak),
             schematic_entities: RwLock::new(HashMap::new()),
         })
@@ -202,113 +216,65 @@ impl World {
 
     pub fn insert_chunk(&self, pos: ChunkPos, mut chunk: Chunk) {
         chunk.pos = pos;
-        let origin = chunk_origin(pos);
-        let water_id = self.reg.id_of("water");
-        let mut water_blocks = Vec::new();
-        if let Some(water_id) = water_id {
-            for ly in 0..CHUNK_SIZE {
+        let columns = self.scan_chunk_water(pos, &chunk);
+        let replaced = self.chunks.write_shard(pos).insert(pos, chunk).is_some();
+
+        if replaced {
+            // A replaced chunk can change any body in these columns. Rescan
+            // every affected column across all loaded vertical chunks instead
+            // of trusting the stale map entry.
+            let origin = chunk_origin(pos);
+            for lx in 0..CHUNK_SIZE {
                 for lz in 0..CHUNK_SIZE {
-                    for lx in 0..CHUNK_SIZE {
-                        let level = chunk.get_water_level(lx, ly, lz);
-                        if chunk.get(lx, ly, lz) == water_id && level > 0 {
-                            water_blocks.push((
-                                IVec3::new(origin.x + lx, origin.y + ly, origin.z + lz),
-                                level,
-                            ));
-                        }
-                    }
+                    self.refresh_water_column(origin.x + lx, origin.z + lz);
                 }
             }
-        }
-        self.chunks.write_shard(pos).insert(pos, chunk);
-
-        // Generated and loaded chunks may already contain water. Register it
-        // with the same incremental simulation used for bucket-placed water.
-        self.source_water
-            .write()
-            .retain(|p| block_to_chunk(*p) != pos);
-        self.pending_flow
-            .write()
-            .retain(|p| block_to_chunk(*p) != pos);
-        self.water_remesh.write().remove(&pos);
-        {
-            let mut sources = self.source_water.write();
-            let mut pending = self.pending_flow.write();
-
-            for &(p, level) in &water_blocks {
-                pending.insert(p);
-                if level == 8 {
-                    sources.insert(p);
-                }
-            }
+            return;
         }
 
-        // A boundary liquid cell may have stopped ticking while its adjacent
-        // chunk was unloaded. Resume water immediately across loaded borders.
-        let mut edge_water = Vec::new();
-        let mut check_edge = |p: IVec3| {
-            if let Some(water_id) = water_id {
-                if self.get_block(p.x, p.y, p.z) == water_id
-                    && self.get_water_level_world(p.x, p.y, p.z) > 0
-                {
-                    edge_water.push(p);
-                }
-            }
-        };
-        for a in 0..CHUNK_SIZE {
-            for b in 0..CHUNK_SIZE {
-                check_edge(IVec3::new(origin.x - 1, origin.y + a, origin.z + b));
-                check_edge(IVec3::new(
-                    origin.x + CHUNK_SIZE,
-                    origin.y + a,
-                    origin.z + b,
-                ));
-                check_edge(IVec3::new(origin.x + a, origin.y - 1, origin.z + b));
-                check_edge(IVec3::new(
-                    origin.x + a,
-                    origin.y + CHUNK_SIZE,
-                    origin.z + b,
-                ));
-                check_edge(IVec3::new(origin.x + a, origin.y + b, origin.z - 1));
-                check_edge(IVec3::new(
-                    origin.x + a,
-                    origin.y + b,
-                    origin.z + CHUNK_SIZE,
-                ));
+        // Register every disjoint body in the chunk. Contiguous slices of the
+        // same body loaded in adjacent vertical chunks are merged; separated
+        // cave pools stay as additional bodies instead of being dropped.
+        if !columns.is_empty() {
+            let mut map = self.water_columns.write();
+            for (key, column) in columns {
+                let bodies = map.entry(key).or_default();
+                bodies.push(column);
+                *bodies = normalize_water_bodies(std::mem::take(bodies));
             }
         }
-        self.pending_flow.write().extend(edge_water);
     }
 
-    /// Fraction of an axis-aligned box occupied by water, accounting for the
-    /// 0–8 fluid surface height. Used by player movement so shallow water only
-    /// affects physics when the player's bounds actually intersect it.
+    /// Fraction of an axis-aligned box occupied by water. The topmost water
+    /// voxel in a column uses the body's continuous surface height (and its
+    /// analytic wave field) instead of a flow level, so shallow water and
+    /// wave troughs affect physics only when the box actually intersects the
+    /// moving surface.
     pub fn water_submersion(&self, min: glam::Vec3, max: glam::Vec3) -> f32 {
         let size = max - min;
         let volume = size.x * size.y * size.z;
         if !volume.is_finite() || volume <= 0.0 {
             return 0.0;
         }
-        let Some(water_id) = self.reg.id_of("water") else {
-            return 0.0;
-        };
         let min_block = voxel_core::math::world_to_block(min);
         let max_block = voxel_core::math::world_to_block(max - glam::Vec3::splat(0.001));
+        let time = self.water_time();
+        let columns = self.water_columns.read();
         let mut submerged_volume = 0.0;
-        for by in min_block.y..=max_block.y {
-            for bz in min_block.z..=max_block.z {
-                for bx in min_block.x..=max_block.x {
-                    if self.get_block(bx, by, bz) != water_id {
-                        continue;
-                    }
-                    let level = self.get_water_level_world(bx, by, bz);
-                    if level == 0 {
-                        continue;
-                    }
-                    let overlap_x = (max.x.min(bx as f32 + 1.0) - min.x.max(bx as f32)).max(0.0);
-                    let overlap_z = (max.z.min(bz as f32 + 1.0) - min.z.max(bz as f32)).max(0.0);
-                    let water_top = by as f32 + level as f32 / 8.0;
-                    let overlap_y = (max.y.min(water_top) - min.y.max(by as f32)).max(0.0);
+        // Integrate every body in each horizontal column. A wave crest above
+        // the top water voxel still counts, and a cave aquifer below a lake or
+        // ocean contributes separately instead of being hidden by the top
+        // body's bed.
+        for bz in min_block.z..=max_block.z {
+            for bx in min_block.x..=max_block.x {
+                let Some(bodies) = columns.get(&IVec2::new(bx, bz)) else {
+                    continue;
+                };
+                let overlap_x = (max.x.min(bx as f32 + 1.0) - min.x.max(bx as f32)).max(0.0);
+                let overlap_z = (max.z.min(bz as f32 + 1.0) - min.z.max(bz as f32)).max(0.0);
+                for column in bodies {
+                    let surface = column.surface_at(bx as f32 + 0.5, bz as f32 + 0.5, time);
+                    let overlap_y = (max.y.min(surface) - min.y.max(column.bed_y)).max(0.0);
                     submerged_volume += overlap_x * overlap_y * overlap_z;
                 }
             }
@@ -316,65 +282,20 @@ impl World {
         (submerged_volume / volume).clamp(0.0, 1.0)
     }
 
-    /// Queue loaded water blocks beside a changed block so openings and newly
-    /// loaded chunk boundaries immediately affect nearby fluid flow.
-    fn enqueue_water_neighbours(&self, pos: IVec3) {
-        let Some(water_id) = self.reg.id_of("water") else {
-            return;
-        };
-        let neighbours: Vec<_> = water_neighbours(pos)
-            .into_iter()
-            .filter(|p| {
-                self.get_block(p.x, p.y, p.z) == water_id
-                    && self.get_water_level_world(p.x, p.y, p.z) > 0
-            })
-            .collect();
-        self.pending_flow.write().extend(neighbours);
-    }
-
     pub fn remove_chunk(&self, pos: ChunkPos) {
         self.chunks.write_shard(pos).remove(&pos);
         self.meshes.write().remove(&pos);
-        self.water_remesh.write().remove(&pos);
-        self.source_water
-            .write()
-            .retain(|p| block_to_chunk(*p) != pos);
-        self.pending_flow
-            .write()
-            .retain(|p| block_to_chunk(*p) != pos);
+
+        // Removing a slice can expose or shorten any body in these columns
+        // (a cave pool may sit below an ocean surface). Rebuild all 256
+        // horizontal columns; refresh_water_column scans only the loaded
+        // vertical chunks at each x/z.
         let origin = chunk_origin(pos);
-        let mut edge_water = Vec::new();
-        let mut check_edge = |p: IVec3| {
-            if self.reg.id_of("water").is_some_and(|water_id| {
-                self.get_block(p.x, p.y, p.z) == water_id
-                    && self.get_water_level_world(p.x, p.y, p.z) > 0
-            }) {
-                edge_water.push(p);
-            }
-        };
-        for a in 0..CHUNK_SIZE {
-            for b in 0..CHUNK_SIZE {
-                check_edge(IVec3::new(origin.x - 1, origin.y + a, origin.z + b));
-                check_edge(IVec3::new(
-                    origin.x + CHUNK_SIZE,
-                    origin.y + a,
-                    origin.z + b,
-                ));
-                check_edge(IVec3::new(origin.x + a, origin.y - 1, origin.z + b));
-                check_edge(IVec3::new(
-                    origin.x + a,
-                    origin.y + CHUNK_SIZE,
-                    origin.z + b,
-                ));
-                check_edge(IVec3::new(origin.x + a, origin.y + b, origin.z - 1));
-                check_edge(IVec3::new(
-                    origin.x + a,
-                    origin.y + b,
-                    origin.z + CHUNK_SIZE,
-                ));
+        for lx in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                self.refresh_water_column(origin.x + lx, origin.z + lz);
             }
         }
-        self.pending_flow.write().extend(edge_water);
     }
 
     /// Record that the chunk at `pos` has a finished mesh. The world does not
@@ -392,25 +313,31 @@ impl World {
         self.meshes.read().len()
     }
 
-    pub(crate) fn mark_water_remesh(&self, pos: IVec3) {
-        self.water_remesh.write().insert(block_to_chunk(pos));
+    /// Number of live water-surface columns across loaded chunks.
+    pub fn water_column_count(&self) -> usize {
+        self.water_columns.read().len()
     }
 
-    pub(crate) fn replace_pending_water(
-        &self,
-        remove: HashSet<IVec3>,
-        insert: impl IntoIterator<Item = IVec3>,
-    ) {
-        let mut pending = self.pending_flow.write();
-        for pos in remove {
-            pending.remove(&pos);
+    /// True if a chunk contains any water voxel. Used by the streamer to keep
+    /// animated water on the CPU mesher instead of the naive GPU mesher.
+    pub fn chunk_has_water(&self, pos: ChunkPos) -> bool {
+        let Some(water_id) = self.reg.id_of("water") else {
+            return false;
+        };
+        let chunks = self.chunks.read_shard(pos);
+        let Some(chunk) = chunks.get(&pos) else {
+            return false;
+        };
+        for ly in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    if chunk.get(lx, ly, lz) == water_id {
+                        return true;
+                    }
+                }
+            }
         }
-        pending.extend(insert);
-    }
-
-    /// Number of blocks pending water flow simulation.
-    pub fn pending_flow_count(&self) -> usize {
-        self.pending_flow.read().len()
+        false
     }
 
     /// Get all loaded chunks (for save).
@@ -565,8 +492,8 @@ impl World {
     }
 
     /// Set a block by world coordinate. Returns true if its chunk is loaded.
-    /// Water flow remains caller-driven because the water level may not be
-    /// set yet (bucket placement sets the block before its level).
+    /// Editing water (or ground under it) refreshes that column's registered
+    /// surface immediately; there is no flow solver to tick.
     pub fn set_block(&self, x: i32, y: i32, z: i32, id: BlockId) -> bool {
         if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
             return false;
@@ -609,23 +536,19 @@ impl World {
                 return ConditionalBlockWrite::Skipped;
             }
             chunk.set(lx, ly, lz, id);
-            // Water-level metadata belongs to the old block value; never let
-            // it survive replacement by another block type.
-            chunk.set_water_level(lx, ly, lz, 0);
             old
         };
-        let pos = IVec3::new(x, y, z);
-        let removed_water = self
+
+        // Water metadata is per column: recompute the registered surface when
+        // the edit touches water or an existing water body. This keeps the
+        // physics/render queries in sync without a BFS flow pass.
+        let water_related = self
             .reg
             .id_of("water")
-            .is_some_and(|water_id| old == water_id && id != water_id);
-        self.source_water.write().remove(&pos);
-        self.pending_flow.write().remove(&pos);
-
-        self.enqueue_water_neighbours(pos);
-        if removed_water {
-            self.mark_water_remesh(pos);
-            crate::water::rebuild_flow_after_source_removed(self, pos);
+            .is_some_and(|water_id| old == water_id || id == water_id)
+            || self.water_column_at(x, z).is_some();
+        if water_related {
+            self.refresh_water_column(x, z);
         }
         ConditionalBlockWrite::Changed(old)
     }
@@ -647,81 +570,165 @@ impl World {
 
     // --- water queries ---------------------------------------------------
 
-    /// Get water level (0–8) at a world coordinate. Returns 0 if not liquid.
-    pub fn get_water_level_world(&self, x: i32, y: i32, z: i32) -> u8 {
-        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
-            return 0;
-        }
-        let cp = block_to_chunk(IVec3::new(x, y, z));
-        let chunks = self.chunks.read_shard(cp);
-        let Some(chunk) = chunks.get(&cp) else {
-            return 0;
-        };
-        let origin = chunk_origin(cp);
-        chunk.get_water_level(x - origin.x, y - origin.y, z - origin.z)
+    /// Current water-field time in seconds (drives waves and currents).
+    #[inline]
+    pub fn water_time(&self) -> f32 {
+        *self.water_time.read()
     }
 
-    /// Set water level (0–8) at a world coordinate. No-op if chunk not loaded.
-    /// Also sets the block to water if level > 0, or air if level == 0.
-    pub fn set_water_level_world(&self, x: i32, y: i32, z: i32, level: u8) {
-        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
-            return;
+    /// Advance the analytic water field by `dt`. There is no per-voxel flow
+    /// solver anymore: waves and currents are evaluated from the body state,
+    /// so this only advances the clock. Returns the set of chunks that need a
+    /// remesh (always empty; the API is kept for the engine's fixed-step loop).
+    pub fn tick_water(&self, dt: f32) -> HashSet<ChunkPos> {
+        if dt.is_finite() && dt > 0.0 {
+            let mut t = self.water_time.write();
+            *t = (*t + dt) % 100_000.0;
         }
-        let Some(water_id) = self.reg.id_of("water") else {
-            return;
-        };
-        let cp = block_to_chunk(IVec3::new(x, y, z));
-        let mut chunks = self.chunks.write_shard(cp);
-        let Some(chunk) = chunks.get_mut(&cp) else {
-            return;
-        };
-        let origin = chunk_origin(cp);
-        let lx = x - origin.x;
-        let ly = y - origin.y;
-        let lz = z - origin.z;
-        let pos = IVec3::new(x, y, z);
-        let old_level = chunk.get_water_level(lx, ly, lz);
-
-        if level > 0 {
-            let current = chunk.get(lx, ly, lz);
-            if current != water_id && current != BlockId::AIR && self.reg.is_liquid(current) {
-                return;
-            }
-            let can_replace = current.is_air() || self.reg.get(current).replaceable;
-            if current != water_id && !can_replace {
-                return;
-            }
-            if current != water_id {
-                chunk.set(lx, ly, lz, water_id);
-            }
-            chunk.set_water_level(lx, ly, lz, level.min(8));
-            if old_level != level.min(8) || current != water_id {
-                self.water_remesh.write().insert(cp);
-            }
-            return;
-        }
-
-        let current = chunk.get(lx, ly, lz);
-        if current == water_id {
-            chunk.set(lx, ly, lz, BlockId::AIR);
-            chunk.set_water_level(lx, ly, lz, 0);
-        } else if !self.reg.is_liquid(current) {
-            // Clean stale water metadata without ever deleting another liquid.
-            chunk.set_water_level(lx, ly, lz, 0);
-        }
-        if old_level != 0 || current == water_id {
-            self.water_remesh.write().insert(cp);
-        }
-        drop(chunks);
-        self.source_water.write().remove(&pos);
-        self.pending_flow.write().remove(&pos);
-        self.enqueue_water_neighbours(pos);
+        HashSet::new()
     }
 
-    /// True if the block at (x,y,z) is a water source (liquid with level 8).
-    /// Uses the source index for O(1) lookup.
-    pub fn is_water_source(&self, x: i32, y: i32, z: i32) -> bool {
-        self.is_known_water_source(x, y, z)
+    /// Highest water body in the world column at `(x, z)`.
+    pub fn water_column_at(&self, x: i32, z: i32) -> Option<WaterColumn> {
+        self.water_bodies_at(x, z).into_iter().next()
+    }
+
+    /// Every disjoint water body in the column, sorted highest surface first.
+    pub fn water_bodies_at(&self, x: i32, z: i32) -> Vec<WaterColumn> {
+        self.water_columns
+            .read()
+            .get(&IVec2::new(x, z))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Fill a row-major `size x size` grid of local water bodies for the
+    /// chunk shader's caustics / wet-edge shader path.
+    ///
+    /// Each cell contains [`crate::water::WATER_SURFACE_LAYERS`] layers of
+    /// `(surface, bed)` pairs. Positive surface values are real water bodies;
+    /// negative surfaces mark dry wet-edge fringe cells (the bed stores the
+    /// fringe height). Layers are ordered highest surface first, so a cave
+    /// aquifer below a lake/ocean is still present in the second layer.
+    ///
+    /// `out` must contain at least `size * size *
+    /// WATER_SURFACE_FLOATS_PER_CELL` entries.
+    pub fn fill_water_surface_grid(
+        &self,
+        origin_x: i32,
+        origin_z: i32,
+        size: usize,
+        out: &mut [f32],
+    ) {
+        use crate::water::{WATER_SURFACE_FLOATS_PER_CELL, WATER_SURFACE_LAYERS, WATER_SURFACE_NONE};
+        let cells = size.saturating_mul(size);
+        let floats = cells.saturating_mul(WATER_SURFACE_FLOATS_PER_CELL);
+        if size == 0 || out.len() < floats {
+            return;
+        }
+        out[..floats].fill(WATER_SURFACE_NONE);
+
+        {
+            let columns = self.water_columns.read();
+            for lz in 0..size {
+                for lx in 0..size {
+                    let Some(bodies) =
+                        columns.get(&IVec2::new(origin_x + lx as i32, origin_z + lz as i32))
+                    else {
+                        continue;
+                    };
+                    let base = (lz * size + lx) * WATER_SURFACE_FLOATS_PER_CELL;
+                    for (layer, body) in bodies.iter().take(WATER_SURFACE_LAYERS).enumerate() {
+                        out[base + layer * 2] = body.surface_y.max(0.01);
+                        out[base + layer * 2 + 1] = body.bed_y;
+                    }
+                }
+            }
+        }
+
+        // Wet-edge fringe: the first two dry blocks around a shoreline get
+        // the neighbouring water height (negative = no caustics). Process
+        // radius 1 before radius 2 so the nearest body wins on mixed shores.
+        for radius in 1..=2i32 {
+            for lz in 0..size {
+                for lx in 0..size {
+                    let base = (lz * size + lx) * WATER_SURFACE_FLOATS_PER_CELL;
+                    for layer in 0..WATER_SURFACE_LAYERS {
+                        let surface = out[base + layer * 2];
+                        if surface <= 0.0 {
+                            continue;
+                        }
+                        for dz in -radius..=radius {
+                            for dx in -radius..=radius {
+                                if dx.abs().max(dz.abs()) != radius {
+                                    continue;
+                                }
+                                let nx = lx as i32 + dx;
+                                let nz = lz as i32 + dz;
+                                if nx < 0 || nz < 0 || nx >= size as i32 || nz >= size as i32 {
+                                    continue;
+                                }
+                                let n = (nz as usize * size + nx as usize)
+                                    * WATER_SURFACE_FLOATS_PER_CELL;
+                                // Only dry cells get a wet fringe. A cave body
+                                // can occupy the top layer under dry land; it
+                                // is still real water, so leave it alone.
+                                if out[n] > 0.0 {
+                                    continue;
+                                }
+                                // Fill the first free layer; never overwrite a
+                                // real water body.
+                                for target in 0..WATER_SURFACE_LAYERS {
+                                    if out[n + target * 2] <= WATER_SURFACE_NONE + 1.0 {
+                                        out[n + target * 2] = -surface;
+                                        out[n + target * 2 + 1] = surface;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sample the water body at a world position. Returns `None` when the
+    /// point is not inside water. Waves move the sampled surface, so this is
+    /// the correct query for buoyancy, swimming and item drift.
+    pub fn water_sample(&self, pos: glam::Vec3) -> Option<WaterSample> {
+        let block = voxel_core::math::world_to_block(pos);
+        // Query the registered bodies rather than the voxel under `pos`: a
+        // wave crest can rise above its top water voxel, and a cave aquifer
+        // can be hidden beneath a lake/ocean body in the same column.
+        let bodies = self.water_bodies_at(block.x, block.z);
+        let time = self.water_time();
+        for column in bodies {
+            let wave = crate::water::wave_height(
+                column.kind,
+                column.wave_amplitude(),
+                column.flow_angle,
+                column.rapids,
+                pos.x,
+                pos.z,
+                time,
+            );
+            let surface = column.surface_y + wave;
+            if pos.y > surface + 0.001 || pos.y < column.bed_y - 0.001 {
+                continue;
+            }
+            return Some(WaterSample {
+                kind: column.kind,
+                surface_y: surface,
+                bed_y: column.bed_y,
+                depth: column.depth(),
+                flow: column.flow(),
+                flow_speed: column.flow_speed,
+                rapids: column.rapids,
+                wave,
+            });
+        }
+        None
     }
 
     /// True if the block at (x,y,z) is any liquid.
@@ -730,38 +737,245 @@ impl World {
         self.reg.is_liquid(id)
     }
 
-    /// Get the set of all water source positions (read access).
-    pub fn water_sources(&self) -> &RwLock<HashSet<IVec3>> {
-        &self.source_water
+    /// Render-side description of a liquid voxel's top/side surface.
+    /// Non-water liquids (lava) get a full-height surface with no animation.
+    pub fn water_vertex_info(&self, x: i32, y: i32, z: i32) -> WaterVertexInfo {
+        let id = self.get_block(x, y, z);
+        if id.is_air() {
+            return WaterVertexInfo::default();
+        }
+        let Some(water_id) = self.reg.id_of("water") else {
+            return WaterVertexInfo::default();
+        };
+        if id != water_id {
+            return WaterVertexInfo {
+                fill: 255,
+                surface: true,
+                ..Default::default()
+            };
+        }
+
+        let bodies = self.water_bodies_at(x, z);
+
+        // Cells under another water cell are always full. Pick the body that
+        // owns this cell so a cave aquifer does not inherit the lake's kind.
+        if self.get_block(x, y + 1, z) == water_id {
+            let body = bodies
+                .iter()
+                .find(|c| y as f32 >= c.bed_y - 0.001 && (y as f32) < c.surface_y - 0.001);
+            return WaterVertexInfo {
+                kind: body.map(|c| c.kind.as_u8()).unwrap_or(0),
+                fill: 255,
+                surface: false,
+                ..Default::default()
+            };
+        }
+
+        if bodies.is_empty() {
+            return WaterVertexInfo {
+                fill: 255,
+                surface: true,
+                ..Default::default()
+            };
+        }
+
+        // The top voxel of each registered body gets that body's continuous
+        // fill + wave animation. A lower, disconnected pool (a cave aquifer)
+        // is its own still body rather than a fabricated aquifer fallback.
+        let Some(column) = bodies
+            .iter()
+            .find(|c| (c.surface_y - 0.001).floor() as i32 == y)
+        else {
+            return WaterVertexInfo {
+                fill: 255,
+                surface: true,
+                ..Default::default()
+            };
+        };
+
+        WaterVertexInfo {
+            kind: column.kind.as_u8(),
+            fill: (column.fill * 255.0).round().clamp(0.0, 255.0) as u8,
+            amplitude: (column.wave_amplitude() * 32.0).clamp(0.0, 255.0) as u8,
+            flow_angle: crate::water::pack_angle(column.flow_angle),
+            flow_speed: crate::water::pack_unit(column.flow_speed / MAX_FLOW_SPEED),
+            rapids: crate::water::pack_unit(column.rapids),
+            surface: true,
+        }
     }
 
-    /// Check if a position is a known water source (O(1) via index).
-    pub fn is_known_water_source(&self, x: i32, y: i32, z: i32) -> bool {
-        self.source_water.read().contains(&IVec3::new(x, y, z))
+    /// Scan every disjoint water run in one horizontal column of a chunk.
+    ///
+    /// The chunk stores one metadata record per column, which describes the
+    /// topmost run (generation never overwrites an existing record with a
+    /// cave pool). Lower runs are disconnected cave aquifers: they are still,
+    /// full-height and are always classified as `Aquifer`.
+    fn scan_column_bodies_in_chunk(&self, chunk: &Chunk, lx: i32, lz: i32) -> Vec<WaterColumn> {
+        let Some(water_id) = self.reg.id_of("water") else {
+            return Vec::new();
+        };
+        let origin = chunk_origin(chunk.pos);
+        let meta = chunk.water_meta(lx, lz);
+        let mut bodies = Vec::new();
+        let mut ly = CHUNK_SIZE as i32 - 1;
+        while ly >= 0 {
+            if chunk.get(lx, ly, lz) != water_id {
+                ly -= 1;
+                continue;
+            }
+            let top_ly = ly;
+            while ly > 0 && chunk.get(lx, ly - 1, lz) == water_id {
+                ly -= 1;
+            }
+            let bed_ly = ly;
+            let column = if bodies.is_empty() {
+                let fill_u8 = if meta.fill == 0 { 255 } else { meta.fill };
+                let fill = fill_u8 as f32 / 255.0;
+                let surface_y = origin.y as f32 + top_ly as f32 + fill;
+                let mut column =
+                    column_from_meta(meta, surface_y, origin.y as f32 + bed_ly as f32, fill);
+                if !meta.is_some() || column.kind == WaterKind::None {
+                    column.kind = infer_kind(surface_y);
+                }
+                column
+            } else {
+                WaterColumn {
+                    kind: WaterKind::Aquifer,
+                    surface_y: (origin.y + top_ly + 1) as f32,
+                    bed_y: (origin.y + bed_ly) as f32,
+                    fill: 1.0,
+                    ..Default::default()
+                }
+            };
+            bodies.push(column);
+            ly = bed_ly - 1;
+        }
+        bodies
     }
 
-    /// Remove a water source block at (x,y,z). Uses `set_block` to set air
-    /// so lighting is properly recalculated, then enqueues neighbouring water
-    /// positions so the simulation resumes on the next tick. Returns true if
-    /// removed.
+    /// All water bodies contained in a chunk (used when registering a newly
+    /// loaded chunk).
+    fn scan_chunk_water(&self, pos: ChunkPos, chunk: &Chunk) -> Vec<(IVec2, WaterColumn)> {
+        let origin = chunk_origin(pos);
+        let mut out = Vec::new();
+        for lx in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                for column in self.scan_column_bodies_in_chunk(chunk, lx, lz) {
+                    out.push((IVec2::new(origin.x + lx, origin.z + lz), column));
+                }
+            }
+        }
+        out
+    }
+
+    /// Recompute every water body in one world column by scanning all loaded
+    /// vertical chunks at that `(x, z)`. Used after block edits and unloads.
+    pub fn refresh_water_column(&self, x: i32, z: i32) {
+        let cx = x.div_euclid(CHUNK_SIZE);
+        let cz = z.div_euclid(CHUNK_SIZE);
+        let mut found = Vec::new();
+        for cy in 0..(WORLD_HEIGHT_BLOCKS / CHUNK_SIZE) {
+            let cp = ChunkPos::new(cx, cy, cz);
+            let bodies = {
+                let chunks = self.chunks.read_shard(cp);
+                chunks.get(&cp).map_or_else(Vec::new, |chunk| {
+                    let origin = chunk_origin(cp);
+                    self.scan_column_bodies_in_chunk(chunk, x - origin.x, z - origin.z)
+                })
+            };
+            found.extend(bodies);
+        }
+        let bodies = normalize_water_bodies(found);
+        let mut map = self.water_columns.write();
+        let key = IVec2::new(x, z);
+        if bodies.is_empty() {
+            map.remove(&key);
+        } else {
+            map.insert(key, bodies);
+        }
+    }
+
+    /// Fill a single water column from `bottom` up to `surface` and write the
+    /// body metadata onto its top chunk. Returns true if anything changed.
+    fn fill_water_column(
+        &self,
+        x: i32,
+        z: i32,
+        bottom: i32,
+        surface: f32,
+        kind: WaterKind,
+        flow_angle: f32,
+        flow_speed: f32,
+        rapids: f32,
+    ) -> bool {
+        let Some(water_id) = self.reg.id_of("water") else {
+            return false;
+        };
+        let top_cell = (surface - 0.001).floor() as i32;
+        if top_cell < bottom {
+            return false;
+        }
+        let mut changed = false;
+        for y in bottom..=top_cell {
+            let cp = block_to_chunk(IVec3::new(x, y, z));
+            let mut chunks = self.chunks.write_shard(cp);
+            let Some(chunk) = chunks.get_mut(&cp) else {
+                continue;
+            };
+            let origin = chunk_origin(cp);
+            let (lx, ly, lz) = (x - origin.x, y - origin.y, z - origin.z);
+            let current = chunk.get(lx, ly, lz);
+            if current == water_id {
+                changed = true;
+                continue;
+            }
+            if current.is_air() || self.reg.get(current).replaceable {
+                chunk.set(lx, ly, lz, water_id);
+                changed = true;
+            } else {
+                break;
+            }
+        }
+        if !changed {
+            return false;
+        }
+
+        let cp = block_to_chunk(IVec3::new(x, top_cell, z));
+        let fill = (surface - top_cell as f32).clamp(0.02, 1.0);
+        let meta = WaterColumnMeta::new(
+            kind,
+            (fill * 255.0).round() as u8,
+            crate::water::pack_angle(flow_angle),
+            crate::water::pack_unit(flow_speed / MAX_FLOW_SPEED),
+            crate::water::pack_unit(rapids),
+        );
+        {
+            let mut chunks = self.chunks.write_shard(cp);
+            if let Some(chunk) = chunks.get_mut(&cp) {
+                let origin = chunk_origin(cp);
+                chunk.set_water_meta(x - origin.x, z - origin.z, meta);
+            }
+        }
+        self.refresh_water_column(x, z);
+        true
+    }
+
+    /// Remove a water voxel. Returns true if a water block was removed.
     pub fn remove_water(&self, x: i32, y: i32, z: i32) -> bool {
         let Some(water_id) = self.reg.id_of("water") else {
             return false;
         };
-        if !self.is_water_source(x, y, z) || self.get_block(x, y, z) != water_id {
+        if self.get_block(x, y, z) != water_id {
             return false;
         }
-        // Use set_block to remove water so lighting and water indexes update.
         self.set_block(x, y, z, BlockId::AIR)
     }
 
-    /// Place a water source block at (x,y,z). Sets the block + water level 8
-    /// and enqueues the position for the simulation. Spread happens over
-    /// subsequent ticks via `tick_water` (not synchronously here).
+    /// Place water at `(x,y,z)`. The water falls to the first solid floor and
+    /// fills a small puddle at the requested level; it is a still pond body.
     pub fn place_water(&self, x: i32, y: i32, z: i32) -> bool {
-        let water_id = match self.reg.id_of("water") {
-            Some(id) => id,
-            None => return false,
+        let Some(water_id) = self.reg.id_of("water") else {
+            return false;
         };
         let current = self.get_block(x, y, z);
         if !current.is_air()
@@ -770,49 +984,43 @@ impl World {
         {
             return false;
         }
-        if !self.set_block(x, y, z, water_id) {
-            return false;
-        }
-        // Set water level to 8 (source) after the block is placed.
-        self.set_water_level_world(x, y, z, 8);
-        // Enqueue the source for incremental flow on the next tick.
-        self.pending_flow.write().insert(IVec3::new(x, y, z));
-        // Track the source position in the O(1) index for fast lookups.
-        self.source_water.write().insert(IVec3::new(x, y, z));
-        true
-    }
-
-    /// Advance the water simulation by `dt` seconds. When the internal
-    /// accumulator crosses `WATER_TICK_INTERVAL`, runs one flow step and
-    /// returns the chunks modified (so the caller can request remeshes).
-    /// Lighting is intentionally NOT recomputed here — water level changes
-    /// don't meaningfully alter light absorption, and the cost would add up
-    /// for large water regions.
-    pub fn tick_water(&self, dt: f32) -> HashSet<ChunkPos> {
-        {
-            let mut acc = self.water_tick_accumulator.write();
-            *acc += dt;
-            if *acc < WATER_TICK_INTERVAL {
-                return HashSet::new();
-            }
-            *acc -= WATER_TICK_INTERVAL;
-            // Clamp to avoid runaway after long pauses.
-            if *acc > WATER_TICK_INTERVAL {
-                *acc = WATER_TICK_INTERVAL;
+        let mut bottom = 0;
+        for gy in (0..=y).rev() {
+            if self.reg.is_solid(self.get_block(x, gy, z)) {
+                bottom = gy + 1;
+                break;
             }
         }
-        // Copy-then-swap: take the pending set out from under the lock so the
-        // simulation step doesn't block `place_water`/`remove_water` (which
-        // briefly lock `pending_flow`), then merge the leftovers back in.
-        // Positions added mid-step land in the live set and run next tick;
-        // duplicates are harmless (the sim re-checks actual water levels).
-        let mut pending = std::mem::take(&mut *self.pending_flow.write());
-        let mut buf = self.water_sim_buf.write();
-        let mut affected = crate::water::simulate_flow_step(self, &mut pending, &mut buf);
-        drop(buf);
-        self.pending_flow.write().extend(pending);
-        affected.extend(std::mem::take(&mut *self.water_remesh.write()));
-        affected
+        let surface = y as f32 + 1.0;
+        let mut placed = self.fill_water_column(
+            x,
+            z,
+            bottom,
+            surface,
+            WaterKind::Pond,
+            0.0,
+            0.0,
+            0.0,
+        );
+        // Spread one ring so a bucket on flat ground forms a visible puddle
+        // rather than a one-block pillar.
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let nx = x + dx;
+            let nz = z + dz;
+            if self.get_block(nx, y, nz).is_air() && self.is_solid(nx, y - 1, nz) {
+                placed |= self.fill_water_column(
+                    nx,
+                    nz,
+                    y,
+                    surface,
+                    WaterKind::Pond,
+                    0.0,
+                    0.0,
+                    0.0,
+                );
+            }
+        }
+        placed
     }
 
     // --- meshing support ---------------------------------------------------
@@ -820,20 +1028,18 @@ impl World {
     /// Run a closure with read access to a chunk and a neighbour-sampling
     /// function that crosses chunk borders (used by the mesher on worker
     /// threads). The samplers read through the shared `RwLock`. The water
-    /// sampler returns the level (0-8) at the given world coordinate, or 0
-    /// for non-water / unloaded positions; it is used by the mesher to fill
-    /// the "step" between adjacent water layers at different levels. The
-    /// loaded sampler returns true when the chunk at the given world
-    /// coordinate is loaded; the mesher uses it to decide whether to apply
-    /// the chunk-border face-ownership rule (which prevents Z-fighting)
-    /// without leaving holes at the edge of the loaded area.
+    /// sampler returns the continuous surface fill, body kind, wave amplitude
+    /// and flow data for a liquid voxel; the loaded sampler returns true when
+    /// the chunk at the given world coordinate is loaded (the mesher uses it
+    /// to decide whether to apply the chunk-border face-ownership rule without
+    /// leaving holes at the edge of the loaded area).
     pub fn with_chunk_for_mesh<R>(
         &self,
         pos: ChunkPos,
         f: impl FnOnce(
             &Chunk,
             &dyn Fn(i32, i32, i32) -> BlockId,
-            &dyn Fn(i32, i32, i32) -> u8,
+            &dyn Fn(i32, i32, i32) -> WaterVertexInfo,
             &dyn Fn(i32, i32, i32) -> bool,
         ) -> R,
     ) -> R {
@@ -857,7 +1063,8 @@ impl World {
             // chunk. This path should be rare (mesh requested for unloaded chunk).
             let empty = Chunk::new(pos);
             let sample: &dyn Fn(i32, i32, i32) -> BlockId = &|_, _, _| BlockId::AIR;
-            let sample_water: &dyn Fn(i32, i32, i32) -> u8 = &|_, _, _| 0;
+            let sample_water: &dyn Fn(i32, i32, i32) -> WaterVertexInfo =
+                &|_, _, _| WaterVertexInfo::default();
             let sample_loaded: &dyn Fn(i32, i32, i32) -> bool = &|_, _, _| false;
             return f(&empty, sample, sample_water, sample_loaded);
         };
@@ -866,7 +1073,7 @@ impl World {
         // per-mesh heap allocations or `Arc` clones. The call is synchronous,
         // so the closures don't need to outlive it.
         let sample = |x: i32, y: i32, z: i32| world_arc.get_block(x, y, z);
-        let sample_water = |x: i32, y: i32, z: i32| world_arc.get_water_level_world(x, y, z);
+        let sample_water = |x: i32, y: i32, z: i32| world_arc.water_vertex_info(x, y, z);
         let sample_loaded = |x: i32, y: i32, z: i32| world_arc.is_block_loaded(x, y, z);
         f(&chunk, &sample, &sample_water, &sample_loaded)
     }
@@ -969,18 +1176,6 @@ impl World {
         }
         out.into_boxed_slice()
     }
-}
-
-/// Six face-adjacent neighbours of `pos`.
-fn water_neighbours(pos: IVec3) -> [IVec3; 6] {
-    [
-        pos + IVec3::new(1, 0, 0),
-        pos + IVec3::new(-1, 0, 0),
-        pos + IVec3::new(0, 1, 0),
-        pos + IVec3::new(0, -1, 0),
-        pos + IVec3::new(0, 0, 1),
-        pos + IVec3::new(0, 0, -1),
-    ]
 }
 
 #[cfg(test)]
@@ -1098,92 +1293,345 @@ mod tests {
         assert_eq!(chunks[0].1.get(0, 0, 0), BlockId(5));
     }
 
-    #[test]
-    fn inserted_chunk_registers_water_sources_and_replacing_chunk_clears_them() {
+    fn chunk_with_water(kind: crate::water::WaterKind, fill: u8, surface_cell: i32) -> Chunk {
         let world = World::new(42);
         let cp = ChunkPos::new(0, 0, 0);
-        let water = world.registry().id_of("water").unwrap();
         let mut chunk = Chunk::new(cp);
-        chunk.set(2, 3, 4, water);
-        chunk.set_water_level(2, 3, 4, 8);
-        world.insert_chunk(cp, chunk);
-        assert!(world.is_known_water_source(2, 3, 4));
-        assert_eq!(world.pending_flow_count(), 1);
-
-        world.insert_chunk(cp, Chunk::new(cp));
-        assert!(!world.is_known_water_source(2, 3, 4));
-        assert_eq!(world.pending_flow_count(), 0);
+        let stone = world.registry().id_of("stone").unwrap();
+        let water = world.registry().id_of("water").unwrap();
+        for x in 0..16 {
+            for z in 0..16 {
+                chunk.set(x, 0, z, stone);
+                if x < 2 && z < 2 {
+                    for y in 1..=surface_cell {
+                        chunk.set(x, y, z, water);
+                    }
+                    chunk.set_water_meta(
+                        x,
+                        z,
+                        WaterColumnMeta::new(
+                            kind,
+                            fill,
+                            crate::water::pack_angle(0.5),
+                            crate::water::pack_unit(0.5),
+                            0,
+                        ),
+                    );
+                }
+            }
+        }
+        chunk
     }
 
     #[test]
-    fn water_submersion_uses_partial_fluid_height() {
+    fn inserted_chunk_registers_water_columns() {
         let world = World::new(42);
         let cp = ChunkPos::new(0, 0, 0);
-        world.insert_chunk(cp, Chunk::new(cp));
-        world.set_water_level_world(0, 1, 0, 4);
+        world.insert_chunk(cp, chunk_with_water(WaterKind::Ocean, 255, 4));
+
+        let column = world.water_column_at(0, 0).expect("column registered");
+        assert_eq!(column.kind, WaterKind::Ocean);
+        assert!((column.surface_y - 5.0).abs() < 1e-5);
+        assert!((column.depth() - 4.0).abs() < 1e-5);
+        assert_eq!(world.water_column_count(), 4);
+        assert!(world.chunk_has_water(cp));
+    }
+
+    #[test]
+    fn removing_chunk_clears_water_columns() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        world.insert_chunk(cp, chunk_with_water(WaterKind::Lake, 255, 4));
+        assert_eq!(world.water_column_count(), 4);
+        world.remove_chunk(cp);
+        assert_eq!(world.water_column_count(), 0);
+        assert!(world.water_column_at(0, 0).is_none());
+    }
+
+    #[test]
+    fn water_submersion_uses_partial_surface_height() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        // Lake water so the surface never moves; top voxel fill = 128/255.
+        world.insert_chunk(cp, {
+            let mut chunk = chunk_with_water(WaterKind::Lake, 128, 4);
+            // Remove the top full voxel so the partial-fill cell is the top.
+            let water = world.registry().id_of("water").unwrap();
+            chunk.set(0, 4, 0, water);
+            chunk
+        });
+        let column = world.water_column_at(0, 0).unwrap();
+        assert!((column.surface_y - 4.5).abs() < 0.01);
 
         let submerged = world.water_submersion(
-            glam::Vec3::new(0.2, 1.0, 0.2),
-            glam::Vec3::new(0.8, 1.9, 0.8),
+            glam::Vec3::new(0.2, 4.0, 0.2),
+            glam::Vec3::new(0.8, 5.0, 0.8),
         );
-        assert!((submerged - (0.5 / 0.9)).abs() < 0.01);
+        assert!((submerged - 0.5).abs() < 0.02, "submersion={submerged}");
+    }
+
+    #[test]
+    fn deep_water_bed_spans_vertical_chunks() {
+        let world = World::new(42);
+        let water = world.registry().id_of("water").unwrap();
+
+        // Upper body slice: world y 16..20, one surface column at (0,0).
+        let mut upper = Chunk::new(ChunkPos::new(0, 1, 0));
+        for y in 0..=3 {
+            upper.set(0, y, 0, water);
+        }
+        upper.set_water_meta(0, 0, WaterColumnMeta::new(WaterKind::Lake, 255, 0, 0, 0));
+        world.insert_chunk(ChunkPos::new(0, 1, 0), upper);
+
+        // Lower body slice: world y 1..15. Inserted after the surface chunk so
+        // the merge path has to extend the already-known bed.
+        let mut lower = Chunk::new(ChunkPos::new(0, 0, 0));
+        for y in 1..=15 {
+            lower.set(0, y, 0, water);
+        }
+        lower.set_water_meta(0, 0, WaterColumnMeta::new(WaterKind::Lake, 255, 0, 0, 0));
+        world.insert_chunk(ChunkPos::new(0, 0, 0), lower);
+
+        let column = world.water_column_at(0, 0).unwrap();
+        assert!((column.surface_y - 20.0).abs() < 1e-4, "surface={}", column.surface_y);
+        assert!((column.bed_y - 1.0).abs() < 1e-4, "bed={}", column.bed_y);
+        assert!(
+            world.water_sample(glam::Vec3::new(0.5, 10.0, 0.5)).is_some(),
+            "water below the surface chunk must still be swimmable"
+        );
+
+        // Unloading the lower slice must raise the registered bed and stop
+        // reporting water in the now-unloaded space.
+        world.remove_chunk(ChunkPos::new(0, 0, 0));
+        let column = world.water_column_at(0, 0).unwrap();
+        assert!((column.bed_y - 16.0).abs() < 1e-4, "bed={}", column.bed_y);
+        assert!(world
+            .water_sample(glam::Vec3::new(0.5, 10.0, 0.5))
+            .is_none());
+    }
+
+    #[test]
+    fn water_surface_grid_marks_water_and_its_wet_fringe() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        world.insert_chunk(cp, chunk_with_water(WaterKind::Lake, 255, 4));
+
+        let mut grid = vec![0.0; 9 * 9 * crate::water::WATER_SURFACE_FLOATS_PER_CELL];
+        world.fill_water_surface_grid(-2, -2, 9, &mut grid);
+        let cell = |grid: &[f32], x: usize, z: usize, layer: usize| {
+            let base = (z * 9 + x) * crate::water::WATER_SURFACE_FLOATS_PER_CELL + layer * 2;
+            (grid[base], grid[base + 1])
+        };
+
+        // The 2x2 water columns are positive at the lake surface with their
+        // real bed; the second layer is empty.
+        for (x, z) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let (surface, bed) = cell(&grid, x + 2, z + 2, 0);
+            assert!((surface - 5.0).abs() < 1e-4, "water cell ({x},{z}) = {surface}");
+            assert!((bed - 1.0).abs() < 1e-4, "water bed ({x},{z}) = {bed}");
+            assert_eq!(cell(&grid, x + 2, z + 2, 1).0, crate::water::WATER_SURFACE_NONE);
+        }
+        // The immediately adjacent dry beach is marked for wet edges, but
+        // negative so the shader does not draw caustics on it.
+        let (shore, fringe) = cell(&grid, 4, 2, 0); // world (2, 0)
+        assert!((shore + 5.0).abs() < 1e-4, "shore cell = {shore}");
+        assert!((fringe - 5.0).abs() < 1e-4, "fringe height = {fringe}");
+        // Further inland is unmarked in every layer.
+        for layer in 0..crate::water::WATER_SURFACE_LAYERS {
+            assert_eq!(
+                cell(&grid, 6, 6, layer).0,
+                crate::water::WATER_SURFACE_NONE
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_cave_aquifer_is_visible_to_physics_and_grid() {
+        let world = World::new(42);
+        let water = world.registry().id_of("water").unwrap();
+
+        // Lake body in the surface chunk: world y 16..20.
+        let mut upper = Chunk::new(ChunkPos::new(0, 1, 0));
+        for y in 0..=3 {
+            upper.set(0, y, 0, water);
+        }
+        upper.set_water_meta(0, 0, WaterColumnMeta::new(WaterKind::Lake, 255, 0, 0, 0));
+        world.insert_chunk(ChunkPos::new(0, 1, 0), upper);
+
+        // Cave aquifer in the lower chunk: world y 1..5, separated from the
+        // lake by eleven blocks of rock/air.
+        let mut lower = Chunk::new(ChunkPos::new(0, 0, 0));
+        for y in 1..=4 {
+            lower.set(0, y, 0, water);
+        }
+        lower.set_water_meta(0, 0, WaterColumnMeta::new(WaterKind::Aquifer, 255, 0, 0, 0));
+        world.insert_chunk(ChunkPos::new(0, 0, 0), lower);
+
+        let bodies = world.water_bodies_at(0, 0);
+        assert_eq!(bodies.len(), 2, "top lake + cave aquifer expected: {bodies:?}");
+        assert_eq!(bodies[0].kind, WaterKind::Lake);
+        assert!((bodies[0].surface_y - 20.0).abs() < 1e-4);
+        assert_eq!(bodies[1].kind, WaterKind::Aquifer);
+        assert!((bodies[1].surface_y - 5.0).abs() < 1e-4);
+        assert!((bodies[1].bed_y - 1.0).abs() < 1e-4);
+
         assert_eq!(
-            world.water_submersion(
-                glam::Vec3::new(0.2, 1.6, 0.2),
-                glam::Vec3::new(0.8, 2.0, 0.8),
-            ),
-            0.0
+            world
+                .water_sample(glam::Vec3::new(0.5, 3.0, 0.5))
+                .expect("cave water")
+                .kind,
+            WaterKind::Aquifer
         );
+        assert!(world.water_sample(glam::Vec3::new(0.5, 10.0, 0.5)).is_none());
+        assert_eq!(
+            world
+                .water_sample(glam::Vec3::new(0.5, 18.0, 0.5))
+                .expect("lake water")
+                .kind,
+            WaterKind::Lake
+        );
+        let cave_submersion = world.water_submersion(
+            glam::Vec3::new(0.2, 2.0, 0.2),
+            glam::Vec3::new(0.8, 4.0, 0.8),
+        );
+        assert!(cave_submersion > 0.9, "cave submersion = {cave_submersion}");
+
+        let mut grid = vec![
+            0.0;
+            3 * 3 * crate::water::WATER_SURFACE_FLOATS_PER_CELL
+        ];
+        world.fill_water_surface_grid(-1, -1, 3, &mut grid);
+        let base = (1 * 3 + 1) * crate::water::WATER_SURFACE_FLOATS_PER_CELL;
+        assert!((grid[base] - 20.0).abs() < 1e-4, "lake grid layer: {}", grid[base]);
+        assert!((grid[base + 1] - 16.0).abs() < 1e-4, "lake bed: {}", grid[base + 1]);
+        assert!((grid[base + 2] - 5.0).abs() < 1e-4, "cave grid layer: {}", grid[base + 2]);
+        assert!((grid[base + 3] - 1.0).abs() < 1e-4, "cave bed: {}", grid[base + 3]);
     }
 
     #[test]
-    fn water_source_index_tracking() {
+    fn one_chunk_can_contain_a_surface_body_and_a_cave_pool() {
+        let world = World::new(42);
+        let water = world.registry().id_of("water").unwrap();
+        let cp = ChunkPos::new(0, 0, 0);
+        let mut chunk = Chunk::new(cp);
+        for y in 1..=3 {
+            chunk.set(0, y, 0, water);
+        }
+        for y in 10..=12 {
+            chunk.set(0, y, 0, water);
+        }
+        chunk.set_water_meta(0, 0, WaterColumnMeta::new(WaterKind::Lake, 255, 0, 0, 0));
+        world.insert_chunk(cp, chunk);
+
+        let bodies = world.water_bodies_at(0, 0);
+        assert_eq!(bodies.len(), 2, "both runs expected: {bodies:?}");
+        assert_eq!(bodies[0].kind, WaterKind::Lake);
+        assert!((bodies[0].surface_y - 13.0).abs() < 1e-4);
+        assert_eq!(bodies[1].kind, WaterKind::Aquifer);
+        assert!((bodies[1].surface_y - 4.0).abs() < 1e-4);
+        assert!(world
+            .water_sample(glam::Vec3::new(0.5, 11.0, 0.5))
+            .is_some());
+        assert!(world
+            .water_sample(glam::Vec3::new(0.5, 2.0, 0.5))
+            .is_some());
+        assert!(world.water_sample(glam::Vec3::new(0.5, 7.0, 0.5)).is_none());
+    }
+
+    #[test]
+    fn water_submersion_counts_wave_crests_above_the_top_voxel() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        // Use a deeper column than the minimum needed for a surface cell:
+        // the six-swell spectrum deliberately spreads crest phases, so a
+        // 4-block column no longer reaches the old single-swell peak at this
+        // particular sample point. Eight blocks gives the same test a real
+        // crest while still exercising the surface-vs-voxel split.
+        let surface_cell = 8;
+        world.insert_chunk(cp, chunk_with_water(WaterKind::Ocean, 255, surface_cell));
+        let flat_top = (surface_cell + 1) as f32;
+        let column = world.water_column_at(0, 0).unwrap();
+        assert!(column.wave_amplitude() > 0.5,
+                "test needs a wave large enough to clear the voxel top");
+
+        // Advance the clock to a crest whose surface is above the flat top
+        // voxel. Old block-scan submersion reported zero here.
+        let mut surface = 0.0;
+        for _ in 0..400 {
+            world.tick_water(0.1);
+            surface = world
+                .water_column_at(0, 0)
+                .unwrap()
+                .surface_at(0.5, 0.5, world.water_time());
+            if surface > flat_top + 0.5 {
+                break;
+            }
+        }
+        assert!(surface > flat_top + 0.5, "no crest found (surface={surface})");
+
+        let submerged = world.water_submersion(
+            glam::Vec3::new(0.2, flat_top + 0.1, 0.2),
+            glam::Vec3::new(0.8, flat_top + 0.9, 0.8),
+        );
+        assert!(submerged > 0.4, "crest must buoy the box (sub={submerged})");
+    }
+
+    #[test]
+    fn place_water_creates_a_column_and_remove_clears_it() {
         let world = World::new(42);
         let cp = ChunkPos::new(0, 0, 0);
         world.insert_chunk(cp, Chunk::new(cp));
 
-        // Place water — should add to index.
-        world.place_water(1, 10, 1);
-        assert!(world.is_known_water_source(1, 10, 1));
-        assert_eq!(world.water_sources().read().len(), 1);
+        let stone = world.registry().id_of("stone").unwrap();
+        world.set_block(1, 0, 1, stone);
+        assert!(world.place_water(1, 1, 1));
+        let column = world.water_column_at(1, 1).expect("placed column");
+        assert_eq!(column.kind, WaterKind::Pond);
+        assert!((column.surface_y - 2.0).abs() < 1e-5);
+        assert!(world.water_sample(glam::Vec3::new(1.5, 1.5, 1.5)).is_some());
 
-        // Remove water — should remove from index.
-        world.remove_water(1, 10, 1);
-        assert!(!world.is_known_water_source(1, 10, 1));
-        assert_eq!(world.water_sources().read().len(), 0);
+        assert!(world.remove_water(1, 1, 1));
+        assert!(world.water_column_at(1, 1).is_none());
     }
 
     #[test]
-    fn water_source_index_multiple() {
+    fn water_sample_reports_body_flow_and_wave() {
         let world = World::new(42);
         let cp = ChunkPos::new(0, 0, 0);
-        world.insert_chunk(cp, Chunk::new(cp));
-
-        world.place_water(0, 5, 0);
-        world.place_water(1, 5, 0);
-        world.place_water(2, 5, 0);
-        assert_eq!(world.water_sources().read().len(), 3);
-        assert!(world.is_known_water_source(0, 5, 0));
-        assert!(world.is_known_water_source(1, 5, 0));
-        assert!(world.is_known_water_source(2, 5, 0));
-
-        // Remove one — index should shrink to 2.
-        world.remove_water(1, 5, 0);
-        assert_eq!(world.water_sources().read().len(), 2);
-        assert!(!world.is_known_water_source(1, 5, 0));
-        assert!(world.is_known_water_source(0, 5, 0));
-        assert!(world.is_known_water_source(2, 5, 0));
+        world.insert_chunk(cp, chunk_with_water(WaterKind::River, 255, 4));
+        let sample = world
+            .water_sample(glam::Vec3::new(0.5, 2.0, 0.5))
+            .expect("inside river");
+        assert_eq!(sample.kind, WaterKind::River);
+        assert!(sample.flow_speed > 0.0);
+        assert!((sample.depth - 4.0).abs() < 1e-5);
+        // A point well above the wave crest is not submerged.
+        assert!(world
+            .water_sample(glam::Vec3::new(0.5, 8.0, 0.5))
+            .is_none());
     }
 
     #[test]
-    fn water_source_index_idempotent_place() {
+    fn tick_water_advances_the_wave_clock() {
+        let world = World::new(42);
+        let before = world.water_time();
+        world.tick_water(0.25);
+        assert!((world.water_time() - before - 0.25).abs() < 1e-5);
+        world.tick_water(-1.0);
+        assert!((world.water_time() - before - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn water_vertex_info_marks_surface_and_amplitude() {
         let world = World::new(42);
         let cp = ChunkPos::new(0, 0, 0);
-        world.insert_chunk(cp, Chunk::new(cp));
-
-        // Place water twice at the same position — index should still have 1.
-        world.place_water(0, 5, 0);
-        world.place_water(0, 5, 0);
-        assert_eq!(world.water_sources().read().len(), 1);
+        world.insert_chunk(cp, chunk_with_water(WaterKind::Ocean, 255, 4));
+        let top = world.water_vertex_info(0, 4, 0);
+        assert!(top.surface);
+        assert_eq!(top.kind, WaterKind::Ocean.as_u8());
+        assert!(top.amplitude > 0);
+        let under = world.water_vertex_info(0, 3, 0);
+        assert!(!under.surface);
+        assert_eq!(under.fill, 255);
     }
 }

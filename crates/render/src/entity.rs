@@ -283,6 +283,7 @@ pub fn unit_quad_vertices() -> Vec<crate::Vertex> {
             pos: p[i],
             uv: uv[i],
             tile: 0,
+            water: 0,
         })
         .collect()
 }

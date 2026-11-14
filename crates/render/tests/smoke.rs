@@ -92,12 +92,13 @@ fn vertex_layout_is_pod_roundtrip_safe_with_nonzero_payload() {
         pos: [1.0, 2.0, 3.0],
         uv: [0.5, 0.25],
         tile: 7,
+        water: 0x3009,
     };
     let bytes = bytemuck::bytes_of(&v);
     assert_eq!(
         bytes.len(),
-        24,
-        "Vertex must be exactly 24 bytes (3*4 pos + 2*4 uv + 4 tile)"
+        28,
+        "Vertex must be exactly 28 bytes (pos + uv + tile + water)"
     );
     let back: Vertex = *bytemuck::from_bytes(bytes);
     assert_eq!(back.pos[0], 1.0, "pos[0] must survive POD roundtrip");
@@ -107,6 +108,7 @@ fn vertex_layout_is_pod_roundtrip_safe_with_nonzero_payload() {
         back.tile, v.tile,
         "tile must survive POD roundtrip (no padding bit-stealing)"
     );
+    assert_eq!(back.water, v.water, "water params must survive roundtrip");
 }
 
 #[test]

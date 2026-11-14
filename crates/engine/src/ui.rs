@@ -35,6 +35,27 @@ pub(crate) struct Row {
     pub(crate) w: f32,
 }
 
+/// Tile the block atlas dirt texture across the whole menu background.
+///
+/// The title and world-select screens used to sit directly over the last
+/// played world (or a panorama), which made it ambiguous whether a new world
+/// had actually replaced the old one. A dense dirt backdrop is the menu's own
+/// neutral canvas and completely covers the 3D scene underneath.
+fn draw_dirt_background(ui: &mut UiDrawData, w: f32, h: f32) {
+    const TILE: f32 = 32.0;
+    const DIRT_TILE: u16 = 2; // assets/textures/textures.toml: 2 = dirt.png
+    const TINT: [u8; 4] = [150, 145, 140, 255];
+    let mut y = 0.0;
+    while y < h {
+        let mut x = 0.0;
+        while x < w {
+            ui.block_icon(x, y, TILE, TILE, DIRT_TILE, TINT);
+            x += TILE;
+        }
+        y += TILE;
+    }
+}
+
 /// Sanitize a string for use as a directory/file name.
 fn sanitize_filename(name: &str) -> String {
     name.chars()
@@ -1659,9 +1680,10 @@ impl crate::EngineApp {
     // ── Title Screen ────────────────────────────────────────────────────
 
     fn draw_title_screen(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
-        // Background: vertical dark gradient (the panorama renders behind;
-        // this veil keeps the menu readable on any sky).
-        ui.gradient_v(0.0, 0.0, w, h, [14, 16, 26, 235], [4, 4, 8, 235]);
+        // Opaque dirt canvas, then a light vignette for menu contrast. The
+        // world/panorama may still be rendered underneath; this covers it.
+        draw_dirt_background(ui, w, h);
+        ui.gradient_v(0.0, 0.0, w, h, [8, 10, 16, 55], [4, 4, 8, 115]);
 
         // Shared layout (screen_layout.rs) — identical math for the click
         // handler, so no stored rects are needed.
@@ -1792,8 +1814,9 @@ impl crate::EngineApp {
     // ── World Select ────────────────────────────────────────────────────
 
     fn draw_world_select(&mut self, ui: &mut UiDrawData, w: f32, h: f32) {
-        // Full-screen dimmed overlay.
-        ui.quad(0.0, 0.0, w, h, [0, 0, 0, 200]);
+        // Opaque dirt canvas instead of the previously-played world.
+        draw_dirt_background(ui, w, h);
+        ui.quad(0.0, 0.0, w, h, [0, 0, 0, 120]);
 
         // Shared layout (screen_layout.rs) — identical math for the click
         // handler, so stored rects are unnecessary.
@@ -2121,7 +2144,6 @@ impl crate::EngineApp {
 
     /// Load a world from a save directory and start playing.
     pub(crate) fn load_and_play_world(&mut self, save_path: std::path::PathBuf) {
-        // Load world chunks.
         match voxel_world::save::load_world(&save_path) {
             Ok((seed, chunks)) => {
                 log::info!(
@@ -2130,11 +2152,25 @@ impl crate::EngineApp {
                     seed,
                     chunks.len()
                 );
-                // Clear existing world and insert loaded chunks.
+                // Build a fresh world with the saved seed and insert the saved
+                // chunks. The old code inserted them into the currently-loaded
+                // world, leaving the previous seed's terrain and simulation in
+                // place when switching saves.
+                let world = World::new_with_path(seed, self.config.assets_path.as_deref());
                 for (pos, chunk) in chunks {
-                    self.world_state.world.insert_chunk(pos, chunk);
+                    world.insert_chunk(pos, chunk);
                 }
-                // Load entity state.
+                let (sx, sy, sz) = world.terrain().find_spawn();
+                let spawn =
+                    glam::Vec3::new(sx as f32 + 0.5, sy as f32 + 2.0, sz as f32 + 0.5);
+                if let Err(e) = self.install_world(world.clone(), spawn) {
+                    log::error!("failed to install loaded world: {e}");
+                    self.gameplay
+                        .chat
+                        .push_message(format!("Failed to load world: {e}"));
+                    return;
+                }
+                // Load entity state after the new simulation exists.
                 let _ = self.load_entities(&save_path);
                 // Load world_info and restore cheats flag + game mode.
                 let mut loaded_mode = None;
@@ -2183,16 +2219,15 @@ impl crate::EngineApp {
     ) {
         let saves_dir = std::path::PathBuf::from("saves");
 
-        // Parse seed: empty = random, otherwise parse as i32.
-        let seed = if seed_str.is_empty() {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i32)
-                .unwrap_or(1337)
+        // Parse seed: empty = a fresh random seed from the OS-backed RNG,
+        // otherwise parse as i32 (or hash the text).
+        let seed = if seed_str.trim().is_empty() {
+            crate::random_world_seed()
         } else {
-            seed_str.parse::<i32>().unwrap_or_else(|_| {
+            seed_str.trim().parse::<i32>().unwrap_or_else(|_| {
                 // Hash the string to a seed.
                 seed_str
+                    .trim()
                     .bytes()
                     .fold(0i32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i32))
             })
@@ -2230,7 +2265,19 @@ impl crate::EngineApp {
         }
         let _ = crate::save::write_world_info(&save_path, &info);
 
-        // Save the initial world state.
+        // Build a brand-new World for this seed. The old code saved the
+        // currently-loaded chunks into the new folder and kept playing the old
+        // terrain, so a "new" world inherited the previous seed's landscape.
+        if let Err(e) = self.install_fresh_world(seed) {
+            log::error!("failed to create fresh world: {e}");
+            self.gameplay
+                .chat
+                .push_message(format!("Failed to create world: {e}"));
+            return;
+        }
+
+        // Persist the empty world (seed + metadata); chunks stream in as the
+        // player spawns.
         if let Err(e) = voxel_world::save::save_world(&self.world_state.world, &save_path) {
             log::error!("failed to save initial world: {e}");
         }
@@ -3702,7 +3749,7 @@ impl crate::EngineApp {
                     "Water {:.2}ms  Upload {:.2}ms",
                     s.water_tick_ms, s.chunk_upload_ms
                 ),
-                format!("Water pending: {}", s.water_pending_flow),
+                format!("Water columns: {}", s.water_columns),
                 format!(
                     "GPU mem: {:.1} MB alloc / {:.1} MB reserved",
                     s.gpu_allocated_mb, s.gpu_reserved_mb
@@ -4627,4 +4674,110 @@ fn apply_transform_scale(
         origin.z + ((max.z - origin.z) as f32 * factor).round() as i32,
     );
     edit::brush::affected_chunks_range(origin.min(new_max), origin.max(new_max))
+}
+
+#[cfg(test)]
+mod create_world_ui_tests {
+    use std::path::PathBuf;
+    use voxel_core::{ChunkPos, Point};
+
+    struct RemoveDir(PathBuf);
+    impl Drop for RemoveDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Exercise the same two click handlers the world-select screen uses:
+    /// open the create dialog, leave the seed field blank, and press Create.
+    /// The resulting world must have a new random seed and must not retain
+    /// chunks from the previously loaded world.
+    #[test]
+    fn blank_seed_via_create_dialog_installs_fresh_world() {
+        let mut app = crate::EngineApp::new(crate::EngineConfig::default())
+            .expect("headless EngineApp");
+        let old_seed = app.world_state.world.seed();
+
+        // Put a unique marker in the old world, far outside any streamed area.
+        let stone = app
+            .world_state
+            .world
+            .registry()
+            .id_of("stone")
+            .expect("stone block");
+        let marker_pos = ChunkPos::new(1000, 0, 1000);
+        let mut marker = voxel_world::Chunk::new(marker_pos);
+        marker.set(0, 0, 0, stone);
+        app.world_state.world.insert_chunk(marker_pos, marker);
+        assert!(!app.world_state.world.get_block(16000, 0, 16000).is_air());
+
+        app.enter_world_select();
+        let (w, h) = app.render.logical_size();
+        let world_select = crate::screen_layout::WorldSelectLayout::new(
+            w,
+            h,
+            app.gameplay.world_list.len(),
+            app.gameplay.world_select_scroll,
+        );
+        let create = world_select.create_btn;
+        app.gameplay.mouse_pos = Point::new(create.x + create.w * 0.5, create.y + create.h * 0.5);
+        app.handle_world_select_click();
+        assert!(
+            app.gameplay.create_world_state.is_some(),
+            "world-select Create button did not open the dialog"
+        );
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let name = format!("__ui_blank_seed_test_{}_{}", std::process::id(), stamp);
+        {
+            let state = app.gameplay.create_world_state.as_mut().unwrap();
+            state.name = name;
+            assert!(state.seed.trim().is_empty(), "seed field should start blank");
+        }
+
+        // The dialog's Create button is enabled for the default name and the
+        // blank seed is passed through unchanged to the production path.
+        let dialog = crate::screen_layout::CreateWorldLayout::new(w, h, false);
+        let create = dialog.create_btn;
+        app.gameplay.mouse_pos = Point::new(create.x + create.w * 0.5, create.y + create.h * 0.5);
+        app.handle_create_world_click();
+
+        assert_eq!(app.gameplay.game_state, crate::GameState::Playing);
+        let path = app
+            .gameplay
+            .current_world_path
+            .clone()
+            .expect("create-world dialog did not record a save path");
+        let cleanup = RemoveDir(path);
+        let new_seed = app.world_state.world.seed();
+        assert_ne!(new_seed, old_seed, "blank seed reused the previous seed");
+        assert_eq!(app.simulation.world.seed(), new_seed);
+        assert!(
+            app.world_state.world.get_block(16000, 0, 16000).is_air(),
+            "new world retained a chunk from the previous world"
+        );
+        let spawn = app.simulation.player_pos().expect("fresh world has a spawn");
+        let sx = spawn.x.floor() as i32;
+        let sy = spawn.y.floor() as i32;
+        let sz = spawn.z.floor() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if (1..=8).any(|dy| !app.world_state.world.get_block(sx, sy - dy, sz).is_air()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fresh world has no generated terrain under the spawn"
+            );
+            if let Some(streamer) = app.world_state.streamer.as_ref() {
+                let _ = streamer.poll_events();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(app);
+        drop(cleanup);
+    }
 }

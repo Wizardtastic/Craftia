@@ -8,7 +8,7 @@
 // than initial load speed; the CPU greedy mesher refines near chunks.
 //
 // Input:  18³ R16_UINT 3D texture (16³ chunk + 1-voxel border from neighbours).
-// Output: flat uint vertex buffer (6 uints = 24 bytes per vertex, matching the
+// Output: flat uint vertex buffer (7 uints = 28 bytes per vertex, matching the
 //         #[repr(C)] Vertex layout), uint index buffer, and a 2-element counter
 //         [vertex_count, index_count] incremented atomically.
 
@@ -27,7 +27,7 @@ layout(std430, set = 0, binding = 1) readonly buffer PropsBuf {
     uvec4 props[];
 };
 
-// Output: flat uint arrays. Each vertex = 6 consecutive uints (24 bytes).
+// Output: flat uint arrays. Each vertex = 7 consecutive uints (28 bytes).
 layout(std430, set = 0, binding = 2) buffer VertBuf { uint verts[]; };
 layout(std430, set = 0, binding = 3) buffer IdxBuf { uint idxs[]; };
 layout(std430, set = 0, binding = 4) buffer CtrBuf { uint ctr[2]; };
@@ -127,16 +127,17 @@ void main() {
         uint tile = block_tile(cur_id, uint(fi));
         vec3 base = bpos + FACE_BASE[fi] * float(cell);
 
-        uint vo = v_base * 6u;
+        uint vo = v_base * 7u;
         for (int c = 0; c < 4; c++) {
             vec3 p = base + FACE_CORNER[fi * 4 + c] * float(cell);
-            uint o = vo + uint(c) * 6u;
+            uint o = vo + uint(c) * 7u;
             verts[o + 0] = floatBitsToUint(p.x);
             verts[o + 1] = floatBitsToUint(p.y);
             verts[o + 2] = floatBitsToUint(p.z);
             verts[o + 3] = floatBitsToUint(FACE_UV[fi * 4 + c].x);
             verts[o + 4] = floatBitsToUint(FACE_UV[fi * 4 + c].y);
             verts[o + 5] = tile & 0xFFu;
+            verts[o + 6] = 0u; // packed water: GPU-meshed chunks are dry
         }
         idxs[i_base + 0] = v_base;
         idxs[i_base + 1] = v_base + 1u;

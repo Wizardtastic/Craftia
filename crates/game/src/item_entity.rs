@@ -19,6 +19,11 @@ const ITEM_GRAVITY: f32 = 16.0;
 const ITEM_DRAG: f32 = 0.98;
 /// Half-extent of the item collision cube.
 const ITEM_HALF: f32 = 0.125;
+/// Upward acceleration of a fully submerged item, blocks/s². Larger than
+/// gravity so dropped items bob back to the surface instead of sinking.
+const ITEM_BUOYANCY: f32 = 40.0;
+/// How strongly a surface current pushes a floating item, blocks/s².
+const ITEM_CURRENT_ACCEL: f32 = 3.0;
 
 /// ECS component for a dropped item entity in the world.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -128,10 +133,40 @@ pub fn item_entity_system(world: &mut World, dt: f32) {
         // Integrate with voxel collision. Items slide on the floor and stop
         // instead of falling through terrain.
         let drag = ITEM_DRAG.powf(dt * 20.0);
+        // Probe slightly below the centre: an item bobbing with its centre just
+        // above the surface must still see the water, otherwise a gravity /
+        // buoyancy sawtooth makes it chatter instead of floating smoothly.
+        let water_probe = transform.pos - Vec3::Y * (ITEM_HALF * 0.8);
+        let water = physics
+            .as_ref()
+            .and_then(|p| p.0.water_sample(water_probe));
+        if water.is_some() {
+            // Water contact overrides ground state: a floating item must be
+            // free to drift and bob even if it was resting on a bank.
+            item.on_ground = false;
+        }
         if !item.on_ground {
-            item.velocity.y -= ITEM_GRAVITY * dt;
-            item.velocity.x *= drag;
-            item.velocity.z *= drag;
+            if let Some(sample) = water {
+                // Fraction of the item cube that is below the (wave-adjusted)
+                // surface. Buoyancy equals gravity at ~40% coverage.
+                let submerged = (sample.surface_y - (transform.pos.y - ITEM_HALF))
+                    .clamp(0.0, ITEM_HALF * 2.0)
+                    / (ITEM_HALF * 2.0);
+                item.velocity.y +=
+                    (ITEM_BUOYANCY * submerged - ITEM_GRAVITY) * dt;
+                item.velocity.y = item.velocity.y.clamp(-6.0, 2.5);
+                // Items are carried by the current and rapids.
+                let water_drag = 0.82f32.powf(dt * 20.0);
+                item.velocity.x = item.velocity.x * water_drag
+                    + sample.flow.x * ITEM_CURRENT_ACCEL * dt;
+                item.velocity.z = item.velocity.z * water_drag
+                    + sample.flow.y * ITEM_CURRENT_ACCEL * dt;
+                item.velocity.y *= water_drag;
+            } else {
+                item.velocity.y -= ITEM_GRAVITY * dt;
+                item.velocity.x *= drag;
+                item.velocity.z *= drag;
+            }
         } else {
             let ground_friction = 0.6f32.powf(dt * 20.0);
             item.velocity.x *= ground_friction;

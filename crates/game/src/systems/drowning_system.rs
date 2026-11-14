@@ -50,8 +50,10 @@ pub fn drowning_system(world: &mut World, dt: f32) {
         .as_ref()
         .map(|phys| {
             let head = transform.pos + glam::Vec3::new(0.0, eye_offset, 0.0);
-            let block = voxel_core::math::world_to_block(head);
-            phys.0.is_liquid(block.x, block.y, block.z)
+            // The continuous wave surface decides whether the head is under:
+            // a crest can submerge a swimmer whose head is above the flat
+            // block top, and a trough can expose it without changing blocks.
+            phys.0.water_sample(head).is_some()
         })
         .unwrap_or(false);
 

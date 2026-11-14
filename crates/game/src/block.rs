@@ -109,7 +109,7 @@ impl BlockAction {
 
                 if name.as_ref() == "bucket" || name.as_ref() == "water_bucket" {
                     if name.as_ref() == "bucket"
-                        && world.is_water_source(h.block.x, h.block.y, h.block.z)
+                        && world.is_liquid(h.block.x, h.block.y, h.block.z)
                     {
                         // Empty bucket on water: pick up source (single block).
                         let bx = h.block.x;

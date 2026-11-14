@@ -50,7 +50,14 @@ pub struct TelemetrySnapshot {
     // -- Water --
     /// Wall-clock ms spent in `tick_water` across the frame's fixed steps.
     pub water_tick_ms: f32,
-    pub water_pending_flow: u32,
+    /// Live water-surface columns across all loaded chunks.
+    pub water_columns: u32,
+    /// CPU ms spent rebuilding the local water-body grid on frames that
+    /// refreshed it (0 on cached frames).
+    pub water_grid_build_ms: f32,
+    /// CPU ms spent writing + flushing the water-body grid to its host-visible
+    /// GPU buffer (0 when no upload was needed).
+    pub water_grid_upload_ms: f32,
 
     // -- Upload --
     /// Wall-clock ms spent draining streamer events and uploading chunk
@@ -88,7 +95,9 @@ impl Default for TelemetrySnapshot {
             streamer_gen_ms: 0.0,
             streamer_mesh_ms: 0.0,
             water_tick_ms: 0.0,
-            water_pending_flow: 0,
+            water_columns: 0,
+            water_grid_build_ms: 0.0,
+            water_grid_upload_ms: 0.0,
             chunk_upload_ms: 0.0,
             entity_count: 0,
             archetype_count: 0,
@@ -132,7 +141,7 @@ pub enum MetricSelector {
     StreamerGenMs,
     StreamerMeshMs,
     WaterTickMs,
-    WaterPendingFlow,
+    WaterColumns,
     ChunkUploadMs,
     EntityCount,
     ArchetypeCount,
@@ -244,7 +253,7 @@ impl TelemetryCollector {
                 MetricSelector::StreamerGenMs => s.streamer_gen_ms,
                 MetricSelector::StreamerMeshMs => s.streamer_mesh_ms,
                 MetricSelector::WaterTickMs => s.water_tick_ms,
-                MetricSelector::WaterPendingFlow => s.water_pending_flow as f32,
+                MetricSelector::WaterColumns => s.water_columns as f32,
                 MetricSelector::ChunkUploadMs => s.chunk_upload_ms,
                 MetricSelector::EntityCount => s.entity_count as f32,
                 MetricSelector::ArchetypeCount => s.archetype_count as f32,

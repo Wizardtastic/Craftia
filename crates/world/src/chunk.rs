@@ -9,9 +9,10 @@
 //! during worldgen and meshing) are cache-friendly. Indexing helpers live in
 //! `voxel_core::math`.
 
-use voxel_core::{BlockId, ChunkPos, CHUNK_CUBED};
+use voxel_core::{BlockId, ChunkPos, CHUNK_CUBED, CHUNK_SIZE};
 
 use crate::registry::BlockRegistry;
+use crate::water::WaterColumnMeta;
 
 /// One cubic chunk section: 16×16×16 blocks.
 #[derive(Clone)]
@@ -30,8 +31,9 @@ pub struct Chunk {
     /// Cached count of non-air blocks, kept O(1) for the mesher's per-remesh
     /// capacity reservation instead of scanning all 4096 voxels each time.
     non_air: usize,
-    /// Water level 0–8 per block. 0 = no water, 1 = shallowest flow, 8 = source.
-    pub(crate) water_level: Box<[u8]>,
+    /// Per-column water-body metadata (16×16 records). Water surfaces are a
+    /// continuous height field; there are no per-voxel flow levels anymore.
+    pub(crate) water_meta: Box<[WaterColumnMeta]>,
     /// Set whenever a block changes so the mesher/streamer knows to remesh.
     pub dirty: bool,
     /// True once `TerrainGenerator` has populated this chunk.
@@ -48,7 +50,11 @@ impl Chunk {
             palette_mode: false,
             // A fresh chunk is entirely air.
             non_air: 0,
-            water_level: vec![0u8; CHUNK_CUBED].into_boxed_slice(),
+            water_meta: vec![
+                WaterColumnMeta::NONE;
+                (CHUNK_SIZE * CHUNK_SIZE) as usize
+            ]
+            .into_boxed_slice(),
             dirty: false,
             generated: false,
         }
@@ -199,29 +205,33 @@ impl Chunk {
         self.palette_mode = false;
     }
 
-    /// Get water level (0-8) at local coords. 0 = no water, 8 = source.
+    /// Water metadata for the horizontal column at local `(x, z)`.
     #[inline]
-    pub fn get_water_level(&self, x: i32, y: i32, z: i32) -> u8 {
-        if !in_bounds(x, y, z) {
-            return 0;
+    pub fn water_meta(&self, x: i32, z: i32) -> WaterColumnMeta {
+        if !(0..CHUNK_SIZE).contains(&x) || !(0..CHUNK_SIZE).contains(&z) {
+            return WaterColumnMeta::NONE;
         }
-        self.water_level[voxel_core::math::local_index(x, y, z)]
+        self.water_meta[(x as usize) * CHUNK_SIZE as usize + z as usize]
     }
 
-    /// Set liquid level (0-8) at local coords. Ignores out of bounds.
-    ///
-    /// Despite the name, this stores the level for any liquid block (water,
-    /// lava, etc.) so the fluid meshing paths can treat them uniformly.
+    /// Set water metadata for the horizontal column at local `(x, z)`.
     #[inline]
-    pub fn set_water_level(&mut self, x: i32, y: i32, z: i32, v: u8) {
-        if !in_bounds(x, y, z) {
+    pub fn set_water_meta(&mut self, x: i32, z: i32, meta: WaterColumnMeta) {
+        if !(0..CHUNK_SIZE).contains(&x) || !(0..CHUNK_SIZE).contains(&z) {
             return;
         }
-        let idx = voxel_core::math::local_index(x, y, z);
-        if self.water_level[idx] != v {
-            self.water_level[idx] = v;
+        let idx = (x as usize) * CHUNK_SIZE as usize + z as usize;
+        if self.water_meta[idx] != meta {
+            self.water_meta[idx] = meta;
             self.dirty = true;
         }
+    }
+
+    /// Clear water metadata for a column (used when the last water voxel is
+    /// removed).
+    #[inline]
+    pub fn clear_water_meta(&mut self, x: i32, z: i32) {
+        self.set_water_meta(x, z, WaterColumnMeta::NONE);
     }
 
     /// Count non-air blocks (used for empty-chunk culling in the mesher).
@@ -336,9 +346,9 @@ impl Chunk {
         &self.indices
     }
 
-    /// Get water level data (for save).
-    pub fn water_level_data(&self) -> &[u8] {
-        &self.water_level
+    /// Get per-column water metadata (for save).
+    pub fn water_meta_data(&self) -> &[WaterColumnMeta] {
+        &self.water_meta
     }
 
     /// Restore from palette + indices (for load).
@@ -361,9 +371,14 @@ impl Chunk {
         self.recompute_non_air();
     }
 
-    /// Restore water level data (for load).
-    pub fn restore_water_level(&mut self, data: Vec<u8>) {
-        self.water_level = data.into_boxed_slice();
+    /// Restore per-column water metadata (for load). Missing entries are
+    /// filled with the empty record so older saves still load.
+    pub fn restore_water_meta(&mut self, data: Vec<WaterColumnMeta>) {
+        let len = (CHUNK_SIZE * CHUNK_SIZE) as usize;
+        let mut meta = vec![WaterColumnMeta::NONE; len];
+        let copy = data.len().min(len);
+        meta[..copy].copy_from_slice(&data[..copy]);
+        self.water_meta = meta.into_boxed_slice();
         self.dirty = true;
     }
 }
@@ -499,82 +514,79 @@ mod tests {
         assert!(c.palette_len() >= 2);
     }
 
-    // --- water level tests ---
+    // --- water metadata tests ---
 
     #[test]
-    fn water_level_defaults_to_zero() {
+    fn water_meta_defaults_to_none() {
         let c = test_chunk();
-        for y in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
-                for x in 0..CHUNK_SIZE {
-                    assert_eq!(c.get_water_level(x, y, z), 0);
-                }
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                assert!(!c.water_meta(x, z).is_some());
             }
         }
     }
 
     #[test]
-    fn set_get_water_level() {
+    fn set_get_water_meta() {
         let mut c = test_chunk();
-        c.set_water_level(3, 5, 7, 8);
-        assert_eq!(c.get_water_level(3, 5, 7), 8);
+        let meta = WaterColumnMeta::new(
+            crate::water::WaterKind::River,
+            200,
+            12,
+            180,
+            30,
+        );
+        c.set_water_meta(3, 7, meta);
+        assert_eq!(c.water_meta(3, 7), meta);
     }
 
     #[test]
-    fn water_level_out_of_bounds_returns_zero() {
+    fn water_meta_out_of_bounds_returns_none() {
         let c = test_chunk();
-        assert_eq!(c.get_water_level(-1, 0, 0), 0);
-        assert_eq!(c.get_water_level(CHUNK_SIZE, 0, 0), 0);
-        assert_eq!(c.get_water_level(0, -1, 0), 0);
-        assert_eq!(c.get_water_level(0, 0, CHUNK_SIZE), 0);
+        assert!(!c.water_meta(-1, 0).is_some());
+        assert!(!c.water_meta(CHUNK_SIZE, 0).is_some());
+        assert!(!c.water_meta(0, -1).is_some());
+        assert!(!c.water_meta(0, CHUNK_SIZE).is_some());
     }
 
     #[test]
-    fn water_level_set_out_of_bounds_is_noop() {
+    fn water_meta_set_out_of_bounds_is_noop() {
         let mut c = test_chunk();
-        c.set_water_level(-1, 0, 0, 8);
-        c.set_water_level(CHUNK_SIZE, 0, 0, 8);
-        assert_eq!(c.get_water_level(0, 0, 0), 0);
+        let meta = WaterColumnMeta::new(crate::water::WaterKind::Pond, 255, 0, 0, 0);
+        c.set_water_meta(-1, 0, meta);
+        c.set_water_meta(CHUNK_SIZE, 0, meta);
+        assert!(!c.water_meta(0, 0).is_some());
     }
 
     #[test]
-    fn water_level_all_eight_values() {
-        let mut c = test_chunk();
-        for level in 0u8..=8 {
-            c.set_water_level(0, 0, 0, level);
-            assert_eq!(c.get_water_level(0, 0, 0), level);
-        }
-    }
-
-    #[test]
-    fn water_level_dirty_on_change() {
+    fn water_meta_dirty_on_change() {
         let mut c = test_chunk();
         c.dirty = false;
-        c.set_water_level(0, 0, 0, 5);
+        c.set_water_meta(0, 0, WaterColumnMeta::new(crate::water::WaterKind::Pond, 255, 0, 0, 0));
         assert!(c.dirty);
     }
 
     #[test]
-    fn water_level_no_dirty_on_same_value() {
+    fn water_meta_no_dirty_on_same_value() {
         let mut c = test_chunk();
-        c.set_water_level(0, 0, 0, 5);
+        let meta = WaterColumnMeta::new(crate::water::WaterKind::Pond, 255, 0, 0, 0);
+        c.set_water_meta(0, 0, meta);
         c.dirty = false;
-        c.set_water_level(0, 0, 0, 5);
+        c.set_water_meta(0, 0, meta);
         assert!(!c.dirty);
     }
 
     #[test]
-    fn water_level_multiple_positions() {
+    fn water_meta_multiple_columns() {
         let mut c = test_chunk();
-        c.set_water_level(0, 0, 0, 1);
-        c.set_water_level(5, 5, 5, 8);
-        c.set_water_level(15, 15, 15, 4);
-        assert_eq!(c.get_water_level(0, 0, 0), 1);
-        assert_eq!(c.get_water_level(5, 5, 5), 8);
-        assert_eq!(c.get_water_level(15, 15, 15), 4);
-        // Other positions remain zero.
-        assert_eq!(c.get_water_level(1, 0, 0), 0);
-        assert_eq!(c.get_water_level(5, 5, 6), 0);
+        let river = WaterColumnMeta::new(crate::water::WaterKind::River, 255, 1, 2, 3);
+        let lake = WaterColumnMeta::new(crate::water::WaterKind::Lake, 128, 0, 0, 0);
+        c.set_water_meta(0, 0, river);
+        c.set_water_meta(5, 5, lake);
+        assert_eq!(c.water_meta(0, 0), river);
+        assert_eq!(c.water_meta(5, 5), lake);
+        assert!(!c.water_meta(1, 0).is_some());
+        assert!(!c.water_meta(5, 6).is_some());
     }
 }
 
@@ -613,12 +625,11 @@ mod proptests {
         }
 
         #[test]
-        #[test]
-        #[test]
-        fn water_level_get_set(x in 0i32..16, y in 0i32..16, z in 0i32..16, lvl in 0u8..9) {
+        fn water_meta_get_set(x in 0i32..16, z in 0i32..16, fill in 0u8..=255) {
             let mut c = Chunk::new(ChunkPos::new(0, 0, 0));
-            c.set_water_level(x, y, z, lvl);
-            prop_assert_eq!(c.get_water_level(x, y, z), lvl);
+            let meta = WaterColumnMeta::new(crate::water::WaterKind::Pond, fill, 0, 0, 0);
+            c.set_water_meta(x, z, meta);
+            prop_assert_eq!(c.water_meta(x, z), meta);
         }
     }
 }

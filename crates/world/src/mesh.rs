@@ -9,11 +9,13 @@
 //! evaluates sun/moon shadows, ambient occlusion, sky GI and reflections per
 //! pixel against the world voxel grid.
 //!
-//! Vertex layout (24 bytes):
-//!   pos: [f32; 3] - local block corner in [0, 16]
-//!   uv:  [f32; 2] - LOCAL tile UV in [0, w] x [0, h]; the fragment shader
-//!                   applies `fract()` per tile so merged quads repeat.
-//!   tile: u32     - atlas tile index (flat, never interpolated).
+//! Vertex layout (28 bytes):
+//!   pos:   [f32; 3] - local block corner in [0, 16]
+//!   uv:    [f32; 2] - LOCAL tile UV in [0, w] x [0, h]; the fragment shader
+//!                     applies `fract()` per tile so merged quads repeat.
+//!   tile:  u32      - atlas tile index (flat, never interpolated).
+//!   water: u32      - packed water animation (kind, surface flag, amplitude,
+//!                     flow direction/speed, rapids); 0 for non-water geometry.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec3, Vec2, Vec3 as GVec3};
@@ -24,6 +26,7 @@ use voxel_core::{
 
 use crate::chunk::Chunk;
 use crate::registry::{BlockDef, BlockKind, BlockRegistry, Face};
+use crate::water::WaterVertexInfo;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
@@ -31,6 +34,8 @@ pub struct ChunkVertex {
     pub pos: [f32; 3],
     pub uv: [f32; 2],
     pub tile: u32,
+    /// Packed water animation as described in [`WaterVertexInfo::pack`].
+    pub water: u32,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -103,6 +108,7 @@ const FACE_CORNERS: [[GVec3; 4]; 6] = [
 
 const S: usize = CHUNK_SIZE as usize;
 
+/// Water top faces are subdivided into this many quads per block edge. A
 #[derive(Clone, Copy)]
 struct MaskCell {
     block_id: BlockId,
@@ -120,7 +126,7 @@ impl ChunkMesher {
         chunk: &Chunk,
         reg: &BlockRegistry,
         sample: impl Fn(i32, i32, i32) -> BlockId,
-        sample_water: impl Fn(i32, i32, i32) -> u8,
+        sample_water: impl Fn(i32, i32, i32) -> WaterVertexInfo,
         sample_loaded: impl Fn(i32, i32, i32) -> bool,
     ) -> ChunkMeshBundle {
         let mut bundle = ChunkMeshBundle::default();
@@ -158,15 +164,19 @@ impl ChunkMesher {
                             emit_foliage_cross(&mut bundle, chunk, lx, ly, lz, def);
                         }
                         BlockKind::Liquid => {
-                            let wl = chunk.get_water_level(lx, ly, lz);
-                            if wl == 0 {
+                            let info = (build.sample_water)(
+                                origin.x + lx,
+                                origin.y + ly,
+                                origin.z + lz,
+                            );
+                            if info.fill == 0 {
                                 continue;
                             }
                             build.emit_water(
                                 &mut bundle,
                                 IVec3::new(lx, ly, lz),
                                 def,
-                                wl,
+                                info,
                             );
                         }
                         _ if def.kind == BlockKind::Cactus => {
@@ -214,7 +224,7 @@ fn mask_to_block(face: Face, slice: i32, u: i32, v: i32) -> (i32, i32, i32) {
 struct MeshBuild<'a, S, W, L>
 where
     S: Fn(i32, i32, i32) -> BlockId,
-    W: Fn(i32, i32, i32) -> u8,
+    W: Fn(i32, i32, i32) -> WaterVertexInfo,
     L: Fn(i32, i32, i32) -> bool,
 {
     chunk: &'a Chunk,
@@ -228,7 +238,7 @@ where
 impl<S, W, L> MeshBuild<'_, S, W, L>
 where
     S: Fn(i32, i32, i32) -> BlockId,
-    W: Fn(i32, i32, i32) -> u8,
+    W: Fn(i32, i32, i32) -> WaterVertexInfo,
     L: Fn(i32, i32, i32) -> bool,
 {
     fn mask_cell(&self, face: Face, slice: i32, u: i32, v: i32) -> MaskCell {
@@ -297,7 +307,7 @@ fn is_neg_border(face: Face, lx: i32, ly: i32, lz: i32, chunk: &Chunk) -> bool {
 impl<S, W, L> MeshBuild<'_, S, W, L>
 where
     S: Fn(i32, i32, i32) -> BlockId,
-    W: Fn(i32, i32, i32) -> u8,
+    W: Fn(i32, i32, i32) -> WaterVertexInfo,
     L: Fn(i32, i32, i32) -> bool,
 {
     /// Border ownership test. `check_borders` is false for blocks that ignore
@@ -496,6 +506,7 @@ fn greedy_emit(
                     pos: positions[c],
                     uv: uvs[c],
                     tile: tile as u32,
+                    water: 0,
                 });
             }
             target.indices.extend_from_slice(&[
@@ -561,6 +572,7 @@ fn emit_foliage_cross(
             pos: positions[i],
             uv: uvs[i],
             tile: tile as u32,
+            water: 0,
         });
     }
     tgt.indices.extend_from_slice(&[
@@ -582,7 +594,7 @@ fn emit_foliage_cross(
 impl<S, W, L> MeshBuild<'_, S, W, L>
 where
     S: Fn(i32, i32, i32) -> BlockId,
-    W: Fn(i32, i32, i32) -> u8,
+    W: Fn(i32, i32, i32) -> WaterVertexInfo,
     L: Fn(i32, i32, i32) -> bool,
 {
     fn emit_water(
@@ -590,22 +602,24 @@ where
         bundle: &mut ChunkMeshBundle,
         pos: IVec3,
         def: &BlockDef,
-        water_level: u8,
+        info: WaterVertexInfo,
     ) {
         let MeshBuild {
             chunk,
             reg,
             sample,
             sample_water,
+            sample_loaded,
             origin,
             ..
         } = self;
         let IVec3 { x: lx, y: ly, z: lz } = pos;
-        let height_frac = (water_level as f32 / 8.0).clamp(0.0, 1.0);
+        let height_frac = info.height().clamp(0.0, 1.0);
         let wx = origin.x + lx;
         let wy = origin.y + ly;
         let wz = origin.z + lz;
         let tile = def.textures.tile(Face::PosY);
+        let animated = info.kind != 0;
 
         for (fi, face) in Face::ALL.iter().enumerate() {
             if !self.should_emit_face(*face, pos, true) {
@@ -615,6 +629,14 @@ where
             // A border face resolved by should_emit_face already knows its
             // neighbour is air or unloaded; avoid sampling it again.
             let resolved_border = is_neg_border(*face, lx, ly, lz, chunk);
+            // An unloaded chunk border is not an exposed water wall. Emitting
+            // a side quad there creates a translucent vertical seam inside the
+            // ocean (the neighbouring chunk will draw its own top surface).
+            // Loaded air borders still own a real shoreline step.
+            let border_side = *face != Face::PosY && *face != Face::NegY;
+            if border_side && !sample_loaded(wx + n.x, wy + n.y, wz + n.z) {
+                continue;
+            }
             let neighbour = if resolved_border {
                 BlockId::AIR
             } else {
@@ -624,14 +646,14 @@ where
             if neighbour_def.opaque {
                 continue;
             }
-            let neighbour_level = if !neighbour.is_air() && neighbour_def.kind == BlockKind::Liquid {
+            let neighbour_info = if !neighbour.is_air() && neighbour_def.kind == BlockKind::Liquid {
                 sample_water(wx + n.x, wy + n.y, wz + n.z)
             } else {
-                0
+                WaterVertexInfo::default()
             };
-            let water_height = water_level as f32 / 8.0;
-            let neighbour_height = neighbour_level as f32 / 8.0;
-            if neighbour_level > 0 {
+            let water_height = info.height();
+            let neighbour_height = neighbour_info.height();
+            if neighbour_info.fill > 0 {
                 match face {
                     Face::PosX | Face::NegX | Face::PosZ | Face::NegZ => {
                         // Only the taller cell owns the exposed step between
@@ -670,6 +692,51 @@ where
                 p_base.y = ly as f32 + height_frac;
             }
 
+            // Wave amplitude is sampled per **surface corner** rather than
+            // per column. Adjacent surface quads then agree exactly on their
+            // shared edge, which keeps the displaced ocean surface watertight
+            // across a depth gradient. The minimum over the four columns
+            // touching the corner also fades swell out at the shoreline.
+            let corner_amplitude = |cx: i32, cz: i32| -> u8 {
+                if !animated {
+                    return 0;
+                }
+                let mut amp = u8::MAX;
+                let mut found = false;
+                for dx in -1..=0 {
+                    for dz in -1..=0 {
+                        let ni = sample_water(wx + cx + dx, wy, wz + cz + dz);
+                        if ni.kind != 0 {
+                            amp = amp.min(ni.amplitude);
+                            found = true;
+                        }
+                    }
+                }
+                if found {
+                    amp
+                } else {
+                    info.amplitude
+                }
+            };
+
+            // The wave direction/rapids are packed per column. At a corner
+            // shared by two surface quads, taking those fields from each
+            // block's own column makes the two vertices land on different
+            // points of the same wave, opening hairline gaps along every
+            // block edge. Pick one deterministic water column from the four
+            // touching the corner so both quads evaluate the exact same wave.
+            let corner_info = |cx: i32, cz: i32| -> WaterVertexInfo {
+                for dx in -1..=0 {
+                    for dz in -1..=0 {
+                        let ni = sample_water(wx + cx + dx, wy, wz + cz + dz);
+                        if ni.kind != 0 {
+                            return ni;
+                        }
+                    }
+                }
+                info
+            };
+
             let corners = FACE_CORNERS[fi];
             let start = bundle.transparent.vertices.len() as u32;
             for (c, corner) in corners.iter().enumerate() {
@@ -677,10 +744,36 @@ where
                 if *face != Face::PosY && *face != Face::NegY {
                     cp.y = ly as f32 + side_neighbour_height + corner.y * side_height;
                 }
+                let surface_vertex = if *face == Face::PosY {
+                    info.surface
+                } else if *face == Face::NegY {
+                    false
+                } else {
+                    info.surface && corner.y > 0.5
+                };
+                let cx = corner.x.round() as i32;
+                let cz = corner.z.round() as i32;
+                let vertex_amplitude = if surface_vertex {
+                    corner_amplitude(cx, cz)
+                } else {
+                    0
+                };
+                let water = if animated {
+                    let base_info = if surface_vertex { corner_info(cx, cz) } else { info };
+                    WaterVertexInfo {
+                        surface: surface_vertex,
+                        amplitude: vertex_amplitude,
+                        ..base_info
+                    }
+                    .pack()
+                } else {
+                    0
+                };
                 bundle.transparent.vertices.push(ChunkVertex {
                     pos: [cp.x, cp.y, cp.z],
                     uv: [uvs[c].x, uvs[c].y],
                     tile: tile as u32,
+                    water,
                 });
             }
             emit_quad_indices(&mut bundle.transparent, start);
@@ -691,7 +784,7 @@ where
 impl<S, W, L> MeshBuild<'_, S, W, L>
 where
     S: Fn(i32, i32, i32) -> BlockId,
-    W: Fn(i32, i32, i32) -> u8,
+    W: Fn(i32, i32, i32) -> WaterVertexInfo,
     L: Fn(i32, i32, i32) -> bool,
 {
     fn emit_cactus(&self, bundle: &mut ChunkMeshBundle, pos: IVec3, def: &BlockDef) {
@@ -750,6 +843,7 @@ where
                     pos: [cp.x, cp.y, cp.z],
                     uv: [u, v],
                     tile: tile as u32,
+                    water: 0,
                 });
             }
             emit_quad_indices(&mut bundle.opaque, start);
@@ -762,16 +856,57 @@ mod tests {
     use super::*;
     use crate::chunk::Chunk;
     use crate::registry::BlockRegistry;
+    use crate::water::WaterKind;
     use voxel_core::ChunkPos;
 
     fn air_sample(_x: i32, _y: i32, _z: i32) -> BlockId {
         BlockId::AIR
     }
-    fn air_water_sample(_x: i32, _y: i32, _z: i32) -> u8 {
-        0
+    fn air_water_sample(_x: i32, _y: i32, _z: i32) -> WaterVertexInfo {
+        WaterVertexInfo::default()
     }
     fn air_loaded_sample(_x: i32, _y: i32, _z: i32) -> bool {
         false
+    }
+
+    #[test]
+    fn water_surface_vertices_carry_wave_params() {
+        let reg = BlockRegistry::with_builtins();
+        let water = reg.id_of("water").unwrap();
+        let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0));
+        chunk.set(0, 1, 0, water);
+        let info = WaterVertexInfo {
+            kind: WaterKind::Ocean.as_u8(),
+            fill: 255,
+            amplitude: 48,
+            flow_angle: 10,
+            flow_speed: 90,
+            rapids: 0,
+            surface: true,
+        };
+        let sample_water = move |x: i32, y: i32, z: i32| {
+            if (x, y, z) == (0, 1, 0) {
+                info
+            } else {
+                WaterVertexInfo::default()
+            }
+        };
+        let bundle = ChunkMesher.build(
+            &chunk,
+            &reg,
+            air_sample,
+            sample_water,
+            air_loaded_sample,
+        );
+        assert!(!bundle.transparent.vertices.is_empty());
+        let top = bundle
+            .transparent
+            .vertices
+            .iter()
+            .find(|v| (v.pos[1] - 2.0).abs() < 1e-5 && v.water != 0)
+            .expect("top water vertex carries animation data");
+        assert_eq!((top.water >> 3) & 1, 1, "surface flag must be set");
+        assert_eq!((top.water >> 8) & 0xFF, 48, "amplitude must round-trip");
     }
 
     #[test]

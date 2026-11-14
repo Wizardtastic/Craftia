@@ -302,6 +302,9 @@ pub fn compile_shader(src: &Path) -> Result<Vec<u8>> {
     let tmp_out = tmp_dir.join(format!("voxel-shader-{}-{}.spv", stem, std::process::id()));
     let output = Command::new(&glslang)
         .arg("-V")
+        // The water-wave include is generated into OUT_DIR by build.rs.
+        // Runtime hot-reload must resolve the same include path.
+        .arg(format!("-I{}", env!("OUT_DIR")))
         .arg("-o")
         .arg(&tmp_out)
         .arg(&src)

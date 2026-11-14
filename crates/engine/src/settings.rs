@@ -72,9 +72,9 @@ pub struct GraphicsSettings {
     /// Extra shadow penumbra width in radians (0 = physical sun/moon size).
     pub raytrace_softness: f32,
 
-    /// Global water surface Y (world units). Feeds the chunk shader's
-    /// submerged-terrain caustics path and the cheap wet-edge band
-    /// approximation. Defaults to sea level at chunk Y=0.
+    /// Fallback water surface Y (world units). The chunk shader now uses a
+    /// local per-column surface grid for caustics and wet edges; this value is
+    /// only used until that grid has been uploaded.
     pub water_y: f32,
     /// Strength of the cool-tint wet-edge added to non-water blocks just
     /// below the water surface. 0.0 disables.

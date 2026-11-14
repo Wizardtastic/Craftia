@@ -596,6 +596,14 @@ pub(super) fn create_descriptor_set_layout(
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        // Binding 11 = local water-surface height grid. Lets submerged-terrain
+        // caustics and shore wet edges follow the actual lake/river surface
+        // instead of the global sea-level scalar.
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(11)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
     ];
     let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     unsafe { device.create_descriptor_set_layout(&create_info, None) }
@@ -618,6 +626,11 @@ pub(super) fn create_descriptor_pool(
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: (max_sets * 4) as u32,
+        },
+        // One water-surface height grid per frame set.
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: max_sets as u32,
         },
     ];
     let create_info = vk::DescriptorPoolCreateInfo::default()
@@ -664,6 +677,8 @@ pub(super) struct DescriptorResources {
     pub block_light_size: vk::DeviceSize,
     pub emissive_lights_buffer: vk::Buffer,
     pub emissive_lights_size: vk::DeviceSize,
+    pub water_surface_buffer: vk::Buffer,
+    pub water_surface_size: vk::DeviceSize,
 }
 
 pub(super) fn update_descriptor_set(
@@ -690,6 +705,8 @@ pub(super) fn update_descriptor_set(
         block_light_size,
         emissive_lights_buffer,
         emissive_lights_size,
+        water_surface_buffer,
+        water_surface_size,
     } = res;
     let cam_info = vk::DescriptorBufferInfo::default()
         .buffer(camera_buffer)
@@ -719,6 +736,10 @@ pub(super) fn update_descriptor_set(
         .buffer(reflection_buffer)
         .offset(0)
         .range(std::mem::size_of::<ReflectionUbo>() as u64);
+    let water_surface_info = vk::DescriptorBufferInfo::default()
+        .buffer(water_surface_buffer)
+        .offset(0)
+        .range(water_surface_size);
     let atlas_info = vk::DescriptorImageInfo::default()
         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
         .image_view(atlas_view)
@@ -747,6 +768,7 @@ pub(super) fn update_descriptor_set(
     let scene_opaque_infos = [scene_opaque_info];
     let scene_depth_infos = [scene_depth_info];
     let reflection_buf_infos = [reflection_info];
+    let water_surface_buf_infos = [water_surface_info];
 
     let writes = [
         vk::WriteDescriptorSet::default()
@@ -804,6 +826,11 @@ pub(super) fn update_descriptor_set(
             .dst_binding(10)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&emissive_lights_buf_infos),
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(11)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&water_surface_buf_infos),
     ];
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
@@ -982,6 +1009,11 @@ pub(super) fn create_graphics_pipeline(
             .location(2)
             .format(vk::Format::R32_UINT)
             .offset(20),
+        vk::VertexInputAttributeDescription::default()
+            .binding(0)
+            .location(3)
+            .format(vk::Format::R32_UINT)
+            .offset(24),
     ];
     let vertex_bindings = [vertex_binding];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()

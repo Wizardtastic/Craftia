@@ -11,6 +11,13 @@ use voxel_core::Point;
 use voxel_render::UiDrawData;
 use voxel_world::ChunkStreamEvent;
 
+// The world builder and renderer descriptor must agree on the layer count;
+// `shaders/chunk.frag` repeats the same constant because it cannot import it.
+const _: () = assert!(
+    voxel_render::WATER_SURFACE_GRID_LAYERS
+        == voxel_world::water::WATER_SURFACE_LAYERS
+);
+
 impl crate::EngineApp {
     /// Append the upload entries for `bundle` into the supplied `out` Vec.
     /// Each upload owns its vertex/index bytes via `to_vec()` on a slice
@@ -417,8 +424,31 @@ impl crate::EngineApp {
                     if let Some(p) = self.config.capture_cam_pos {
                         let pos = glam::Vec3::new(p[0], p[1], p[2]);
                         self.simulation.set_player_pos(pos);
+                        // Survival does not allow flight, which previously let
+                        // the verification camera fall to the water surface
+                        // (and made "above water" shots impossible).
+                        self.simulation
+                            .set_player_game_mode(voxel_game::GameMode::Creative);
                         self.simulation.set_player_flying(true);
                         if let Some((yaw, pitch)) = self.config.capture_cam_rot {
+                            // `update_camera_from_transform` rebuilds the camera
+                            // yaw/pitch from the player transform every frame,
+                            // so writing only CameraResource here was silently
+                            // ignored. Rotate the player too.
+                            if let Some(entity) = self.simulation.player_entity() {
+                                if let Some(t) = self
+                                    .simulation
+                                    .ecs_world_mut()
+                                    .get_mut::<voxel_game::Transform>(entity)
+                                {
+                                    t.rot = glam::Quat::from_euler(
+                                        glam::EulerRot::YXZ,
+                                        yaw,
+                                        pitch,
+                                        0.0,
+                                    );
+                                }
+                            }
                             if let Some(mut cam) = self.simulation.player_camera() {
                                 cam.pos = pos + glam::Vec3::new(0.0, voxel_game::EYE_HEIGHT, 0.0);
                                 cam.yaw = yaw;
@@ -1401,6 +1431,11 @@ impl crate::EngineApp {
             .water_submersion(camera_now.pos - eye_extent, camera_now.pos + eye_extent)
             > 0.5;
 
+        // Refresh the local water-surface height grid (chunk binding 11) that
+        // drives lake/river caustics and wet edges. Centred on the camera and
+        // rebuilt every couple of seconds or when the camera moves far enough.
+        self.sync_water_surface_grid(camera_now.pos);
+
         // Build & push the per-tile material lookup table (chunk shader
         // binding 5). The registry + scalars are read once per frame; cost
         // is ~256 std430 entries of plain-struct writes, well under 0.01 ms
@@ -1546,6 +1581,7 @@ impl crate::EngineApp {
                 camera,
                 ui: Some(&ui),
                 game_time: self.gameplay.game_time as f32,
+                water_time: self.world_state.world.water_time(),
                 underwater,
                 world_entities: &entity_data,
                 held_items: &held_item_data,
@@ -1554,6 +1590,7 @@ impl crate::EngineApp {
             }) {
                 log::error!("draw_frame: {e}");
             }
+            self.water_grid_upload_ms = r.last_water_surface_upload_ms();
             // Collect profiler data.
             if self.profiler.enabled {
                 self.profiler.end_frame(self.input.frame_time * 1000.0);
@@ -1613,7 +1650,9 @@ impl crate::EngineApp {
                     streamer_gen_ms: streamer_stats.gen_ms,
                     streamer_mesh_ms: streamer_stats.mesh_ms,
                     water_tick_ms,
-                    water_pending_flow: self.world_state.world.pending_flow_count() as u32,
+                    water_columns: self.world_state.world.water_column_count() as u32,
+                    water_grid_build_ms: self.water_grid_build_ms,
+                    water_grid_upload_ms: self.water_grid_upload_ms,
                     chunk_upload_ms,
                     entity_count: ecs.entity_count(),
                     archetype_count: ecs.archetype_count() as u32,
@@ -1639,6 +1678,40 @@ impl crate::EngineApp {
         }
     }
 
+    /// Push a local water-surface height grid to the renderer so caustics and
+    /// wet edges use the actual lake/river surface instead of global sea level.
+    fn sync_water_surface_grid(&mut self, camera_pos: glam::Vec3) {
+        const REFRESH_FRAMES: u32 = 120;
+        let size = voxel_render::WATER_SURFACE_GRID_SIZE;
+        let half = (size / 2) as i32;
+        let origin = [
+            camera_pos.x.floor() as i32 - half,
+            camera_pos.z.floor() as i32 - half,
+        ];
+        self.water_grid_build_ms = 0.0;
+        self.water_grid_age = self.water_grid_age.saturating_add(1);
+        if self.water_grid_origin == Some(origin) && self.water_grid_age < REFRESH_FRAMES {
+            return;
+        }
+        let build_start = Instant::now();
+        let mut bodies = vec![
+            voxel_render::WATER_SURFACE_GRID_NONE;
+            size * size * voxel_world::water::WATER_SURFACE_FLOATS_PER_CELL
+        ];
+        self.world_state.world.fill_water_surface_grid(
+            origin[0],
+            origin[1],
+            size,
+            &mut bodies,
+        );
+        if let Some(r) = self.render.renderer.as_mut() {
+            r.set_water_surface_grid([origin[0] as f32, origin[1] as f32], &bodies);
+        }
+        self.water_grid_build_ms = build_start.elapsed().as_secs_f32() * 1000.0;
+        self.water_grid_origin = Some(origin);
+        self.water_grid_age = 0;
+    }
+
     /// Render a still frame to PNG via the auto-capture machinery.
     pub(crate) fn do_capture(&mut self) {
         if let Some(t) = self.config.capture_time {
@@ -1659,6 +1732,7 @@ impl crate::EngineApp {
             .world
             .water_submersion(camera.pos - eye_extent, camera.pos + eye_extent)
             > 0.5;
+        self.sync_water_surface_grid(camera.pos);
         self.refresh_emissive_lights(camera.pos);
         let block_light_table = {
             let reg = self.world_state.world.registry();
@@ -1681,6 +1755,7 @@ impl crate::EngineApp {
             camera,
             ui: Some(&ui),
             game_time: self.gameplay.game_time as f32,
+            water_time: self.world_state.world.water_time(),
             underwater,
             world_entities: &[],
             held_items: &[],
@@ -1688,6 +1763,7 @@ impl crate::EngineApp {
             panorama_rotation: 0.0,
         }) {
             Ok(rgba) => {
+                self.water_grid_upload_ms = r.last_water_surface_upload_ms();
                 let (w, h) = self.render.window_size;
                 if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {
                     match img.save(&self.config.capture_path) {
@@ -1728,6 +1804,9 @@ impl crate::EngineApp {
         let mut chunk_sum = 0f32;
         let mut gen_sum = 0f32;
         let mut mesh_sum = 0f32;
+        let mut transparent_sum = 0f32;
+        let mut water_build_sum = 0f32;
+        let mut water_upload_sum = 0f32;
         for s in window {
             count += 1;
             cpu_sum += s.cpu_frame_ms;
@@ -1737,21 +1816,27 @@ impl crate::EngineApp {
             chunk_sum += s.chunk_record_cpu_ms;
             gen_sum += s.streamer_gen_ms;
             mesh_sum += s.streamer_mesh_ms;
+            transparent_sum += s.gpu_transparent_ms;
+            water_build_sum += s.water_grid_build_ms;
+            water_upload_sum += s.water_grid_upload_ms;
         }
         if count == 0 {
             return;
         }
         let last = samples.back();
         log::info!(
-            "bench summary: frames={} avg_cpu={:.2}ms [{:.2}..{:.2}] avg_chunk_cpu={:.3}ms avg_gpu={:.2}ms avg_gen={:.2}ms avg_mesh={:.2}ms | chunks gpu={} loaded={} meshed={} upload={:.2}ms",
+            "bench summary: frames={} avg_cpu={:.2}ms [{:.2}..{:.2}] avg_chunk_cpu={:.3}ms avg_gpu={:.2}ms avg_transparent={:.2}ms avg_gen={:.2}ms avg_mesh={:.2}ms water_grid={:.3}ms build + {:.3}ms upload | chunks gpu={} loaded={} meshed={} upload={:.2}ms",
             count,
             cpu_sum / count as f32,
             cpu_min,
             cpu_max,
             chunk_sum / count as f32,
             gpu_sum / count as f32,
+            transparent_sum / count as f32,
             gen_sum / count as f32,
             mesh_sum / count as f32,
+            water_build_sum / count as f32,
+            water_upload_sum / count as f32,
             last.map(|s| s.chunks_gpu).unwrap_or(0),
             last.map(|s| s.chunks_loaded).unwrap_or(0),
             last.map(|s| s.chunks_meshed).unwrap_or(0),
@@ -1774,9 +1859,10 @@ impl crate::EngineApp {
     /// blocks like `light_pink` and friends, and the resulting visual is
     /// indistinguishable from the per-block ownership we already encode.
     ///
-    /// `water_y / wet_edge / caustics / leaves` are the global master
-    /// scalars from `GraphicsSettings`, packed into `world_params.wxyz`
-    /// matching the GLSL std430 layout in `shaders/chunk.frag`.
+    /// `water_y / wet_edge / caustics / leaves` are the master scalars from
+    /// `GraphicsSettings`, packed into `world_params.wxyz` matching the GLSL
+    /// std430 layout in `shaders/chunk.frag`. `water_y` is only the fallback
+    /// used before the local surface grid (binding 11) is uploaded.
     /// Re-centre the renderer's voxel grid on the player when they travel a
     /// few chunks, and repopulate it with every loaded chunk. Between recentres
     /// the grid is updated incrementally by the streamer's remesh events.

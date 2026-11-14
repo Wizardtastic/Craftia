@@ -634,8 +634,8 @@ pub struct EngineConfig {
     pub latitude: f32,
     /// World longitude in degrees (east positive), shifts local solar time.
     pub longitude: f32,
-    /// Global water surface Y (world units). Drives the chunk shader's
-    /// caustics path + wet-edge band. Defaults to sea level at chunk Y=0.
+    /// Fallback water surface Y (world units) for the chunk shader's caustics
+    /// and wet-edge paths. The local water-surface grid normally overrides it.
     pub water_y: f32,
     /// Cool-tint wet-edge strength applied to blocks near the water surface.
     pub wet_edge_strength: f32,
@@ -748,6 +748,21 @@ pub(crate) struct EngineApp {
     emissive_light_timer: f32,
     /// Texture pack manager: tracks loaded packs and their metadata.
     texture_pack_manager: TexturePackManager,
+    /// Origin of the last water-surface grid pushed to the renderer.
+    water_grid_origin: Option<[i32; 2]>,
+    /// Frames since that grid was pushed; periodically refreshed even when
+    /// the camera is stationary so water edits show up.
+    water_grid_age: u32,
+    /// CPU time of the most recent grid rebuild / upload (telemetry only).
+    water_grid_build_ms: f32,
+    water_grid_upload_ms: f32,
+}
+
+/// Fresh world seed from `rand`'s OS-entropy-seeded thread RNG. Unlike the
+/// old seconds-since-epoch fallback, two worlds created in the same second
+/// get different seeds.
+fn random_world_seed() -> i32 {
+    rand::random::<i32>()
 }
 
 impl EngineApp {
@@ -868,6 +883,10 @@ impl EngineApp {
             emissive_lights: Vec::new(),
             emissive_light_timer: 0.0,
             texture_pack_manager: TexturePackManager::default(),
+            water_grid_origin: None,
+            water_grid_age: 0,
+            water_grid_build_ms: 0.0,
+            water_grid_upload_ms: 0.0,
         })
     }
 
@@ -1057,6 +1076,51 @@ impl EngineApp {
             },
             exposure,
         }
+    }
+
+    /// Replace the active world and simulation. Used when creating a fresh
+    /// world or loading a save; both paths must stop the old streamer, clear
+    /// old GPU meshes, and rebuild the ECS player against the new world.
+    fn install_world(&mut self, world: Arc<World>, spawn_pos: Vec3) -> Result<()> {
+        // Stop the old worker before dropping its world Arc.
+        self.world_state.streamer = None;
+        if let Some(renderer) = self.render.renderer.as_mut() {
+            renderer.clear_chunks();
+        }
+
+        self.world_state.world = world.clone();
+        self.simulation = Simulation::new(
+            world.clone(),
+            spawn_pos,
+            self.config.profile_cpu_systems,
+        );
+        self.gameplay.spawn_pos = spawn_pos;
+        self.gameplay.pinned_entity = None;
+        self.gameplay.undo_redo = voxel_game::UndoRedoState::default();
+        self.gameplay.game_time = 0.0;
+        self.gameplay.play_time_accumulator = 0.0;
+        self.input.spawned = false;
+        self.water_grid_origin = None;
+        self.water_grid_age = 0;
+        self.emissive_lights.clear();
+        self.emissive_light_timer = 0.0;
+        self.config.seed = world.seed();
+        self.config.world.seed = world.seed();
+
+        let streamer = ChunkStreamer::spawn(world, self.config.stream)?;
+        streamer.set_focus(spawn_pos);
+        self.world_state.streamer = Some(streamer);
+        Ok(())
+    }
+
+    /// Generate a fresh world from `seed`, install it, and start streaming
+    /// its chunks around the newly-found spawn.
+    fn install_fresh_world(&mut self, seed: i32) -> Result<()> {
+        let world = World::new_with_path(seed, self.config.assets_path.as_deref());
+        let (sx, sy, sz) = world.terrain().find_spawn();
+        let spawn = Vec3::new(sx as f32 + 0.5, sy as f32 + 2.0, sz as f32 + 0.5);
+        log::info!("fresh world seed={seed}, spawn={spawn:?}");
+        self.install_world(world, spawn)
     }
 
     /// Transition to TitleScreen state (unlock cursor, stop sim).
@@ -2238,5 +2302,35 @@ mod eol_invariant {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fresh_world_tests {
+    use super::*;
+    use voxel_core::ChunkPos;
+    use voxel_world::Chunk;
+
+    #[test]
+    fn installing_a_fresh_world_discards_old_chunks_and_changes_the_seed() {
+        let mut app = EngineApp::new(EngineConfig::default()).expect("headless EngineApp");
+        let stone = app.world_state.world.registry().id_of("stone").unwrap();
+
+        // Put a marker chunk far outside the streaming radius of the new spawn.
+        let cp = ChunkPos::new(1000, 0, 1000);
+        let mut marker = Chunk::new(cp);
+        marker.set(0, 0, 0, stone);
+        app.world_state.world.insert_chunk(cp, marker);
+        assert!(!app.world_state.world.get_block(16000, 0, 16000).is_air());
+
+        app.install_fresh_world(123_456_789).unwrap();
+
+        assert_eq!(app.world_state.world.seed(), 123_456_789);
+        assert_eq!(app.simulation.world.seed(), 123_456_789);
+        assert_eq!(app.config.seed, 123_456_789);
+        assert!(
+            app.world_state.world.get_block(16000, 0, 16000).is_air(),
+            "fresh world inherited a chunk from the previous world"
+        );
     }
 }

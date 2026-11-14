@@ -17,7 +17,7 @@
 //!       [2 bytes]  Palette length p as u16 LE (max 4096)
 //!       [2p bytes] Palette entries as u16 LE
 //!       [4096 bytes] u8 indices into palette
-//!     [4096 bytes] Water level u8 × 4096
+//!     [1280 bytes] Water column metadata (5 bytes × 256 columns)
 //! ```
 //!
 //! Format versioning
@@ -27,9 +27,10 @@
 //!     did NOT save torchlight colour, which is why reloads reverted all
 //!     voxels to warm white.
 //! v3: persisted packed RGBA8 torchlight colour.
-//! v4: **current**. Lighting is fully dynamic on the GPU, so only block data +
-//!     water level are stored. Older saves still load; their baked light arrays
-//!     are skipped.
+//! v4: dynamic lighting; block data + legacy per-voxel water levels.
+//! v5: **current**. Per-column water-body metadata (kind, continuous surface
+//!     fill, flow direction/speed, rapids). v1–v4 saves load by converting the
+//!     old water-level bytes into surface fill records.
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -44,7 +45,7 @@ use crate::error::{Result, WorldError};
 use crate::world::World;
 
 const MAGIC: &[u8; 9] = b"VOXELSAV2";
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 
 /// Save the entire world to a directory. Each chunk is a separate compressed
 /// blob keyed by (cx, cy, cz).
@@ -174,9 +175,17 @@ fn write_chunk(chunk: &Chunk, writer: &mut impl Write) -> Result<()> {
         }
     }
 
-    // v4: water level only. Lighting is no longer stored — the GPU ray
-    // tracer derives everything from the block data at runtime.
-    encoder.write_all(chunk.water_level_data())?;
+    // v5: per-column water body metadata. Lighting is fully dynamic — the GPU
+    // ray tracer derives everything from the block data at runtime.
+    for meta in chunk.water_meta_data() {
+        encoder.write_all(&[
+            meta.kind,
+            meta.fill,
+            meta.flow_angle,
+            meta.flow_speed,
+            meta.rapids,
+        ])?;
+    }
 
     encoder.finish()?;
     Ok(())
@@ -234,13 +243,52 @@ fn read_chunk(reader: &mut impl Read, version: u32) -> Result<Chunk> {
         let _ = &legacy;
     }
 
-    // Read water_level.
-    let mut water_level = vec![0u8; voxel_core::CHUNK_CUBED];
-    decoder.read_exact(&mut water_level)?;
-    for v in water_level.iter_mut() {
-        *v = (*v).min(8);
+    if version >= 5 {
+        // Per-column water metadata, in the same `x * 16 + z` order stored by
+        // `Chunk::water_meta`.
+        let mut extra = vec![0u8; 256 * 5];
+        decoder.read_exact(&mut extra)?;
+        let mut meta = Vec::with_capacity(256);
+        for i in 0..256 {
+            meta.push(crate::water::WaterColumnMeta {
+                kind: extra[i * 5],
+                fill: extra[i * 5 + 1],
+                flow_angle: extra[i * 5 + 2],
+                flow_speed: extra[i * 5 + 3],
+                rapids: extra[i * 5 + 4],
+            });
+        }
+        chunk.restore_water_meta(meta);
+    } else {
+        // v1–v4 stored a per-voxel flow level. Convert the top of each liquid
+        // column into a continuous surface fill; the body kind is inferred
+        // from the surface height when the chunk is inserted into the world.
+        let mut water_level = vec![0u8; voxel_core::CHUNK_CUBED];
+        decoder.read_exact(&mut water_level)?;
+        let mut meta = vec![crate::water::WaterColumnMeta::NONE; 256];
+        for lx in 0..16i32 {
+            for lz in 0..16i32 {
+                for ly in (0..16i32).rev() {
+                    let idx = voxel_core::math::local_index(lx, ly, lz);
+                    let level = water_level[idx].min(8);
+                    if level == 0 {
+                        continue;
+                    }
+                    let above = if ly + 1 < 16 {
+                        water_level[voxel_core::math::local_index(lx, ly + 1, lz)]
+                    } else {
+                        0
+                    };
+                    if above == 0 {
+                        let col = (lx as usize) * 16 + lz as usize;
+                        meta[col].fill = (level as u16 * 32).min(255) as u8;
+                    }
+                    break;
+                }
+            }
+        }
+        chunk.restore_water_meta(meta);
     }
-    chunk.restore_water_level(water_level);
 
     if version == 3 {
         let mut legacy_color = vec![0u8; voxel_core::CHUNK_CUBED * 4];
@@ -289,15 +337,23 @@ mod tests {
     }
 
     #[test]
-    fn save_load_water() {
+    fn save_load_water_meta() {
         let mut chunk = Chunk::new(ChunkPos::new(0, 0, 0));
-        chunk.set_water_level(7, 7, 7, 6);
+        let meta = crate::water::WaterColumnMeta::new(
+            crate::water::WaterKind::River,
+            180,
+            42,
+            200,
+            90,
+        );
+        chunk.set_water_meta(7, 9, meta);
 
         let mut buf = Vec::new();
         write_chunk(&chunk, &mut buf).unwrap();
 
         let loaded = read_chunk(&mut buf.as_slice(), FORMAT_VERSION).unwrap();
-        assert_eq!(loaded.get_water_level(7, 7, 7), 6);
+        assert_eq!(loaded.water_meta(7, 9), meta);
+        assert!(!loaded.water_meta(0, 0).is_some());
     }
 
     #[test]

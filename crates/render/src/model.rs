@@ -267,21 +267,20 @@ fn upload_mesh(
     data: &ModelVertexData,
     skin_index: Option<u32>,
 ) -> Result<ModelMesh> {
-    // Interleave vertex data into the engine's Vertex format (28 bytes).
-    // pos(12) + uv(8) + light(4) + tile(4) = 28 bytes per vertex.
+    // Interleave vertex data into the engine's Vertex format (28 bytes):
+    // pos(12) + uv(8) + tile(4) + water(4).
     let vertex_count = data.positions.len();
     let mut vertex_bytes = Vec::with_capacity(vertex_count * 28);
     for i in 0..vertex_count {
         let pos = data.positions[i];
         let uv = data.uvs[i];
-        // Pack as: [f32;3] pos, [f32;2] uv, f32 light, u32 tile
         vertex_bytes.extend_from_slice(&pos[0].to_le_bytes());
         vertex_bytes.extend_from_slice(&pos[1].to_le_bytes());
         vertex_bytes.extend_from_slice(&pos[2].to_le_bytes());
         vertex_bytes.extend_from_slice(&uv[0].to_le_bytes());
         vertex_bytes.extend_from_slice(&uv[1].to_le_bytes());
-        vertex_bytes.extend_from_slice(&1.0f32.to_le_bytes()); // light = 1.0
         vertex_bytes.extend_from_slice(&0u32.to_le_bytes()); // tile = 0
+        vertex_bytes.extend_from_slice(&0u32.to_le_bytes()); // water = 0
     }
 
     let index_count = data.indices.len();

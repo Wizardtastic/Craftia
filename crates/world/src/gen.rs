@@ -17,6 +17,7 @@ use voxel_core::{
     BlockId, BlockPos, CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT_BLOCKS,
 };
 
+use crate::water::{pack_angle, pack_unit, WaterColumnMeta, WaterKind, LAKE_LEVEL};
 use crate::{chunk::Chunk, error::Result, registry::BlockRegistry, tree};
 
 /// Identifier for a surface biome.
@@ -73,22 +74,47 @@ impl BiomeId {
 /// [`TerrainGenerator::decorate`] so the expensive fractal-noise samplers
 /// (`base_height` + `biome_at`) run exactly once per column instead of once
 /// per pass.
+/// Everything the generator needs to know about one terrain column.
+#[derive(Clone, Copy, Debug)]
+pub struct ColumnInfo {
+    /// Final terrain height after river/lake carving, in world-Y blocks.
+    pub height: f32,
+    pub biome: BiomeId,
+    /// Water body that owns this column (if any).
+    pub water_kind: WaterKind,
+    /// Surface height of that water body, in world units.
+    pub water_surface: f32,
+    /// Packed downstream flow direction.
+    pub flow_angle: u8,
+    /// Packed current speed.
+    pub flow_speed: u8,
+    /// Packed rapid strength.
+    pub rapids: u8,
+}
+
 #[derive(Clone, Debug)]
 pub struct ColumnTable {
-    /// `(base_height, biome)` per column, indexed by `lx * CHUNK_SIZE + lz`.
-    entries: Vec<(f32, BiomeId)>,
+    /// Per-column terrain + hydrology data, indexed by `lx * CHUNK_SIZE + lz`.
+    entries: Vec<ColumnInfo>,
 }
 
 impl ColumnTable {
     /// Terrain data for the column at chunk-local `(lx, lz)`.
     #[inline]
-    pub fn get(&self, lx: i32, lz: i32) -> (f32, BiomeId) {
+    pub fn get(&self, lx: i32, lz: i32) -> ColumnInfo {
         debug_assert!(
             (0..CHUNK_SIZE).contains(&lx) && (0..CHUNK_SIZE).contains(&lz),
             "column ({lx}, {lz}) out of chunk range"
         );
         self.entries[(lx as usize) * CHUNK_SIZE as usize + lz as usize]
     }
+}
+
+/// Hermite smoothstep over `0..1`.
+#[inline]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0).max(1e-5)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Configurable terrain generator. Owns precomputed noise samplers.
@@ -132,6 +158,12 @@ pub struct TerrainGenerator {
     ore: FastNoiseLite,
     // Tree scatter.
     tree: FastNoiseLite,
+    // River centreline field (zero contours are channels).
+    river: FastNoiseLite,
+    // River width variation.
+    river_width: FastNoiseLite,
+    // Enclosed lake basins.
+    lake: FastNoiseLite,
 }
 
 impl TerrainGenerator {
@@ -238,6 +270,9 @@ impl TerrainGenerator {
                 n.set_frequency(Some(0.12));
                 n
             },
+            river: make(0.0022, fastnoise_lite::NoiseType::OpenSimplex2),
+            river_width: make(0.004, fastnoise_lite::NoiseType::OpenSimplex2),
+            lake: make(0.0014, fastnoise_lite::NoiseType::OpenSimplex2),
         }
     }
 
@@ -303,19 +338,124 @@ impl TerrainGenerator {
         BiomeId::classify(t, h, height)
     }
 
-    /// Sample `base_height` + `biome_at` once for every column of the chunk
-    /// whose corner is at world-space `origin`. The result is handed to
-    /// `generate` / `decorate` (and via `generate` to `decorate_caves`) so
-    /// the per-column fractal-noise samplers run once per chunk instead of
-    /// once per pass.
+    /// Resolve terrain height plus river/lake hydrology for one column.
+    ///
+    /// Rivers are carved along the zero contours of a low-frequency noise
+    /// field, with a width-controlled channel that meets sea level. Lakes are
+    /// bowls carved into higher terrain and filled to a fixed level above the
+    /// sea. Both use the same `ColumnInfo` so generation, decoration and water
+    /// classification always agree.
+    pub fn column_info(&self, wx: i32, wz: i32) -> ColumnInfo {
+        let base = self.base_height(wx, wz);
+        let biome = self.biome_at(wx, wz, base);
+        let mut height = base;
+        let mut water_kind = WaterKind::None;
+        let mut water_surface = 0.0f32;
+        let mut flow_angle = 0u8;
+        let mut flow_speed = 0u8;
+        let mut rapids = 0u8;
+
+        // ── River ────────────────────────────────────────────────────────
+        let rv = self.river.get_noise_2d(wx as f32, wz as f32);
+        let mut river_dist = f32::INFINITY;
+        let mut river_half = 0.0f32;
+        let mut river_present = false;
+        if rv.abs() < 0.22 {
+            // Distance to the contour line in blocks, from the field gradient.
+            let e = 4.0;
+            let gx = (self.river.get_noise_2d(wx as f32 + e, wz as f32)
+                - self.river.get_noise_2d(wx as f32 - e, wz as f32))
+                / (2.0 * e);
+            let gz = (self.river.get_noise_2d(wx as f32, wz as f32 + e)
+                - self.river.get_noise_2d(wx as f32, wz as f32 - e))
+                / (2.0 * e);
+            let glen = (gx * gx + gz * gz).sqrt().max(1e-5);
+            river_dist = rv.abs() / glen;
+            let wnorm = (self.river_width.get_noise_2d(wx as f32, wz as f32) + 1.0) * 0.5;
+            river_half = 3.0 + wnorm * 9.0;
+
+            let low_land = base > SEA_LEVEL as f32 + 0.5 && base < SEA_LEVEL as f32 + 16.0;
+            if low_land && river_dist < river_half + 5.0 {
+                let depth = 2.0 + (1.0 - (river_dist / river_half).clamp(0.0, 1.0))
+                    * (3.0 + wnorm * 5.0);
+                let bed = SEA_LEVEL as f32 - depth;
+                let blend = 1.0 - smoothstep(river_half * 0.5, river_half + 5.0, river_dist);
+                height = base + (bed.min(base) - base) * blend;
+                river_present = river_dist < river_half;
+
+                // Downstream direction = the contour tangent that goes
+                // downhill. This is the actual flow direction the current uses.
+                let mut dx = -gz / glen;
+                let mut dz = gx / glen;
+                let h_plus = self.base_height(wx + (dx * 8.0) as i32, wz + (dz * 8.0) as i32);
+                let h_minus = self.base_height(wx - (dx * 8.0) as i32, wz - (dz * 8.0) as i32);
+                if h_minus < h_plus {
+                    dx = -dx;
+                    dz = -dz;
+                }
+                let slope = (h_plus - h_minus).abs() / 16.0;
+                flow_angle = pack_angle(dz.atan2(dx));
+                flow_speed = pack_unit(0.30 + wnorm * 0.70);
+                // Large, steep rivers run rapids; broad flat ones keep a
+                // visible riffle but remain navigable.
+                let width_rapids = smoothstep(0.45, 0.85, wnorm);
+                let slope_rapids = smoothstep(0.03, 0.20, slope);
+                rapids = pack_unit(width_rapids * (0.35 + 0.65 * slope_rapids));
+            }
+        }
+        if river_present {
+            water_kind = WaterKind::River;
+            water_surface = SEA_LEVEL as f32;
+        }
+
+        // ── Lake ─────────────────────────────────────────────────────────
+        if water_kind != WaterKind::River {
+            let ln = self.lake.get_noise_2d(wx as f32, wz as f32);
+            let mask = smoothstep(0.48, 0.78, ln);
+            let away_from_river = river_dist > river_half + 10.0;
+            if mask > 0.0
+                && away_from_river
+                && base > LAKE_LEVEL + 2.0
+                && base < LAKE_LEVEL + 28.0
+            {
+                let bed = LAKE_LEVEL - (6.0 + 8.0 * mask);
+                height = base + (bed.min(base) - base) * mask;
+                if mask > 0.35 && height < LAKE_LEVEL - 0.1 {
+                    water_kind = WaterKind::Lake;
+                    water_surface = LAKE_LEVEL;
+                    flow_angle = 0;
+                    flow_speed = 0;
+                    rapids = 0;
+                }
+            }
+        }
+
+        // ── Ocean ────────────────────────────────────────────────────────
+        if water_kind == WaterKind::None && height < SEA_LEVEL as f32 {
+            water_kind = WaterKind::Ocean;
+            water_surface = SEA_LEVEL as f32;
+        }
+
+        ColumnInfo {
+            height,
+            biome,
+            water_kind,
+            water_surface,
+            flow_angle,
+            flow_speed,
+            rapids,
+        }
+    }
+
+    /// Sample `column_info` once for every column of the chunk whose corner is
+    /// at world-space `origin`. The result is handed to `generate` /
+    /// `decorate` (and via `generate` to `decorate_caves`) so the expensive
+    /// fractal-noise samplers run once per chunk instead of once per pass.
     pub fn column_table(&self, origin: glam::IVec3) -> ColumnTable {
         let mut entries = Vec::with_capacity(CHUNK_SIZE as usize * CHUNK_SIZE as usize);
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
-                let wx = origin.x + lx;
-                let wz = origin.z + lz;
-                let h = self.base_height(wx, wz);
-                entries.push((h, self.biome_at(wx, wz, h)));
+                entries.push(self.column_info(origin.x + lx, origin.z + lz));
             }
         }
         ColumnTable { entries }
@@ -573,7 +713,19 @@ impl TerrainGenerator {
                                     // ravine reaches below sea level.
                                     if wy <= SEA_LEVEL && wy == local_bottom && perp <= 1.0 {
                                         chunk.set(lx, ly, lz, water);
-                                        chunk.set_water_level(lx, ly, lz, 8);
+                                        if !chunk.water_meta(lx, lz).is_some() {
+                                            chunk.set_water_meta(
+                                                lx,
+                                                lz,
+                                                WaterColumnMeta::new(
+                                                    WaterKind::Aquifer,
+                                                    255,
+                                                    0,
+                                                    0,
+                                                    0,
+                                                ),
+                                            );
+                                        }
                                     } else {
                                         chunk.set(lx, ly, lz, BlockId::AIR);
                                     }
@@ -661,9 +813,13 @@ impl TerrainGenerator {
                             )
                         {
                             chunk.set(lx, ly + 1, lz, water);
-                            // set_water_level stores the liquid level for any
-                            // liquid block (water or lava).
-                            chunk.set_water_level(lx, ly + 1, lz, 8);
+                            if !chunk.water_meta(lx, lz).is_some() {
+                                chunk.set_water_meta(
+                                    lx,
+                                    lz,
+                                    WaterColumnMeta::new(WaterKind::Aquifer, 255, 0, 0, 0),
+                                );
+                            }
                         }
                     }
 
@@ -680,7 +836,6 @@ impl TerrainGenerator {
                             )
                         {
                             chunk.set(lx, ly + 1, lz, lava);
-                            chunk.set_water_level(lx, ly + 1, lz, 8);
                         }
                     }
 
@@ -703,7 +858,7 @@ impl TerrainGenerator {
                 // Surface height comes from the shared per-column table built
                 // once per chunk (see `column_table`) instead of re-sampling
                 // `base_height` (3 fractal-noise samplers per column).
-                let surface = columns.get(lx, lz).0.round() as i32;
+                let surface = columns.get(lx, lz).height.round() as i32;
                 for ly in 1..(CHUNK_SIZE - 1) {
                     let wy = origin.y + ly;
                     let id = chunk.get(lx, ly, lz);
@@ -877,8 +1032,11 @@ impl TerrainGenerator {
             for lz in 0..CHUNK_SIZE {
                 let wx = origin.x + lx;
                 let wz = origin.z + lz;
-                let (height_f, biome) = columns.get(lx, lz);
-                let height = height_f.round() as i32;
+                let info = columns.get(lx, lz);
+                let height = info.height.round() as i32;
+                let biome = info.biome;
+                let water_kind = info.water_kind;
+                let water_surface = info.water_surface;
 
                 for ly in 0..CHUNK_SIZE {
                     let wy = origin.y + ly;
@@ -906,17 +1064,25 @@ impl TerrainGenerator {
                             _ => dirt,
                         }
                     } else if wy < height {
-                        // Surface block.
-                        match biome {
-                            BiomeId::Desert | BiomeId::Beach => sand,
-                            BiomeId::Mountains if wy > SEA_LEVEL + 55 => snow,
-                            BiomeId::Ocean if wy < SEA_LEVEL => gravel,
-                            // Underwater surfaces get dirt, not grass.
-                            _ if height <= SEA_LEVEL => dirt,
-                            _ => grass,
+                        // Surface block. River/lake beds are sandy; ocean
+                        // floors keep their gravel/dirt treatment.
+                        let shoreline =
+                            water_kind != WaterKind::None && (height as f32) <= water_surface;
+                        if shoreline && matches!(water_kind, WaterKind::River | WaterKind::Lake) {
+                            sand
+                        } else {
+                            match biome {
+                                BiomeId::Desert | BiomeId::Beach => sand,
+                                BiomeId::Mountains if wy > SEA_LEVEL + 55 => snow,
+                                BiomeId::Ocean if wy < SEA_LEVEL => gravel,
+                                // Underwater surfaces get dirt, not grass.
+                                _ if (height as f32) <= water_surface => dirt,
+                                _ => grass,
+                            }
                         }
-                    } else if wy <= SEA_LEVEL {
-                        // Below sea level and above terrain: water (oceans/lakes).
+                    } else if (wy as f32) < water_surface {
+                        // Above the terrain floor and below the body surface:
+                        // ocean, river or lake water.
                         water
                     } else {
                         BlockId::AIR
@@ -945,9 +1111,26 @@ impl TerrainGenerator {
                     }
 
                     chunk.set(lx, ly, lz, block);
-                    // Water placed during worldgen is always a full source block.
-                    if block == water {
-                        chunk.set_water_level(lx, ly, lz, 8);
+                }
+
+                // Store the body type, continuous top-cell fill and flow data
+                // on the chunk that actually contains the surface voxel.
+                if water_kind != WaterKind::None && (info.height < water_surface) {
+                    let top_cell = (water_surface - 0.001).floor() as i32;
+                    if top_cell >= origin.y && top_cell < origin.y + CHUNK_SIZE {
+                        let fill = ((water_surface - top_cell as f32).clamp(0.02, 1.0) * 255.0)
+                            .round() as u8;
+                        chunk.set_water_meta(
+                            lx,
+                            lz,
+                            WaterColumnMeta::new(
+                                water_kind,
+                                fill,
+                                info.flow_angle,
+                                info.flow_speed,
+                                info.rapids,
+                            ),
+                        );
                     }
                 }
             }
@@ -999,7 +1182,7 @@ impl TerrainGenerator {
                 // Biome comes from the shared per-column table (same source
                 // as `generate`), so decorations match the surface biome
                 // exactly — without re-running the fractal-noise samplers.
-                let biome = columns.get(lx, lz).1;
+                let biome = columns.get(lx, lz).biome;
 
                 // ---- Trees (delegated to `tree` module) --------------------
                 if let Some(tree_type) = tree::pick_tree_type(self.seed, wx, wz, biome, n, h) {
@@ -1279,9 +1462,14 @@ impl TerrainGenerator {
                 if hash2(self.seed, ax, az) >= 0.005 {
                     continue;
                 }
-                let surf_f = self.base_height(ax, az);
-                let surf = surf_f.round() as i32;
-                let biome = self.biome_at(ax, az, surf_f);
+                // Use the carved column height and reject any water body:
+                // a well in a lake or river would be a dry ring on the bed.
+                let info = self.column_info(ax, az);
+                if info.water_kind != WaterKind::None {
+                    continue;
+                }
+                let surf = info.height.round() as i32;
+                let biome = info.biome;
                 if biome != BiomeId::Desert && biome != BiomeId::Plains {
                     continue;
                 }
@@ -1345,8 +1533,7 @@ mod tests {
 
     /// The `ColumnTable` refactor relies on `generate` / `decorate` reading
     /// exactly what the direct per-column samplers would have produced, so
-    /// lock that equivalence in: every table entry must equal
-    /// `base_height(wx, wz)` / `biome_at(wx, wz, height)` for the same column.
+    /// lock that equivalence in for height, biome and hydrology.
     #[test]
     fn column_table_matches_direct_sampling() {
         let gen = TerrainGenerator::new(42);
@@ -1356,10 +1543,66 @@ mod tests {
                 for lz in 0..CHUNK_SIZE {
                     let wx = origin.x + lx;
                     let wz = origin.z + lz;
-                    let h = gen.base_height(wx, wz);
-                    assert_eq!(table.get(lx, lz), (h, gen.biome_at(wx, wz, h)));
+                    let direct = gen.column_info(wx, wz);
+                    let entry = table.get(lx, lz);
+                    assert!((entry.height - direct.height).abs() < 1e-5);
+                    assert_eq!(entry.biome, direct.biome);
+                    assert_eq!(entry.water_kind, direct.water_kind);
+                    assert!((entry.water_surface - direct.water_surface).abs() < 1e-5);
                 }
             }
         }
+    }
+
+    #[test]
+    fn generated_world_contains_rivers_and_lakes() {
+        let gen = TerrainGenerator::new(1337);
+        let mut rivers = 0usize;
+        let mut lakes = 0usize;
+        let mut oceans = 0usize;
+        for x in (-1024..1024).step_by(8) {
+            for z in (-1024..1024).step_by(8) {
+                match gen.column_info(x, z).water_kind {
+                    WaterKind::River => rivers += 1,
+                    WaterKind::Lake => lakes += 1,
+                    WaterKind::Ocean => oceans += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(oceans > 0, "expected ocean columns in a 2048² sample");
+        assert!(rivers > 0, "expected river columns in a 2048² sample");
+        assert!(lakes > 0, "expected lake columns in a 2048² sample");
+    }
+
+    #[test]
+    fn river_columns_flow_downstream_and_lakes_are_still() {
+        let gen = TerrainGenerator::new(1337);
+        let mut checked_river = false;
+        let mut checked_lake = false;
+        for x in (-1024..1024).step_by(4) {
+            for z in (-1024..1024).step_by(4) {
+                let info = gen.column_info(x, z);
+                match info.water_kind {
+                    WaterKind::River => {
+                        assert!((info.water_surface - SEA_LEVEL as f32).abs() < 1e-5);
+                        assert!(info.flow_speed > pack_unit(0.2));
+                        checked_river = true;
+                    }
+                    WaterKind::Lake => {
+                        assert!((info.water_surface - LAKE_LEVEL).abs() < 1e-5);
+                        assert_eq!(info.flow_speed, 0);
+                        assert_eq!(info.rapids, 0);
+                        checked_lake = true;
+                    }
+                    _ => {}
+                }
+                if checked_river && checked_lake {
+                    return;
+                }
+            }
+        }
+        assert!(checked_river, "no river column found");
+        assert!(checked_lake, "no lake column found");
     }
 }

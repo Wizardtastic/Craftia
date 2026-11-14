@@ -1,6 +1,7 @@
 #version 450
 
 #extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_GOOGLE_include_directive : require
 
 // Chunk fragment shader - fully dynamic, GPU ray-traced lighting.
 //
@@ -87,6 +88,22 @@ layout(set = 0, binding = 10) uniform EmissiveLights {
     vec4 light_meta;               // x = active count
 } lights;
 
+// ── Local water-body grid (binding 11) ───────────────────────────────────
+// Header = (origin.x, origin.z, size, valid). Row-major cells, each with two
+// (surface, bed) layers ordered highest surface first:
+//   surface > 0 : real water body; caustics apply above bed and below surface
+//   surface < 0 : dry land within two blocks of water (wet-edge band only;
+//                 bed stores the fringe height)
+//   -1000       : no nearby water in this layer
+// Keeping the bed, and a second layer, lets a cave aquifer under a lake or
+// ocean stay separate from the surface body instead of inheriting its depth.
+const float WATER_GRID_NONE = -1000.0;
+const int WATER_GRID_LAYERS = 2;
+layout(set = 0, binding = 11) readonly buffer WaterSurfaceGrid {
+    vec4 header;
+    vec2 bodies[];
+} water_grid;
+
 const uint BLOCK_KIND_AIR        = 0u;
 const uint BLOCK_KIND_OPAQUE     = 1u;
 const uint BLOCK_KIND_WATER      = 2u;
@@ -112,6 +129,9 @@ layout(location = 0) in vec2 frag_uv;
 layout(location = 1) in float frag_fog;
 layout(location = 2) in vec3 frag_world_pos;
 layout(location = 3) flat in uint frag_tile;
+layout(location = 4) flat in uint frag_water;
+layout(location = 5) in float frag_water_amp;
+layout(location = 6) flat in float frag_water_time;
 
 layout(location = 0) out vec4 out_color;
 
@@ -165,6 +185,69 @@ uint voxel_id(ivec3 c) {
 
 BlockLightGpu block_light(uint id) {
     return block_lights.blocks[id & 255u];
+}
+
+struct LocalWater {
+    float caustic_surface;
+    float wet_surface;
+    bool actual_water;
+    bool wet;
+};
+
+/// Pick the nearest water body above this world position for caustics, and
+/// the nearest waterline for the wet-edge band. A cave aquifer is selected
+/// for cave terrain because the surface lake's bed is far above that terrain.
+LocalWater local_water(vec3 p) {
+    LocalWater w;
+    w.caustic_surface = 0.0;
+    w.wet_surface = 0.0;
+    w.actual_water = false;
+    w.wet = false;
+    if (water_grid.header.w < 0.5) {
+        return w;
+    }
+    int size = int(water_grid.header.z);
+    ivec2 cell = ivec2(floor(p.xz)) - ivec2(water_grid.header.xy);
+    if (cell.x < 0 || cell.y < 0 || cell.x >= size || cell.y >= size) {
+        return w;
+    }
+    int base = (cell.y * size + cell.x) * WATER_GRID_LAYERS;
+    float best_caustic = 1e9;
+    float best_wet_dist = 1e9;
+    for (int i = 0; i < WATER_GRID_LAYERS; i++) {
+        vec2 body = water_grid.bodies[base + i];
+        if (body.x <= WATER_GRID_NONE + 1.0) {
+            continue;
+        }
+        if (body.x < 0.0) {
+            // Dry fringe: wet edge only, never caustics.
+            float h = -body.x;
+            float d = abs(p.y - (h - 0.05));
+            if (d < 0.55 && d < best_wet_dist) {
+                best_wet_dist = d;
+                w.wet = true;
+                w.wet_surface = h;
+            }
+            continue;
+        }
+        float surface = body.x;
+        float bed = body.y;
+        // Caustics belong to the body directly above this fragment. Checking
+        // the bed rejects a distant lake surface when the fragment is inside
+        // a cave whose roof separates it from that lake.
+        if (surface > p.y && bed <= p.y + 1.05 && surface < best_caustic) {
+            best_caustic = surface;
+            w.actual_water = true;
+            w.caustic_surface = surface;
+        }
+        float d = abs(p.y - (surface - 0.05));
+        if (d < 0.55 && d < best_wet_dist) {
+            best_wet_dist = d;
+            w.wet = true;
+            w.wet_surface = surface;
+        }
+    }
+    return w;
 }
 
 // ── Analytic sky (mirrors sky.frag so reflected/ambient rays agree) ───────
@@ -587,17 +670,41 @@ vec3 face_normal(vec3 view_dir) {
     return (dot(n, view_dir) < 0.0) ? -n : n;
 }
 
-vec3 water_wave_normal(vec3 wp, float t) {
-    float a1 = 0.04 * 2.5;
-    float p1 = wp.x * 1.5 + t * 1.8;
-    float q1 = wp.z * 1.2 + t * 1.4;
-    float dhdx = a1 * 1.5 * cos(p1) * cos(q1);
-    float dhdz = -a1 * 1.2 * sin(p1) * sin(q1);
-    float a2 = 0.022;
-    float p2 = wp.x * 3.9 + t * 2.7;
-    float q2 = wp.z * 3.3 + t * 2.2;
-    dhdx += a2 * 3.9 * cos(p2) * cos(q2);
-    dhdz += -a2 * 3.3 * sin(p2) * sin(q2);
+// Generated from crates/world/src/water_wave_model.rs. The CPU evaluator is
+// emitted from the same expression tree, so the two cannot drift by hand.
+#include "water_wave.generated.glsl"
+
+// Analytic normal of the same wave field (central difference).
+vec3 water_wave_normal(vec3 wp, uint kind, float amp, float angle,
+                       float rapids, float t) {
+    if (amp <= 0.0) return vec3(0.0, 1.0, 0.0);
+    float e = 0.12;
+    float h0 = water_wave_height(kind, amp, angle, rapids, wp.xz, t);
+    float hx = water_wave_height(kind, amp, angle, rapids, wp.xz + vec2(e, 0.0), t);
+    float hz = water_wave_height(kind, amp, angle, rapids, wp.xz + vec2(0.0, e), t);
+    return normalize(vec3(-(hx - h0) / e, 1.0, -(hz - h0) / e));
+}
+
+// Fine wind ripples layered on top of the displaced swell. These are normal
+// detail only (no vertex displacement), which gives the surface a broken,
+// water-like highlight without increasing the transparent mesh tessellation.
+vec3 water_ripple_normal(vec2 p, float t) {
+    const float a1 = 0.58;
+    const float a2 = -0.74;
+    float k1 = WATER_TAU / 2.6;
+    float k2 = WATER_TAU / 1.55;
+    float w1 = sqrt(WATER_G * k1);
+    float w2 = sqrt(WATER_G * k2);
+    float along1 = p.x * cos(a1) + p.y * sin(a1);
+    float along2 = p.x * cos(a2) + p.y * sin(a2);
+    float amp1 = 0.055;
+    float amp2 = 0.032;
+    float phase1 = k1 * along1 - w1 * t * 1.15;
+    float phase2 = k2 * along2 - w2 * t * 1.35 + 2.1;
+    float dhdx = amp1 * k1 * cos(phase1) * cos(a1)
+               + amp2 * k2 * cos(phase2) * cos(a2);
+    float dhdz = amp1 * k1 * cos(phase1) * sin(a1)
+               + amp2 * k2 * cos(phase2) * sin(a2);
     return normalize(vec3(-dhdx, 1.0, -dhdz));
 }
 
@@ -620,8 +727,26 @@ void main() {
         actual_tile = tile_remap.map[frag_tile];
     }
 
+    BlockMaterialGpu mat = material_table.materials[actual_tile];
+    uint flags = mat.flags_roughness_emissive_pad & 0xFFu;
+    bool is_water_block = (flags & MATERIAL_FLAG_WATER) != 0u;
+    uint water_kind = frag_water & 7u;
+    float water_amp = frag_water_amp;
+    float water_angle = float((frag_water >> 16) & 255u) * (WATER_TAU / 255.0);
+    float water_rapids = float((frag_water >> 4) & 15u) / 15.0;
+    float water_flow = float((frag_water >> 24) & 255u) / 255.0 * 2.6;
+    float water_time = frag_water_time;
+
     ivec2 tile_pos = ivec2(actual_tile % 16u, actual_tile / 16u);
-    vec2 atlas_uv = (vec2(tile_pos) + vec2(fract(frag_uv.x), fract(frag_uv.y))) / ATLAS_TILES;
+    // River water scrolls downstream. The direction and speed come from the
+    // mesher's flow metadata, so a fast narrow chute visibly races while a
+    // broad calm river drifts.
+    vec2 tile_uv = vec2(fract(frag_uv.x), fract(frag_uv.y));
+    if (is_water_block && water_kind == 2u) {
+        vec2 flow = vec2(cos(water_angle), sin(water_angle));
+        tile_uv = fract(tile_uv + flow * water_flow * water_time * 0.18);
+    }
+    vec2 atlas_uv = (vec2(tile_pos) + tile_uv) / ATLAS_TILES;
 
     vec4 tex = texture(atlas, atlas_uv);
     if (tex.a < 0.1) {
@@ -631,8 +756,6 @@ void main() {
     // Atlas textures are authored in sRGB but sampled through a UNORM view.
     vec3 albedo = pow(tex.rgb, vec3(2.2));
 
-    BlockMaterialGpu mat = material_table.materials[actual_tile];
-    uint flags = mat.flags_roughness_emissive_pad & 0xFFu;
     float roughness = float((mat.flags_roughness_emissive_pad >> 8u) & 0xFFu) / 255.0;
     float emissive_amount = float((mat.flags_roughness_emissive_pad >> 16u) & 0xFFu) / 255.0;
     float water_y = material_table.world_params.x;
@@ -640,11 +763,36 @@ void main() {
     float caustics_amount = material_table.world_params.z;
     float leaves_amount = material_table.world_params.w;
 
+    // Follow the local water bodies (lake/river/cave surfaces). If the grid
+    // is not valid yet (first frame), keep the legacy global fallback.
+    LocalWater local = local_water(frag_world_pos);
+    if (water_grid.header.w < 0.5) {
+        local.caustic_surface = water_y;
+        local.wet_surface = water_y;
+        local.actual_water = true;
+        local.wet = true;
+    }
+
     vec3 cam_pos = cam.cam_pos_and_maxdist.xyz;
     vec3 to_eye = cam_pos - frag_world_pos;
     float view_dist = length(to_eye);
     vec3 v = to_eye / max(view_dist, 1e-4);
+    // Water surfaces are displaced at 1 m vertices, so the geometric face
+    // normal is constant per triangle and produces visible triangular flashes
+    // in the sun/reflection path. Use the analytic normal of the wave field
+    // for every up-facing water fragment; keep the face normal for vertical
+    // shoreline steps. This also makes the shadow rays use the same smooth
+    // surface the reflection/refraction code sees.
     vec3 n = face_normal(v);
+    if (is_water_block && abs(n.y) > 0.2) {
+        n = water_wave_normal(frag_world_pos, water_kind, water_amp,
+                              water_angle, water_rapids, water_time);
+        if (water_amp > 0.02) {
+            vec3 ripple = water_ripple_normal(frag_world_pos.xz, water_time);
+            n = normalize(vec3(n.x + ripple.x, n.y, n.z + ripple.z));
+        }
+        if (dot(n, v) < 0.0) n = -n;
+    }
 
     vec3 sun_dir = normalize(rt.sun_dir_vis.xyz);
     vec3 moon_dir = normalize(rt.moon_dir_phase.xyz);
@@ -684,7 +832,6 @@ void main() {
 
     // ── Specular reflection (ray traced) ─────────────────────────────────
     float gloss = (1.0 - roughness) * clamp(rt.params.x, 0.0, 1.0);
-    bool is_water_block = (flags & MATERIAL_FLAG_WATER) != 0u;
     if (!is_water_block && gloss > 0.02) {
         float cos_theta = clamp(dot(v, n), 0.0, 1.0);
         float f0 = (flags & MATERIAL_FLAG_REFLECTIVE) != 0u ? 0.045 : 0.02;
@@ -709,13 +856,22 @@ void main() {
     // ── Water: ray-traced reflection + refraction absorption ─────────────
     float out_alpha = tex.a;
     if (is_water_block && refl.proj_misc.z < 0.5) {
-        float t = rt.sky_horizon.w;
-        vec3 wn = water_wave_normal(frag_world_pos, t);
+        float t = water_time;
+        // `n` was already replaced with the analytic wave normal on up-facing
+        // water above. Do not recompute or mix it with the faceted geometry
+        // normal here: that mix was the source of triangle-shaped highlights.
+        vec3 wn = n;
         float cos_theta = clamp(dot(v, wn), 0.0, 1.0);
         float fres = fresnel_schlick(cos_theta, 0.02) * clamp(rt.params.x, 0.0, 1.0);
 
         // Reflection: traced through the voxel world, falling back to sky.
         vec3 reflected = trace_reflection(frag_world_pos, wn, v, 0.08, seed);
+        // A traced reflection can be black when it hits off-screen geometry,
+        // and a wave face tilted toward the camera can reflect below the
+        // horizon. Both produced thin black slivers across the surface. Keep
+        // the reflection no darker than the sky/water base instead.
+        reflected = max(reflected, sky_radiance(reflect(-v, wn)) * 0.65);
+        reflected = max(reflected, vec3(0.035, 0.16, 0.24));
         // Sun/moon glitter path.
         vec3 wr = reflect(-v, wn);
         if (sun_vis > 0.0) {
@@ -733,14 +889,46 @@ void main() {
             float((mat.absorption_pad >> 16u) & 0xFFu)) / 255.0;
         if (absorption == vec3(0.0)) absorption = vec3(0.42, 0.12, 0.07);
         vec3 beer = exp(-absorption * column * 2.4);
-        vec3 refracted = textureLod(scene_opaque, clamp(scene_uv, vec2(0.001), vec2(0.999)), 0.0).rgb * beer;
+        // Waves bend the view ray: shift the opaque-scene lookup along the
+        // surface normal, then absorb over the true water-column length.
+        float bend = 0.006 + 0.020 * water_rapids;
+        vec2 refract_uv = clamp(scene_uv + wn.xz * bend * clamp(column * 0.5, 0.25, 1.0),
+                                vec2(0.001), vec2(0.999));
+        vec3 refracted = textureLod(scene_opaque, refract_uv, 0.0).rgb * beer;
         refracted = mix(refracted, refracted * (albedo * 2.6 + 0.03), 0.30);
+        // The scene copy can contain unrendered/black pixels just outside the
+        // shoreline; keep those from turning into black cracks in the water.
+        refracted = max(refracted, vec3(0.02, 0.10, 0.16));
+        // Dark, saturated deep water instead of a mirror of the pale seabed.
+        // At depth the block grid of the seabed should disappear; near shore
+        // the bottom remains visible through the shallow-water path.
+        vec3 water_base = vec3(0.035, 0.16, 0.24);
+        float depth_fade = smoothstep(1.5, 10.0, column);
+        refracted = mix(refracted, water_base, depth_fade * 0.55);
         // Water body receives the same traced lighting (sparkle + depth).
-        refracted += albedo * (ambient + direct + emissive_light) * 0.25;
+        refracted += water_base * (ambient + direct + emissive_light) * 0.30;
 
         vec3 water_col = mix(refracted, reflected, clamp(fres + 0.10, 0.0, 1.0));
+        water_col = max(water_col, vec3(0.015, 0.07, 0.11));
+
+        // White water: rapids, the shallow band at the shore, and the crests
+        // of large swells (which only reach full height well offshore).
+        float foam = water_rapids * 0.45;
+        foam += (1.0 - smoothstep(0.4, 2.5, column)) * 0.28;
+        if (water_amp > 0.05) {
+            float crest = water_wave_height(water_kind, water_amp, water_angle,
+                                            water_rapids, frag_world_pos.xz, t)
+                        / max(water_amp, 1e-4);
+            foam += smoothstep(0.80, 1.0, crest) * 0.18;
+        }
+        foam = clamp(foam, 0.0, 0.75);
+        water_col = mix(water_col, vec3(0.82, 0.90, 0.94), foam);
+
         tinted = water_col;
-        out_alpha = clamp(tex.a + fres * 1.2, 0.0, 1.0);
+        // Deep water must not show the opaque seabed through the blend: its
+        // block grid reads as cracks in the otherwise smooth surface. Keep
+        // shallow water translucent so the bottom and shoreline stay visible.
+        out_alpha = clamp(tex.a + fres * 1.2 + foam * 0.3 + depth_fade * 0.50, 0.0, 1.0);
     }
 
     // ── Glass / translucent absorption ───────────────────────────────────
@@ -772,8 +960,9 @@ void main() {
     }
 
     // ── Sun caustics on submerged terrain ────────────────────────────────
-    if (!is_water_block && caustics_amount > 0.0 && frag_world_pos.y < water_y) {
-        float depth_below = water_y - frag_world_pos.y;
+    if (!is_water_block && caustics_amount > 0.0 && local.actual_water &&
+            frag_world_pos.y < local.caustic_surface) {
+        float depth_below = local.caustic_surface - frag_world_pos.y;
         float depth_attenuation = clamp(1.0 - depth_below / 4.0, 0.0, 1.0);
         float pattern = sin(frag_world_pos.x * 0.6 + rt.params.w * 1.3)
                       * cos(frag_world_pos.z * 0.6 - rt.params.w * 0.9);
@@ -783,8 +972,8 @@ void main() {
     }
 
     // ── Wet edge ─────────────────────────────────────────────────────────
-    if (wet_edge_amount > 0.0 && !is_water_block) {
-        float band_dist = abs(frag_world_pos.y - (water_y - 0.05));
+    if (wet_edge_amount > 0.0 && !is_water_block && local.wet) {
+        float band_dist = abs(frag_world_pos.y - (local.wet_surface - 0.05));
         float wetness = clamp(1.0 - band_dist / 0.55, 0.0, 1.0);
         vec3 wet_rgb = vec3(
             float(mat.wet_tint & 0xFFu),
@@ -813,7 +1002,13 @@ void main() {
         }
         // Fog is only lit where it can actually see the sky/sun/moon. A dark
         // cave or sealed room therefore fades to black instead of grey haze.
-        float sky_fog = trace_voxels(mid, vec3(0.0, 1.0, 0.0), 96.0, 128, false).transmittance;
+        // Water is a horizontal surface; tracing straight up from a midway
+        // point that can be inside a wave produces broken dark fog bands.
+        // Water already gets its depth/reflection treatment above, so use the
+        // open-sky fog colour instead of the voxel shadow ray here.
+        float sky_fog = is_water_block
+            ? 1.0
+            : trace_voxels(mid, vec3(0.0, 1.0, 0.0), 96.0, 128, false).transmittance;
         vec3 haze = fog_col * sky_fog
                   + rt.sun_color_radius.rgb * sun_fog * 0.55
                   + rt.moon_color_radius.rgb * moon_fog * 0.25;

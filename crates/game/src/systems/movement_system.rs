@@ -69,6 +69,9 @@ pub const AIR_ACCEL: f32 = 8.0;
 pub const WATER_GRAVITY: f32 = 8.0;
 pub const WATER_SWIM_UP: f32 = 2.2;
 pub const WATER_SINK: f32 = 1.8;
+/// A floating player's centre settles this far below the wave surface, so the
+/// head stays in air while the body rides the swell.
+pub const WATER_FLOAT_OFFSET: f32 = 0.55;
 
 // --- Per-tick drag ---------------------------------------------------------
 /// Default block slipperiness (0.6) × global 0.91.
@@ -93,6 +96,12 @@ struct TickContext<'a> {
     world: Option<&'a voxel_world::world::World>,
     flying: bool,
     in_water: bool,
+    /// Fraction of the player AABB below the water surface.
+    submersion: f32,
+    /// Surface current at the player, blocks/second (x, z).
+    current: glam::Vec2,
+    /// Wave-adjusted water surface above the player, if submerged.
+    water_surface: Option<f32>,
     noclip: bool,
     sprinting: bool,
     speed: f32,
@@ -186,6 +195,14 @@ pub fn movement_system(world: &mut World, dt: f32) {
         .map(|w| w.0.water_submersion(transform.pos - half, transform.pos + half))
         .unwrap_or(0.0);
     let in_water = submersion > 0.05 && !flying;
+    // Probe the lower torso: that point is inside the water even when wading
+    // in a shallow river whose surface is below the player's centre.
+    let water = physics.as_ref().and_then(|w| {
+        let probe = transform.pos - Vec3::Y * half.y * 0.5;
+        w.0.water_sample(probe)
+    });
+    let current = water.map(|s| s.flow).unwrap_or(glam::Vec2::ZERO);
+    let water_surface = water.map(|s| s.surface_y);
 
     state.eye_offset = if input.sneaking {
         EYE_HEIGHT_SNEAK
@@ -200,6 +217,9 @@ pub fn movement_system(world: &mut World, dt: f32) {
         world: physics.as_ref().map(|p| p.0.as_ref()),
         flying,
         in_water,
+        submersion,
+        current,
+        water_surface,
         noclip: game_mode == GameMode::Spectator,
         sprinting,
         speed,
@@ -335,13 +355,36 @@ fn step_tick(
         vel.y = target_y + (vel.y - target_y) * 0.5;
         state.fall_distance = 0.0;
     } else if ctx.in_water {
-        let target = ctx.wish * SWIM_SPEED;
+        // Swimming is relative to the water, not the shore: a river current
+        // carries the player downstream even with no input, and the same
+        // current adds to (or fights) deliberate movement.
+        let target = Vec3::new(
+            ctx.wish.x * SWIM_SPEED + ctx.current.x,
+            0.0,
+            ctx.wish.z * SWIM_SPEED + ctx.current.y,
+        );
         vel.x = target.x + (vel.x - target.x) * WATER_FRICTION;
         vel.z = target.z + (vel.z - target.z) * WATER_FRICTION;
         if ctx.jump {
             vel.y = WATER_SWIM_UP;
         } else if ctx.sneak {
             vel.y = -WATER_SINK;
+        } else if ctx.submersion > 0.55 {
+            if let Some(surface) = ctx.water_surface {
+                // Buoyancy: accelerate toward a centre just below the wave
+                // surface. Because the surface includes the analytic wave
+                // field, the player rises and falls with the swell instead of
+                // hovering at a flat sea level.
+                let target_y = surface - WATER_FLOAT_OFFSET;
+                let accel = ((target_y - pos.y) * 12.0)
+                    .clamp(-WATER_GRAVITY, WATER_GRAVITY);
+                vel.y = (vel.y + accel * TICK_SECONDS) * WATER_FRICTION;
+                vel.y = vel.y.clamp(-WATER_SINK, WATER_SWIM_UP);
+            } else {
+                vel.y -= WATER_GRAVITY * TICK_SECONDS;
+                vel.y *= WATER_FRICTION;
+                vel.y = vel.y.max(-WATER_SINK);
+            }
         } else {
             vel.y -= WATER_GRAVITY * TICK_SECONDS;
             vel.y *= WATER_FRICTION;

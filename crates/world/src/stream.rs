@@ -508,6 +508,12 @@ fn run_worker(
             let gpu_dist = config.gpu_mesh_distance.max(0) as i64;
             let (near, far): (Vec<ChunkPos>, Vec<ChunkPos>) =
                 mesh_batch.iter().copied().partition(|p| {
+                    // The GPU compute mesher emits static geometry and cannot
+                    // evaluate the wave field, so any chunk holding water must
+                    // stay on the CPU mesher.
+                    if world.chunk_has_water(*p) {
+                        return true;
+                    }
                     if config.gpu_mesh_distance <= 0 {
                         return true;
                     }
