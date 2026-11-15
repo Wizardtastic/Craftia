@@ -138,9 +138,10 @@ pub(crate) enum SettingsRow {
 /// sequence; `build_settings_layout` computes rects from the same list.
 pub(crate) const SETTINGS_ROWS: &[SettingsRow] = &[
     SettingsRow::Section("GRAPHICS"),
-    SettingsRow::Slider("Render Distance", 2.0, 16.0),
+    SettingsRow::Slider("Render Distance", 2.0, 64.0),
+    SettingsRow::Slider("LOD Distance", 2.0, 128.0),
     SettingsRow::Toggle("VSync"),
-    SettingsRow::Slider("Fog Distance", 100.0, 800.0),
+    SettingsRow::Slider("Fog Distance", 100.0, 2400.0),
     SettingsRow::Slider("Exposure", 0.1, 3.0),
     SettingsRow::Toggle("Vignette"),
     SettingsRow::Slider("Raytrace Quality", 0.0, 1.0),
@@ -217,7 +218,15 @@ pub(crate) struct SettingsLayout {
 }
 
 impl SettingsLayout {
+    #[allow(dead_code)] // runtime uses `new_with_lod_min`; kept for layout tests
     pub fn new(w: f32, h: f32) -> Self {
+        Self::new_with_lod_min(w, h, 2.0)
+    }
+
+    /// Build the layout with the LOD slider's lower bound pinned to the
+    /// current standard render distance. This keeps the LOD control from
+    /// offering values smaller than the fully-detailed radius.
+    pub fn new_with_lod_min(w: f32, h: f32, lod_min: f32) -> Self {
         let panel_w = 500.0;
         // Height from the actual row list so new rows can never overflow.
         let rows_h: f32 = SETTINGS_ROWS
@@ -243,13 +252,18 @@ impl SettingsLayout {
             match row {
                 SettingsRow::Section(_) => y += SECTION_H,
                 SettingsRow::Slider(label, min, max) => {
+                    let (min, max) = if *label == "LOD Distance" {
+                        ((*min).max(lod_min), *max)
+                    } else {
+                        (*min, *max)
+                    };
                     let bar_x = lx + row_w * 0.55;
                     let bar_w = row_w * 0.35;
                     sliders.push(SliderSpec {
                         rect: Rect::from_xywh(bar_x, y + 4.0, bar_w, 8.0),
                         label,
-                        min: *min,
-                        max: *max,
+                        min,
+                        max,
                     });
                     y += SLIDER_ROW_H;
                 }
@@ -922,6 +936,7 @@ mod tests {
             slider_names,
             vec![
                 "Render Distance",
+                "LOD Distance",
                 "Fog Distance",
                 "Exposure",
                 "Raytrace Quality",
@@ -953,16 +968,30 @@ mod tests {
     #[test]
     fn slider_value_at_spans_range() {
         let lay = SettingsLayout::new(1920.0, 1080.0);
-        let s = &lay.sliders[0]; // Render Distance 2..16
+        let s = &lay.sliders[0]; // Render Distance 2..64
         assert_eq!(s.value_at(s.rect.x), 2.0);
-        assert_eq!(s.value_at(s.rect.x + s.rect.w), 16.0);
+        assert_eq!(s.value_at(s.rect.x + s.rect.w), 64.0);
         // Midpoint is `min + pct * (max - min)`, so compare with an epsilon
-        // (exact equality fails on float rounding: 9.000002).
+        // (exact equality fails on float rounding).
         let mid = s.value_at(s.rect.x + s.rect.w * 0.5);
-        assert!((mid - 9.0).abs() < 1e-3, "midpoint {mid} != 9.0");
+        assert!((mid - 33.0).abs() < 1e-3, "midpoint {mid} != 33.0");
         // Clamped outside.
         assert_eq!(s.value_at(s.rect.x - 100.0), 2.0);
-        assert_eq!(s.value_at(s.rect.x + s.rect.w + 100.0), 16.0);
+        assert_eq!(s.value_at(s.rect.x + s.rect.w + 100.0), 64.0);
+    }
+
+    #[test]
+    fn lod_slider_starts_at_standard_distance_and_reaches_128() {
+        let lay = SettingsLayout::new_with_lod_min(1920.0, 1080.0, 24.0);
+        let lod = lay
+            .sliders
+            .iter()
+            .find(|s| s.label == "LOD Distance")
+            .unwrap();
+        assert_eq!(lod.min, 24.0);
+        assert_eq!(lod.max, 128.0);
+        assert_eq!(lod.value_at(lod.rect.x), 24.0);
+        assert_eq!(lod.value_at(lod.rect.x + lod.rect.w), 128.0);
     }
 
     #[test]

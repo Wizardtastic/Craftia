@@ -1,7 +1,8 @@
-//! First-person camera + frustum for culling. Lives in `voxel-core` because both
-//! the renderer (culling) and gameplay (look direction, ray origin) need it.
+//! First-person camera. Lives in `voxel-core` because both the renderer
+//! (view-projection) and gameplay (look direction, ray origin) need it.
+//! Frustum culling lives in [`crate::culling`].
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec3};
 
 /// First-person view camera. Yaw/pitch in radians; position in world space.
 #[derive(Clone, Copy, Debug)]
@@ -82,66 +83,5 @@ impl Camera {
     /// Combined view-projection matrix.
     pub fn view_projection(self) -> Mat4 {
         self.projection() * self.view()
-    }
-}
-
-/// A 6-plane frustum extracted from a view-projection matrix. Used for
-/// per-chunk culling on the CPU before issuing draw calls.
-#[derive(Clone, Copy, Debug)]
-pub struct Frustum {
-    /// Left, Right, Bottom, Top, Near, Far — each as `a*x + b*y + c*z + d >= 0`
-    /// is "inside".
-    pub planes: [Vec4; 6],
-}
-
-impl Frustum {
-    /// Extract the six clip-space planes from a row-major view-projection.
-    /// Convention: a point is inside when all six plane equations are >= 0.
-    pub fn from_view_projection(vp: Mat4) -> Self {
-        // Gribb-Hartmann extraction: each plane is w-row ± another row of the
-        // VP matrix. glam is column-major, so matrix row r is
-        // (col0[r], col1[r], col2[r], col3[r]).
-        let col0 = vp.col(0);
-        let col1 = vp.col(1);
-        let col2 = vp.col(2);
-        let col3 = vp.col(3);
-        let rows = |r: usize| Vec4::new(col0[r], col1[r], col2[r], col3[r]);
-        let r4 = rows(3);
-        let r1 = rows(0);
-        let r2 = rows(1);
-        let r3 = rows(2);
-
-        let mut planes = [
-            r4 + r1, // left
-            r4 - r1, // right
-            r4 + r2, // bottom
-            r4 - r2, // top
-            r4 + r3, // near
-            r4 - r3, // far
-        ];
-        for p in planes.iter_mut() {
-            let len = Vec3::new(p.x, p.y, p.z).length();
-            if len > 0.0 {
-                *p /= len;
-            }
-        }
-        Self { planes }
-    }
-
-    /// Test an axis-aligned bounding box (world space) against the frustum.
-    /// Returns `true` if any part of the box is potentially visible.
-    /// Uses the positive-vertex technique: for each plane, find the AABB corner
-    /// most aligned with the plane normal (single O(1) test per plane).
-    pub fn intersects_aabb(&self, min: Vec3, max: Vec3) -> bool {
-        for p in &self.planes {
-            // Select the corner most aligned with the plane normal.
-            let px = if p.x >= 0.0 { max.x } else { min.x };
-            let py = if p.y >= 0.0 { max.y } else { min.y };
-            let pz = if p.z >= 0.0 { max.z } else { min.z };
-            if p.x * px + p.y * py + p.z * pz + p.w < 0.0 {
-                return false;
-            }
-        }
-        true
     }
 }

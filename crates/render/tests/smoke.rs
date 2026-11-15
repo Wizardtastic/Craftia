@@ -139,9 +139,11 @@ fn chunk_upload_carries_pass_through_construction() {
     let upload = ChunkUpload {
         pos: ChunkPos(glam::IVec3::new(0, 0, 0)),
         pass: MeshPass::Transparent,
+        lod: 0,
         vertices: Vec::new(),
         indices: Vec::new(),
         index_count: 0,
+        bounds: None,
     };
     assert_eq!(upload.pass, MeshPass::Transparent);
     assert_eq!(upload.index_count, 0);

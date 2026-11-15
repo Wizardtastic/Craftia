@@ -331,9 +331,14 @@ fn main() -> anyhow::Result<()> {
         config.render.gpu_meshing = true;
     }
     if let Some(r) = cli.load_radius {
-        config.stream.load_radius = r.max(1);
+        let r = r.clamp(2, 64);
+        config.stream.load_radius = r;
+        config.world.load_radius = r;
+        config.world.lod_radius = config.world.lod_radius.clamp(r, 128);
+        config.stream.lod_radius = config.world.lod_radius;
         // Keep unload radius strictly larger so the wider band doesn't thrash.
         config.stream.unload_radius = (r + 2).max(config.stream.unload_radius);
+        config.world.unload_radius = config.stream.unload_radius;
     }
     if cli.debug {
         // Set debug overlay on via config — the engine reads this

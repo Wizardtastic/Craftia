@@ -23,6 +23,7 @@ mod raytrace;
 mod swapchain;
 
 pub(crate) use pipeline::spirv_to_u32;
+pub use indirect::CullStats;
 use pipeline::{CameraUbo, FogUbo, RaytraceUbo, SkyUbo};
 use swapchain::create_framebuffer_with;
 
@@ -41,7 +42,7 @@ use std::path::Path;
 
 use voxel_core::{
     math::ChunkPos,
-    Camera, Frustum,
+    Camera,
 };
 
 use crate::alloc::Alloc;
@@ -85,11 +86,17 @@ pub enum MeshPass {
 pub struct ChunkUpload {
     pub pos: ChunkPos,
     pub pass: MeshPass,
-    /// Vertex bytes (28 bytes each, layout = [`crate::Vertex`]).
+    /// LOD slot: 0 = full detail, 1 = 2x-downsampled. Transparent geometry
+    /// currently only exists at LOD 0 and falls back there.
+    pub lod: u32,
+    /// Vertex bytes (16 bytes each, layout = [`crate::ChunkVertexGpu`]).
     pub vertices: Vec<u8>,
     /// Index bytes (4 bytes each, `u32`).
     pub indices: Vec<u8>,
     pub index_count: u32,
+    /// Explicit world-space bounds for a far-LOD tile. `None` means the
+    /// normal 16³ chunk bounds derived from `pos`.
+    pub bounds: Option<([f32; 3], [f32; 3])>,
 }
 
 /// Renderer configuration.
@@ -143,7 +150,7 @@ impl Default for RendererConfig {
             shader_dir: None,
             particle_softness: 0.3,
             msaa_samples: 4,
-            occlusion_culling: false,
+            occlusion_culling: true,
             gpu_meshing: false,
         }
     }
@@ -248,6 +255,20 @@ pub struct Renderer {
     device: ash::Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
+    /// Optional second queue from the graphics family for the async cull.
+    compute_queue: Option<vk::Queue>,
+    compute_command_pool: vk::CommandPool,
+    cull_cmds: Vec<vk::CommandBuffer>,
+    /// Signalled by the async cull and waited by the graphics submit.
+    cull_semaphores: Vec<vk::Semaphore>,
+    /// Signalled by every graphics submit so the next cull waits until the
+    /// previous frame's indirect draws have finished reading shared buffers.
+    /// A single semaphore survives skipped frames (acquire NOT_READY), where
+    /// no graphics submission occurs.
+    cull_graphics_semaphore: vk::Semaphore,
+    has_graphics_submission: bool,
+    /// One cull in flight at a time; host-visible cull buffers are shared.
+    cull_fence: vk::Fence,
     surface: vk::SurfaceKHR,
     surface_instance: ash::khr::surface::Instance,
     swapchain_device: ash::khr::swapchain::Device,
@@ -634,13 +655,14 @@ impl Renderer {
             device::pick_physical_device(&instance, &surface_instance, surface)?;
 
         // --- logical device ---
-        let (device, graphics_queue, present_queue) = device::create_logical_device(
-            &instance,
-            physical_device,
-            queues,
-            &surface_instance,
-            surface,
-        )?;
+        let (device, graphics_queue, present_queue, draw_indirect_count, compute_queue) =
+            device::create_logical_device(
+                &instance,
+                physical_device,
+                queues,
+                &surface_instance,
+                surface,
+            )?;
         let swapchain_device = ash::khr::swapchain::Device::new(&instance, &device);
 
         let alloc = ManuallyDrop::new(Arc::new(Alloc::new(&instance, physical_device, &device)?));
@@ -848,6 +870,7 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples,
                 depth_write: true,
+                vertex_layout: pipeline::VertexLayout::PackedChunk,
             },
         )?;
         let wireframe_pipeline = pipeline::create_graphics_pipeline(
@@ -861,6 +884,7 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples,
                 depth_write: true,
+                vertex_layout: pipeline::VertexLayout::PackedChunk,
             },
         )?;
         // The transparent pipeline is created against the TRANSPARENT render
@@ -886,6 +910,7 @@ impl Renderer {
                 fs_spirv: &chunk_frag_spirv,
                 msaa_samples: vk::SampleCountFlags::TYPE_1,
                 depth_write: false,
+                vertex_layout: pipeline::VertexLayout::PackedChunk,
             },
         )?;
 
@@ -1792,8 +1817,52 @@ impl Renderer {
                 hiz_view: hiz_ref.sampled_view(),
                 hiz_sampler: hiz_ref.sampler(),
                 hiz_params,
+                draw_indirect_count,
             },
         )?;
+        // Async cull command buffers. A second queue from the graphics family
+        // avoids cross-family ownership transfers; when the device exposes
+        // only one queue, culling stays inline in the main command buffer.
+        let compute_command_pool = if compute_queue.is_some() {
+            let info = vk::CommandPoolCreateInfo::default()
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                .queue_family_index(queues.graphics);
+            unsafe { device.create_command_pool(&info, None) }
+                .map_err(|e| anyhow!("create compute command pool: {e:?}"))?
+        } else {
+            vk::CommandPool::null()
+        };
+        let cull_cmds = if compute_command_pool != vk::CommandPool::null() {
+            let info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(compute_command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(FRAMES_IN_FLIGHT as u32);
+            unsafe { device.allocate_command_buffers(&info)? }
+        } else {
+            Vec::new()
+        };
+        let mut cull_semaphores = Vec::new();
+        let cull_graphics_semaphore = if compute_queue.is_some() {
+            for _ in 0..FRAMES_IN_FLIGHT {
+                cull_semaphores.push(unsafe {
+                    device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                }?);
+            }
+            unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? }
+        } else {
+            vk::Semaphore::null()
+        };
+        let cull_fence = if compute_queue.is_some() {
+            unsafe {
+                device.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )?
+            }
+        } else {
+            vk::Fence::null()
+        };
+
         Ok(Self {
             config,
             _entry: entry,
@@ -1803,6 +1872,13 @@ impl Renderer {
             device,
             graphics_queue,
             present_queue,
+            compute_queue,
+            compute_command_pool,
+            cull_cmds,
+            cull_semaphores,
+            cull_graphics_semaphore,
+            has_graphics_submission: false,
+            cull_fence,
             surface,
             surface_instance,
             swapchain_device,
@@ -2107,6 +2183,16 @@ impl Renderer {
         Ok(())
     }
 
+    /// Update the fog draw distance without doing a full config reload.
+    pub fn set_fog_distance(&mut self, distance: f32) {
+        self.config.fog_distance = distance.max(1.0);
+    }
+
+    /// Update the world-space full-detail -> coarse LOD cutoff.
+    pub fn set_lod0_distance(&mut self, distance: f32) {
+        self.gpu_driven.set_lod0_distance(distance);
+    }
+
     /// Recompile a single shader source file via `glslangValidator` and
     /// destroy + recreate the affected Vulkan pipeline(s) in place. Maps
     /// `name` to its pipeline family:
@@ -2222,6 +2308,7 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: self.msaa_samples,
                 depth_write: true,
+                vertex_layout: pipeline::VertexLayout::PackedChunk,
             },
         )?;
         self.wireframe_pipeline = pipeline::create_graphics_pipeline(
@@ -2235,6 +2322,7 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: self.msaa_samples,
                 depth_write: true,
+                vertex_layout: pipeline::VertexLayout::PackedChunk,
             },
         )?;
         self.transparent_pipeline = pipeline::create_graphics_pipeline(
@@ -2248,6 +2336,7 @@ impl Renderer {
                 fs_spirv: &self.chunk_frag_spirv,
                 msaa_samples: vk::SampleCountFlags::TYPE_1,
                 depth_write: false,
+                vertex_layout: pipeline::VertexLayout::PackedChunk,
             },
         )?;
         Ok(())
@@ -2833,6 +2922,11 @@ impl Renderer {
         }
     }
 
+    /// Counters from the most recent completed GPU cull dispatch.
+    pub fn cull_stats(&self) -> CullStats {
+        self.gpu_driven.cull_stats()
+    }
+
     pub fn upload_chunks(&mut self, uploads: Vec<ChunkUpload>) {
         if uploads.is_empty() {
             return;
@@ -2969,9 +3063,14 @@ impl Renderer {
         self.gpu_driven.buffer_stats()
     }
 
-    /// Toggle wireframe rendering.
+    /// Toggle mesh-mode (line-polygon) rendering.
     pub fn toggle_wireframe(&mut self) {
         self.wireframe_enabled = !self.wireframe_enabled;
+        // Chunk draws are issued through the GPU-driven indirect path, which
+        // binds its own pipeline after the main pass sets `active_pipeline`.
+        // Push the flag there too or F4 has no visible effect.
+        self.gpu_driven
+            .set_wireframe(self.wireframe_enabled);
     }
 
     /// Whether wireframe rendering is active.
@@ -3004,7 +3103,7 @@ impl Renderer {
         } = input;
         // Resize-check, upload UI, precompute camera matrices. Everything we need
         // before submitting any GPU work.
-        let (view_proj, vp_cols, _frustum, ui_index_count) = self.prepare_frame(&camera, ui)?;
+        let (view_proj, vp_cols, ui_index_count) = self.prepare_frame(&camera, ui)?;
 
         let frame_idx = self.frame_counter % FRAMES_IN_FLIGHT;
         // Copy out the per-frame handles (all `Copy`) so we don't hold an
@@ -3119,6 +3218,62 @@ impl Renderer {
 
         let device = &self.device;
 
+        // Record and submit the cull on the second graphics-family queue. The
+        // main submission waits on the cull semaphore at the indirect-draw
+        // stage, so sky/entity recording can overlap the dispatch.
+        let async_cull = if let Some(compute_queue) = self.compute_queue {
+            // Host-visible cull tables are shared, so only one cull may be in
+            // flight while the CPU updates them.
+            self.wait_for_fence_reset(self.cull_fence)?;
+            // Rebuilding the indirect tables writes memory the previous frame's
+            // indirect draws may still read; wait for that submission first.
+            if self.gpu_driven.needs_rebuild() {
+                let prev = self.frames[(frame_idx + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT]
+                    .in_flight_fence;
+                unsafe { device.wait_for_fences(&[prev], true, u64::MAX)? };
+            }
+            let cull_cmd = self.cull_cmds[frame_idx];
+            unsafe {
+                device.reset_command_buffer(cull_cmd, vk::CommandBufferResetFlags::empty())?;
+                device.begin_command_buffer(
+                    cull_cmd,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )?;
+            }
+            self.gpu_driven.record_cull(
+                &self.device,
+                cull_cmd,
+                indirect::RecordUniforms {
+                    vp_cols: &vp_cols,
+                    cam_pos: camera.pos,
+                },
+            );
+            unsafe { device.end_command_buffer(cull_cmd)? };
+            let cull_semaphore = self.cull_semaphores[frame_idx];
+            let cull_done = [cull_semaphore];
+            let command_buffers = [cull_cmd];
+            // Wait for the most recent graphics submission before touching
+            // shared indirect/depth inputs. Skipped frames (acquire NOT_READY)
+            // simply leave the semaphore signalled for the next cull.
+            let prev_graphics = [self.cull_graphics_semaphore];
+            let wait = if self.has_graphics_submission {
+                &prev_graphics[..]
+            } else {
+                &[][..]
+            };
+            let wait_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+            let submit = vk::SubmitInfo::default()
+                .command_buffers(&command_buffers)
+                .wait_semaphores(wait)
+                .wait_dst_stage_mask(&wait_stages[..wait.len()])
+                .signal_semaphores(&cull_done);
+            unsafe { device.queue_submit(compute_queue, &[submit], self.cull_fence)? };
+            true
+        } else {
+            false
+        };
+
         // Record command buffer (cmd was copied out above).
         // Wrap query_offset by the pool size so long-running sessions
         // (frame_counter > FRAMES_IN_FLIGHT) don't write past the pool
@@ -3147,8 +3302,9 @@ impl Renderer {
 
         // GPU-driven frustum cull runs OUTSIDE the main render pass (a compute
         // dispatch inside a render pass is illegal). It must precede
-        // `record_main_pass_setup`, which begins the render pass.
-        {
+        // `record_main_pass_setup`, which begins the render pass. When a second
+        // queue is available it was already submitted above.
+        if !async_cull {
             let gpu = &mut self.gpu_driven;
             gpu.record_cull(
                 &self.device,
@@ -3272,9 +3428,13 @@ impl Renderer {
         // Slice 2 (draw_frame): scene_opaque_color copy + transparent pass.
         self.record_scene_opaque_copy(device, cmd, image_index);
         // Build the Hi-Z pyramid from this frame's resolved depth for the
-        // next frame's GPU-driven occlusion cull.
-        if let Some(h) = &self.hiz {
-            h.record(device, cmd);
+        // next frame's GPU-driven occlusion cull. Only when the feature is
+        // enabled: otherwise the cull shader ignores it (`hiz.z == 0`) and the
+        // per-mip compute dispatches would be pure waste.
+        if self.gpu_driven.occlusion_enabled() {
+            if let Some(h) = &self.hiz {
+                h.record(device, cmd);
+            }
         }
         self.record_transparent_pass(
             device,
@@ -3333,14 +3493,28 @@ impl Renderer {
         // swapchain image, not to the frame slot, so presentation can hold it
         // until that image returns to the pool without blocking a later frame.
         let present_semaphore = self.present_semaphores[image_index as usize];
+        let mut wait_semaphores = vec![image_available];
+        let mut wait_stages = vec![vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        if async_cull {
+            wait_semaphores.push(self.cull_semaphores[frame_idx]);
+            wait_stages.push(vk::PipelineStageFlags::DRAW_INDIRECT);
+        }
+        let mut signal_semaphores = vec![present_semaphore];
+        if async_cull {
+            // Tell the next cull that this frame's indirect reads are done.
+            signal_semaphores.push(self.cull_graphics_semaphore);
+        }
         self.record_submit(
             device,
             cmd,
-            &[image_available],
-            &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
-            &[present_semaphore],
+            &wait_semaphores,
+            &wait_stages,
+            &signal_semaphores,
             in_flight_fence,
         )?;
+        if async_cull {
+            self.has_graphics_submission = true;
+        }
 
         // Present.
         self.record_present(image_index, &[present_semaphore], true)?;
@@ -3364,11 +3538,15 @@ impl Renderer {
             panorama_rotation,
         } = input;
         // Resize-check, upload UI, precompute camera matrices.
-        let (view_proj, vp_cols, _frustum, ui_index_count) = self.prepare_frame(&camera, ui)?;
+        let (view_proj, vp_cols, ui_index_count) = self.prepare_frame(&camera, ui)?;
 
         // Wait for frame 0's previous GPU work to complete before we
-        // write to its UBO and descriptor set.
+        // write to its UBO and descriptor set. Captures use the inline cull,
+        // so drain the async compute queue first.
         self.wait_for_fence_reset(self.frames[0].in_flight_fence)?;
+        if self.compute_queue.is_some() {
+            unsafe { self.device.device_wait_idle()? };
+        }
 
         // Apply any grid re-centre / chunk uploads, then publish UBOs.
         self.flush_light_grid()?;
@@ -3461,6 +3639,38 @@ impl Renderer {
             },
         );
 
+        // Entity, held-item and overlay draws must be recorded while the main
+        // render pass is still active. They used to be emitted after
+        // `record_post_pass`, which is illegal (`vkCmdDraw` outside a render
+        // pass) and also targeted an image already transitioned for transfer.
+        if !world_entities.is_empty() {
+            let quad_verts = crate::entity::unit_quad_vertices();
+            let vert_bytes = bytemuck::cast_slice(&quad_verts);
+            if let Ok(slice) = self.entity_vbo.mapped_slice_mut() {
+                let len = vert_bytes.len().min(slice.len());
+                slice[..len].copy_from_slice(&vert_bytes[..len]);
+            }
+            if let Err(e) = self.entity_vbo.flush_whole(&self.device) {
+                log::warn!("entity_vbo flush failed: {e}");
+            }
+            self.record_entity_pass(device, cmd, world_entities, view_proj);
+        }
+        if !held_items.is_empty() {
+            self.record_held_item_pass(device, cmd, held_items, view_proj);
+        }
+        if !self.overlay_data.lines.is_empty() {
+            let overlay_verts = self.overlay_data.to_vertices();
+            let vert_bytes = bytemuck::cast_slice(&overlay_verts);
+            if let Ok(slice) = self.overlay_vbo.mapped_slice_mut() {
+                let len = vert_bytes.len().min(slice.len());
+                slice[..len].copy_from_slice(&vert_bytes[..len]);
+            }
+            if let Err(e) = self.overlay_vbo.flush_whole(&self.device) {
+                log::warn!("overlay_vbo flush failed: {e}");
+            }
+            self.record_overlay_pass(device, cmd, view_proj);
+        }
+
         // â”€â”€ UI overlay pass â”€â”€
         // Advance to the final (particle) subpass before ending the render
         // pass. Ending from subpass 0 trips VUID-vkCmdEndRenderPass-None-00910;
@@ -3478,9 +3688,13 @@ impl Renderer {
         // geometry.
         self.record_scene_opaque_copy(device, cmd, image_index);
         // Build the Hi-Z pyramid from this frame's resolved depth for the
-        // next frame's GPU-driven occlusion cull.
-        if let Some(h) = &self.hiz {
-            h.record(device, cmd);
+        // next frame's GPU-driven occlusion cull. Only when the feature is
+        // enabled: otherwise the cull shader ignores it (`hiz.z == 0`) and the
+        // per-mip compute dispatches would be pure waste.
+        if self.gpu_driven.occlusion_enabled() {
+            if let Some(h) = &self.hiz {
+                h.record(device, cmd);
+            }
         }
         self.record_transparent_pass(
             device,
@@ -3511,23 +3725,6 @@ impl Renderer {
             1,
             1,
         );
-
-        self.record_entity_pass(device, cmd, world_entities, view_proj);
-        self.record_held_item_pass(device, cmd, held_items, view_proj);
-
-        // Overlay pass in capture.
-        if !self.overlay_data.lines.is_empty() {
-            let overlay_verts = self.overlay_data.to_vertices();
-            let vert_bytes = bytemuck::cast_slice(&overlay_verts);
-            if let Ok(slice) = self.overlay_vbo.mapped_slice_mut() {
-                let len = vert_bytes.len().min(slice.len());
-                slice[..len].copy_from_slice(&vert_bytes[..len]);
-            }
-            if let Err(e) = self.overlay_vbo.flush_whole(&self.device) {
-                log::warn!("overlay_vbo flush failed: {e}");
-            }
-            self.record_overlay_pass(device, cmd, view_proj);
-        }
 
         let extent = self.swapchain_extent;
         let pixel_count = (extent.width * extent.height) as usize;
@@ -3718,7 +3915,20 @@ impl Renderer {
             near: camera_near,
             far: camera_far,
         } = cam;
-        let instances = self.particle_manager.instances();
+        // CPU frustum cull before building the instance stream. Particles are
+        // short-lived and numerous; this keeps camera-facing bursts cheap.
+        let cull_frustum = voxel_core::Frustum::from_view_projection(view_proj);
+        let instances: Vec<_> = self
+            .particle_manager
+            .instances()
+            .into_iter()
+            .filter(|p| {
+                cull_frustum.intersects_sphere(
+                    glam::Vec3::from_array(p.pos),
+                    (p.size * 1.5).max(0.05),
+                )
+            })
+            .collect();
         if instances.is_empty() {
             return;
         }
@@ -4221,20 +4431,20 @@ impl Renderer {
     /// camera matrices used by all `record_*_pass` helpers. Returns every
     /// derived value callers need before submitting any GPU work.
     ///
-    /// **Note:** `view_proj`/`vp_cols`/`frustum` are computed and returned
+    /// `view_proj`/`vp_cols` are computed and returned
     /// BEFORE `update_camera_ubo` is called later in each method. This is
     /// safe because `view_projection` is a pure function of `camera` and
     /// does not read `self` state.
     ///
-    /// **Return-tuple order:** `(Mat4, [f32; 16], Frustum, u32)` â€”
+    /// **Return-tuple order:** `(Mat4, [f32; 16], u32)` —
     /// `draw_frame` and `capture_frame` destructure into
-    /// `(view_proj, vp_cols, frustum, ui_index_count)`. Keep this order in
-    /// sync with both call sites if you ever add a return field.
+    /// `(view_proj, vp_cols, ui_index_count)`. Frustum culling runs
+    /// GPU-side in the indirect cull shader now.
     fn prepare_frame(
         &mut self,
         camera: &Camera,
         ui: Option<&UiDrawData>,
-    ) -> Result<(Mat4, [f32; 16], Frustum, u32)> {
+    ) -> Result<(Mat4, [f32; 16], u32)> {
         if self.needs_resize {
             self.recreate_swapchain()?;
             self.needs_resize = false;
@@ -4243,8 +4453,7 @@ impl Renderer {
         let view_proj = camera.view_projection();
         self.view_proj_cache = view_proj;
         let vp_cols = view_proj.to_cols_array(); // 16 floats, column-major
-        let frustum = Frustum::from_view_projection(view_proj);
-        Ok((view_proj, vp_cols, frustum, ui_index_count))
+        Ok((view_proj, vp_cols, ui_index_count))
     }
 
     /// Wait for `fence` to signal (the previous frame's GPU work using this
@@ -5095,6 +5304,19 @@ impl Drop for Renderer {
             // leaks `FRAMES_IN_FLIGHT` host-visible UBOs (each 1024 B + a
             // GPU allocation) every Renderer::drop.
             f.tile_remap_ubo.destroy(device, &self.alloc);
+        }
+        // Async-cull semaphores, fence and command pool.
+        for semaphore in self.cull_semaphores.drain(..) {
+            unsafe { device.destroy_semaphore(semaphore, None) };
+        }
+        if self.cull_graphics_semaphore != vk::Semaphore::null() {
+            unsafe { device.destroy_semaphore(self.cull_graphics_semaphore, None) };
+        }
+        if self.cull_fence != vk::Fence::null() {
+            unsafe { device.destroy_fence(self.cull_fence, None) };
+        }
+        if self.compute_command_pool != vk::CommandPool::null() {
+            unsafe { device.destroy_command_pool(self.compute_command_pool, None) };
         }
         // Presentation semaphores are per swapchain image, so they are not
         // part of a frame slot's cleanup above.

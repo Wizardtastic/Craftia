@@ -9,6 +9,9 @@ use raw_window_handle::RawDisplayHandle;
 pub(super) struct QueueFamilies {
     pub(super) graphics: u32,
     pub(super) present: u32,
+    /// Number of queues exposed by the graphics family. A second queue lets
+    /// the chunk cull run concurrently with the sky/entity work.
+    pub(super) graphics_queue_count: u32,
 }
 
 pub(super) fn create_instance(
@@ -117,9 +120,11 @@ pub(super) fn find_queue_families(
             present = Some(i as u32);
         }
     }
+    let graphics = graphics?;
     Some(QueueFamilies {
-        graphics: graphics?,
+        graphics,
         present: present?,
+        graphics_queue_count: props[graphics as usize].queue_count,
     })
 }
 
@@ -129,17 +134,28 @@ pub(super) fn create_logical_device(
     queues: QueueFamilies,
     _surface: &ash::khr::surface::Instance,
     _actual_surface: vk::SurfaceKHR,
-) -> Result<(ash::Device, vk::Queue, vk::Queue)> {
+) -> Result<(ash::Device, vk::Queue, vk::Queue, bool, Option<vk::Queue>)> {
     let mut unique = vec![queues.graphics, queues.present];
     unique.sort();
     unique.dedup();
-    let priorities = [1.0f32];
-    let queue_infos: Vec<vk::DeviceQueueCreateInfo> = unique
+    let async_compute = queues.graphics_queue_count >= 2;
+    let priority_sets: Vec<Vec<f32>> = unique
         .iter()
         .map(|&q| {
+            if q == queues.graphics && async_compute {
+                vec![1.0, 1.0]
+            } else {
+                vec![1.0]
+            }
+        })
+        .collect();
+    let queue_infos: Vec<vk::DeviceQueueCreateInfo> = unique
+        .iter()
+        .zip(priority_sets.iter())
+        .map(|(&q, priorities)| {
             vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(q)
-                .queue_priorities(&priorities)
+                .queue_priorities(priorities)
         })
         .collect();
 
@@ -167,8 +183,17 @@ pub(super) fn create_logical_device(
     // the calls return VK_ERROR_FEATURE_NOT_PRESENT and the queries stay
     // in the "uninitialized" state, tripping
     // VUID-vkGetQueryPoolResults-None-09401.
-    let mut vulkan12_features =
-        vk::PhysicalDeviceVulkan12Features::default().host_query_reset(true);
+    // drawIndirectCount lets the cull shader emit a compacted draw list and
+    // the GPU consume only the survivors. Query before enabling so an older
+    // device falls back to the per-slot command path instead of failing device
+    // creation.
+    let mut queried12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut queried2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut queried12);
+    unsafe { instance.get_physical_device_features2(pdev, &mut queried2) };
+    let draw_indirect_count = queried12.draw_indirect_count == vk::TRUE;
+    let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
+        .host_query_reset(true)
+        .draw_indirect_count(draw_indirect_count);
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_infos)
         .enabled_extension_names(&extension_names)
@@ -179,7 +204,15 @@ pub(super) fn create_logical_device(
         .map_err(|e| anyhow!("create_device: {e:?}"))?;
     let graphics_queue = unsafe { device.get_device_queue(queues.graphics, 0) };
     let present_queue = unsafe { device.get_device_queue(queues.present, 0) };
-    Ok((device, graphics_queue, present_queue))
+    let compute_queue = async_compute
+        .then(|| unsafe { device.get_device_queue(queues.graphics, 1) });
+    Ok((
+        device,
+        graphics_queue,
+        present_queue,
+        draw_indirect_count,
+        compute_queue,
+    ))
 }
 
 pub(super) fn find_depth_format(instance: &AshInstance, pdev: vk::PhysicalDevice) -> vk::Format {

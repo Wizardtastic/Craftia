@@ -86,6 +86,28 @@ impl Chunk {
         }
     }
 
+    /// Copy every block ID into `out` in the x-fastest local layout
+    /// (`local_index`), resolving the palette once. `out` must be at least
+    /// `CHUNK_CUBED` long; this is the bulk path used by the mesher.
+    pub fn copy_blocks_into(&self, out: &mut [u16]) {
+        let n = CHUNK_CUBED.min(out.len());
+        if self.palette_mode {
+            // Resolve the palette into a small lookup once, then do a plain
+            // indexed copy for all 4096 voxels.
+            let mut lut = [0u16; 256];
+            for (i, id) in self.palette.iter().enumerate() {
+                lut[i] = id.0;
+            }
+            for (dst, &pal_idx) in out[..n].iter_mut().zip(self.indices[..n].iter()) {
+                *dst = lut[pal_idx as usize];
+            }
+        } else {
+            for (dst, id) in out[..n].iter_mut().zip(self.flat[..n].iter()) {
+                *dst = id.0;
+            }
+        }
+    }
+
     /// Get a block by local coordinate. Returns air for out-of-range locals.
     #[inline]
     pub fn get(&self, x: i32, y: i32, z: i32) -> BlockId {

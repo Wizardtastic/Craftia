@@ -28,7 +28,7 @@ pub mod ui_atlas;
 pub use atlas::{build_atlas_with_textures, Atlas};
 pub use hot_reload::{compile_shader, FileWatcher, HotReloadEvent};
 pub use renderer::{
-    ChunkUpload, FrameInput, GpuTimings, MeshPass, Renderer, RendererConfig,
+    ChunkUpload, CullStats, FrameInput, GpuTimings, MeshPass, Renderer, RendererConfig,
     WATER_SURFACE_GRID_LAYERS, WATER_SURFACE_GRID_NONE, WATER_SURFACE_GRID_SIZE,
 };
 pub use texture::AtlasTexture;
@@ -44,14 +44,11 @@ pub use ui_atlas::{
 
 use bytemuck::{Pod, Zeroable};
 
-/// GPU vertex layout (28 bytes), matching `voxel_world::mesh::ChunkVertex`.
+/// Entity/billboard vertex layout (28 bytes).
 ///
-/// Lighting is no longer carried in the vertex stream. The chunk fragment
-/// shader ray traces the voxel world per pixel, so the per-vertex data is
-/// geometry, tile UVs, the atlas tile index and packed water animation.
-///
-/// Mirror changes here in the vertex attribute arrays (chunk/entity pipelines)
-/// and in `shaders/chunk.vert` / `shaders/chunk_indirect.vert`.
+/// Chunk geometry uses the packed [`ChunkVertexGpu`] layout instead. Entity
+/// quads need signed float positions and fractional sizes, so they keep the
+/// wider format.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct Vertex {
@@ -60,6 +57,21 @@ pub struct Vertex {
     /// Atlas tile index; passed flat to the fragment shader.
     pub tile: u32,
     /// Packed water animation (see `voxel_world::water::WaterVertexInfo`).
+    pub water: u32,
+}
+
+/// Packed chunk vertex (16 bytes), matching `voxel_world::mesh::ChunkVertex`.
+///
+/// Positions/UVs are fixed point at 1/256 block. This cuts the bytes fetched
+/// per vertex by ~43% versus the old 28-byte float layout while still exactly
+/// representing the mesher's 1/16-block geometry, cactus insets and water
+/// heights. The chunk vertex shaders decode back to floats.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct ChunkVertexGpu {
+    pub pos: [u16; 3],
+    pub uv: [u16; 2],
+    pub tile: u16,
     pub water: u32,
 }
 
@@ -156,7 +168,8 @@ impl BlockMaterialGpu {
 /// - `.x` = tiles[0] | (tiles[1] << 16)   (NegX, PosX)
 /// - `.y` = tiles[2] | (tiles[3] << 16)   (NegY, PosY)
 /// - `.z` = tiles[4] | (tiles[5] << 16)   (NegZ, PosZ)
-/// - `.w` = flags: bit0 = opaque, bit1 = liquid, bit2 = render (not air)
+/// - `.w` = flags: bit0 = opaque, bit1 = liquid, bit2 = render (not air),
+///   bit3 = alpha-cutout cube (leaves/torch), bit4 = blended cube (glass).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct BlockPropertiesGpu {
@@ -171,9 +184,19 @@ impl BlockPropertiesGpu {
     pub const FLAG_OPAQUE: u32 = 1;
     pub const FLAG_LIQUID: u32 = 2;
     pub const FLAG_RENDER: u32 = 4;
+    pub const FLAG_CUTOUT: u32 = 8;
+    pub const FLAG_BLEND: u32 = 16;
 
     /// Build from per-face tile indices and block properties.
-    pub fn pack(tiles: [u16; 6], opaque: bool, liquid: bool, not_air: bool) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn pack(
+        tiles: [u16; 6],
+        opaque: bool,
+        liquid: bool,
+        not_air: bool,
+        cutout: bool,
+        blend: bool,
+    ) -> Self {
         let mut flags = 0u32;
         if opaque {
             flags |= Self::FLAG_OPAQUE;
@@ -183,6 +206,12 @@ impl BlockPropertiesGpu {
         }
         if not_air {
             flags |= Self::FLAG_RENDER;
+        }
+        if cutout {
+            flags |= Self::FLAG_CUTOUT;
+        }
+        if blend {
+            flags |= Self::FLAG_BLEND;
         }
         Self {
             tiles01: tiles[0] as u32 | ((tiles[1] as u32) << 16),

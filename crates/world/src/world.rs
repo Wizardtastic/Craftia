@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use glam::{IVec2, IVec3};
 use voxel_core::{
@@ -155,6 +155,10 @@ pub struct World {
     /// letting methods live in `schematic.rs` would otherwise require
     /// a separate accessor layer for every operation.
     pub(crate) schematic_entities: RwLock<HashMap<SchematicId, SchematicEntity>>,
+    /// Dirty 8³ mesh sections per chunk. Edits mark the section they touch
+    /// plus any adjacent section/chunk whose border sample changed. The
+    /// streamer takes (and clears) this mask when it remeshes a chunk.
+    section_dirty: Mutex<HashMap<ChunkPos, u8>>,
 }
 
 impl World {
@@ -199,6 +203,7 @@ impl World {
             water_time: RwLock::new(0.0),
             self_ref: Weak::clone(weak),
             schematic_entities: RwLock::new(HashMap::new()),
+            section_dirty: Mutex::new(HashMap::new()),
         })
     }
 
@@ -215,6 +220,7 @@ impl World {
     // --- chunk storage -----------------------------------------------------
 
     pub fn insert_chunk(&self, pos: ChunkPos, mut chunk: Chunk) {
+        self.section_dirty.lock().remove(&pos);
         chunk.pos = pos;
         let columns = self.scan_chunk_water(pos, &chunk);
         let replaced = self.chunks.write_shard(pos).insert(pos, chunk).is_some();
@@ -285,6 +291,7 @@ impl World {
     pub fn remove_chunk(&self, pos: ChunkPos) {
         self.chunks.write_shard(pos).remove(&pos);
         self.meshes.write().remove(&pos);
+        self.section_dirty.lock().remove(&pos);
 
         // Removing a slice can expose or shorten any body in these columns
         // (a cave pool may sit below an ocean surface). Rebuild all 256
@@ -309,6 +316,82 @@ impl World {
     pub fn loaded_chunk_count(&self) -> usize {
         self.chunks.len()
     }
+
+    /// Non-air block count of a loaded chunk, or 0 when it is not loaded.
+    /// The streamer uses this to skip meshing chunks that cannot produce any
+    /// faces (empty air sections above and below the terrain).
+    pub fn chunk_non_air(&self, pos: ChunkPos) -> usize {
+        let chunks = self.chunks.read_shard(pos);
+        chunks.get(&pos).map_or(0, |c| c.non_air_count())
+    }
+
+    /// True when every block in the chunk is opaque and every block of all
+    /// six neighbouring border layers is loaded and opaque. Such a chunk is
+    /// completely sealed: no face can ever be visible, so the streamer can
+    /// mark it meshed without running the greedy mesher at all.
+    ///
+    /// Scans at most 4096 + 6×256 blocks and never holds two shard locks at
+    /// once, so it is safe to call from the meshing worker.
+    pub fn chunk_is_enclosed(&self, pos: ChunkPos) -> bool {
+        const S: usize = CHUNK_SIZE as usize;
+        {
+            let chunks = self.chunks.read_shard(pos);
+            let Some(chunk) = chunks.get(&pos) else {
+                return false;
+            };
+            if chunk.non_air_count() != S * S * S {
+                return false;
+            }
+            for ly in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    for lx in 0..CHUNK_SIZE {
+                        if !self.reg.get(chunk.get(lx, ly, lz)).opaque {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        for (dx, dy, dz) in [
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        ] {
+            let npos = ChunkPos::new(pos.x() + dx, pos.y() + dy, pos.z() + dz);
+            let chunks = self.chunks.read_shard(npos);
+            let Some(n) = chunks.get(&npos) else {
+                return false;
+            };
+            let mut sealed = true;
+            for v in 0..CHUNK_SIZE {
+                for u in 0..CHUNK_SIZE {
+                    // Sample the neighbour's layer touching this chunk.
+                    let (x, y, z) = match (dx, dy, dz) {
+                        (-1, 0, 0) => (S as i32 - 1, v, u),
+                        (1, 0, 0) => (0, v, u),
+                        (0, -1, 0) => (u, S as i32 - 1, v),
+                        (0, 1, 0) => (u, 0, v),
+                        (0, 0, -1) => (u, v, S as i32 - 1),
+                        _ => (u, v, 0),
+                    };
+                    if !self.reg.get(n.get(x, y, z)).opaque {
+                        sealed = false;
+                        break;
+                    }
+                }
+                if !sealed {
+                    break;
+                }
+            }
+            if !sealed {
+                return false;
+            }
+        }
+        true
+    }
     pub fn meshed_chunk_count(&self) -> usize {
         self.meshes.read().len()
     }
@@ -316,6 +399,32 @@ impl World {
     /// Number of live water-surface columns across loaded chunks.
     pub fn water_column_count(&self) -> usize {
         self.water_columns.read().len()
+    }
+
+    /// True when a chunk contains geometry the compute mesher cannot produce:
+    /// animated liquids, foliage crosses, or inset cacti. Such chunks stay on
+    /// the CPU mesher even when the GPU path is enabled.
+    pub fn chunk_needs_cpu_mesher(&self, pos: ChunkPos) -> bool {
+        let chunks = self.chunks.read_shard(pos);
+        let Some(chunk) = chunks.get(&pos) else {
+            return false;
+        };
+        for ly in 0..CHUNK_SIZE {
+            for lz in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    let def = self.reg.get(chunk.get(lx, ly, lz));
+                    if matches!(
+                        def.kind,
+                        crate::registry::BlockKind::Liquid
+                            | crate::registry::BlockKind::Foliage
+                            | crate::registry::BlockKind::Cactus
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// True if a chunk contains any water voxel. Used by the streamer to keep
@@ -550,7 +659,111 @@ impl World {
         if water_related {
             self.refresh_water_column(x, z);
         }
+        self.mark_sections_dirty(cp, lx, ly, lz, water_related);
         ConditionalBlockWrite::Changed(old)
+    }
+
+    /// Record the 8³ sections whose mesh depends on one block edit. Besides
+    /// the owning section this marks the section on the other side of an
+    /// internal section boundary, and the border section of each adjacent
+    /// chunk. Water can change a whole column, so it dirties the full chunk
+    /// and its six face neighbours.
+    fn mark_sections_dirty(
+        &self,
+        cp: ChunkPos,
+        lx: i32,
+        ly: i32,
+        lz: i32,
+        water_related: bool,
+    ) {
+        let mut dirty = self.section_dirty.lock();
+        let mut mark = |pos: ChunkPos, mask: u8| {
+            *dirty.entry(pos).or_insert(0) |= mask;
+        };
+        if water_related {
+            mark(cp, 0xFF);
+            for (dx, dy, dz) in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+                mark(ChunkPos::new(cp.x() + dx, cp.y() + dy, cp.z() + dz), 0xFF);
+            }
+            return;
+        }
+        let sec = |x: i32, y: i32, z: i32| -> u8 {
+            ((x / 8) | ((y / 8) << 1) | ((z / 8) << 2)) as u8
+        };
+        mark(cp, 1u8 << sec(lx, ly, lz));
+        // Internal section boundaries: the neighbouring section samples this
+        // block in its one-voxel padding shell.
+        if lx == 7 {
+            mark(cp, 1u8 << sec(lx + 1, ly, lz));
+        } else if lx == 8 {
+            mark(cp, 1u8 << sec(lx - 1, ly, lz));
+        }
+        if ly == 7 {
+            mark(cp, 1u8 << sec(lx, ly + 1, lz));
+        } else if ly == 8 {
+            mark(cp, 1u8 << sec(lx, ly - 1, lz));
+        }
+        if lz == 7 {
+            mark(cp, 1u8 << sec(lx, ly, lz + 1));
+        } else if lz == 8 {
+            mark(cp, 1u8 << sec(lx, ly, lz - 1));
+        }
+        // Chunk borders: the adjacent chunk's border section samples it.
+        let mut border = |dx: i32, dy: i32, dz: i32, x: i32, y: i32, z: i32| {
+            let n = ChunkPos::new(cp.x() + dx, cp.y() + dy, cp.z() + dz);
+            mark(n, 1u8 << sec(x, y, z));
+        };
+        if lx == 0 {
+            border(-1, 0, 0, 15, ly, lz);
+        } else if lx == 15 {
+            border(1, 0, 0, 0, ly, lz);
+        }
+        if ly == 0 && cp.y() > 0 {
+            border(0, -1, 0, lx, 15, lz);
+        } else if ly == 15 {
+            border(0, 1, 0, lx, 0, lz);
+        }
+        if lz == 0 {
+            border(0, 0, -1, lx, ly, 15);
+        } else if lz == 15 {
+            border(0, 0, 1, lx, ly, 0);
+        }
+    }
+
+    /// Take (and clear) the dirty-section mask for a chunk. `None` means no
+    /// edit information is available, so the caller should rebuild all 8.
+    pub fn take_dirty_sections(&self, pos: ChunkPos) -> Option<u8> {
+        self.section_dirty.lock().remove(&pos)
+    }
+
+    /// Content hash of one section's meshing input: the 8³ cells plus the
+    /// one-voxel padding shell, the world seed, and a registry fingerprint.
+    /// Used as the validation tag for the on-disk section mesh cache.
+    pub fn section_cache_hash(&self, pos: ChunkPos, section: u8, registry_fp: u64) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.seed.hash(&mut h);
+        pos.x().hash(&mut h);
+        pos.y().hash(&mut h);
+        pos.z().hash(&mut h);
+        section.hash(&mut h);
+        registry_fp.hash(&mut h);
+        let base = IVec3::new(
+            (section as i32 & 1) * 8,
+            ((section as i32 >> 1) & 1) * 8,
+            ((section as i32 >> 2) & 1) * 8,
+        );
+        let origin = chunk_origin(pos);
+        for y in -1..=8 {
+            for z in -1..=8 {
+                for x in -1..=8 {
+                    self.get_block(origin.x + base.x + x, origin.y + base.y + y, origin.z + base.z + z)
+                        .0
+                        .hash(&mut h);
+                }
+            }
+        }
+        h.finish()
     }
 
     /// Convenience: set a block and report the owning chunk position, if any.
@@ -1043,12 +1256,29 @@ impl World {
             &dyn Fn(i32, i32, i32) -> bool,
         ) -> R,
     ) -> R {
-        // Clone the target chunk out from under the lock so meshing is lock-free;
-        // neighbours are sampled live (cheap read lock per sample is acceptable).
+        // Clone the target chunk and its 3×3×3 neighbourhood out from under
+        // the locks. The greedy mesher samples thousands of neighbour cells;
+        // taking one lock per sample dominated large remesh bursts. With the
+        // snapshot, the hot block sampler touches no locks at all.
         let chunk = {
             let chunks = self.chunks.read_shard(pos);
             chunks.get(&pos).cloned()
         };
+        let mut neighbours: HashMap<ChunkPos, Chunk> = HashMap::with_capacity(27);
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let cp = ChunkPos::new(pos.x() + dx, pos.y() + dy, pos.z() + dz);
+                    let loaded = {
+                        let chunks = self.chunks.read_shard(cp);
+                        chunks.get(&cp).cloned()
+                    };
+                    if let Some(c) = loaded {
+                        neighbours.insert(cp, c);
+                    }
+                }
+            }
+        }
 
         // Upgrade the self-reference once per call; the samplers below all
         // borrow the resulting `Arc<World>` (shared read access) for the
@@ -1072,7 +1302,16 @@ impl World {
         // Plain stack closures borrowing a single shared `Arc<World>` — no
         // per-mesh heap allocations or `Arc` clones. The call is synchronous,
         // so the closures don't need to outlive it.
-        let sample = |x: i32, y: i32, z: i32| world_arc.get_block(x, y, z);
+        let sample = |x: i32, y: i32, z: i32| {
+            if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
+                return BlockId::AIR;
+            }
+            let cp = block_to_chunk(IVec3::new(x, y, z));
+            match neighbours.get(&cp) {
+                Some(c) => c.get(x.rem_euclid(CHUNK_SIZE), y.rem_euclid(CHUNK_SIZE), z.rem_euclid(CHUNK_SIZE)),
+                None => BlockId::AIR,
+            }
+        };
         let sample_water = |x: i32, y: i32, z: i32| world_arc.water_vertex_info(x, y, z);
         let sample_loaded = |x: i32, y: i32, z: i32| world_arc.is_block_loaded(x, y, z);
         f(&chunk, &sample, &sample_water, &sample_loaded)
@@ -1619,6 +1858,26 @@ mod tests {
         assert!((world.water_time() - before - 0.25).abs() < 1e-5);
         world.tick_water(-1.0);
         assert!((world.water_time() - before - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn block_edits_mark_adjacent_sections_and_chunks() {
+        let world = World::new(42);
+        let cp = ChunkPos::new(0, 0, 0);
+        world.insert_chunk(cp, Chunk::new(cp));
+        let stone = world.registry().id_of("stone").unwrap();
+        assert!(world.set_block(0, 0, 0, stone));
+        assert_eq!(world.take_dirty_sections(cp), Some(1));
+        // The -X chunk's local x=15 cell lives in its section 1.
+        assert_eq!(
+            world.take_dirty_sections(ChunkPos::new(-1, 0, 0)),
+            Some(1 << 1)
+        );
+        // Crossing an internal section boundary dirties both sections.
+        assert!(world.set_block(7, 0, 0, stone));
+        assert_eq!(world.take_dirty_sections(cp), Some(0b11));
+        assert!(world.set_block(8, 0, 0, stone));
+        assert_eq!(world.take_dirty_sections(cp), Some(0b11));
     }
 
     #[test]

@@ -1324,6 +1324,19 @@ impl BlockRegistry {
         self.defs.push(def);
     }
 
+    /// Number of registered block definitions (IDs are dense, so this is also
+    /// one past the highest valid ID).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.defs.len()
+    }
+
+    /// `true` when no blocks are registered (never for a usable registry).
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.defs.is_empty()
+    }
+
     pub fn get(&self, id: BlockId) -> &BlockDef {
         let idx = id.0 as usize;
         if idx < self.defs.len() {

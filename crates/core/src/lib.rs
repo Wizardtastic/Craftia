@@ -6,10 +6,12 @@
 pub mod block;
 pub mod camera;
 pub mod constants;
+pub mod culling;
 pub mod math;
 
 pub use block::BlockId;
-pub use camera::{Camera, Frustum};
+pub use camera::Camera;
+pub use culling::Frustum;
 pub use constants::*;
 pub use math::{chunk_neighbours, Aabb, BlockPos, ChunkPos, Point, Ray, Rect};
 

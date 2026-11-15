@@ -10,6 +10,7 @@
 
 pub mod chunk;
 pub mod error;
+pub mod far_lod;
 pub mod gen;
 pub mod map;
 pub mod mesh;
@@ -26,6 +27,7 @@ pub use error::{Result, WorldError};
 
 pub use chunk::Chunk;
 pub use gen::{BiomeId, TerrainGenerator};
+pub use far_lod::{build_far_lod_tile, far_tile_chunk_pos, FarLodTile, FAR_TILE_CHUNKS};
 pub use mesh::{ChunkMesh, ChunkMeshBundle, ChunkMesher};
 pub use registry::{BlockKind, BlockRegistry};
 pub use stream::{ChunkStreamEvent, ChunkStreamer, StreamConfig, StreamerStats};

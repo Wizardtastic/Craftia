@@ -245,6 +245,23 @@ impl GpuBuffer {
         Ok(())
     }
 
+    /// Invalidate the buffer's mapped memory so CPU reads observe GPU writes
+    /// (e.g. the cull-counter SSBO). Harmless on `HOST_COHERENT` memory.
+    pub fn invalidate_whole(&self, device: &ash::Device) -> Result<()> {
+        let allocation = self
+            .allocation
+            .as_ref()
+            .ok_or_else(|| anyhow!("buffer has no allocation"))?;
+        let memory = unsafe { allocation.memory() };
+        let range = vk::MappedMemoryRange::default()
+            .memory(memory)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+        unsafe { device.invalidate_mapped_memory_ranges(&[range]) }
+            .map_err(|e| anyhow!("invalidate_mapped_memory_ranges failed: {e:?}"))?;
+        Ok(())
+    }
+
     /// Flush a sub-range `[offset, offset+size)` of the mapped memory.
     /// Use when you've only written the first part of a larger buffer
     /// (e.g. an incrementally-filled chunk-staging slot) so the device

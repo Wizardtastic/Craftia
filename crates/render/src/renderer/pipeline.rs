@@ -933,6 +933,15 @@ pub(super) fn create_pipeline_layout(
         .map_err(|e| anyhow!("create_pipeline_layout: {e:?}"))
 }
 
+/// Which vertex input layout the pipeline consumes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum VertexLayout {
+    /// 28-byte float entity/billboard vertex.
+    Entity,
+    /// 16-byte fixed-point chunk vertex ([`crate::ChunkVertexGpu`]).
+    PackedChunk,
+}
+
 /// Raster state + shaders for [`create_graphics_pipeline`].
 /// Bundled so the pipeline builder stays below the arg-count lint.
 #[derive(Clone, Copy)]
@@ -943,6 +952,7 @@ pub(super) struct GraphicsPipelineConfig<'a> {
     pub fs_spirv: &'a [u8],
     pub msaa_samples: vk::SampleCountFlags,
     pub depth_write: bool,
+    pub vertex_layout: VertexLayout,
 }
 
 pub(super) fn create_graphics_pipeline(
@@ -958,6 +968,7 @@ pub(super) fn create_graphics_pipeline(
         fs_spirv,
         msaa_samples,
         depth_write,
+        vertex_layout,
     } = config;
     let vert_spv: &[u8] = vs_spirv;
     let frag_spv: &[u8] = fs_spirv;
@@ -989,32 +1000,62 @@ pub(super) fn create_graphics_pipeline(
             .name(c"main"),
     ];
 
+    let (stride, vertex_attrs) = match vertex_layout {
+        VertexLayout::Entity => (
+            std::mem::size_of::<crate::Vertex>() as u32,
+            vec![
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(0)
+                    .format(vk::Format::R32G32B32_SFLOAT)
+                    .offset(0),
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(1)
+                    .format(vk::Format::R32G32_SFLOAT)
+                    .offset(12),
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(2)
+                    .format(vk::Format::R32_UINT)
+                    .offset(20),
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(3)
+                    .format(vk::Format::R32_UINT)
+                    .offset(24),
+            ],
+        ),
+        VertexLayout::PackedChunk => (
+            std::mem::size_of::<crate::ChunkVertexGpu>() as u32,
+            vec![
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(0)
+                    .format(vk::Format::R16G16B16_UINT)
+                    .offset(0),
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(1)
+                    .format(vk::Format::R16G16_UINT)
+                    .offset(6),
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(2)
+                    .format(vk::Format::R16_UINT)
+                    .offset(10),
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(3)
+                    .format(vk::Format::R32_UINT)
+                    .offset(12),
+            ],
+        ),
+    };
     let vertex_binding = vk::VertexInputBindingDescription::default()
         .binding(0)
-        .stride(std::mem::size_of::<crate::Vertex>() as u32)
+        .stride(stride)
         .input_rate(vk::VertexInputRate::VERTEX);
-    let vertex_attrs = [
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(0)
-            .format(vk::Format::R32G32B32_SFLOAT)
-            .offset(0),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(1)
-            .format(vk::Format::R32G32_SFLOAT)
-            .offset(12),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(2)
-            .format(vk::Format::R32_UINT)
-            .offset(20),
-        vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(3)
-            .format(vk::Format::R32_UINT)
-            .offset(24),
-    ];
     let vertex_bindings = [vertex_binding];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&vertex_bindings)

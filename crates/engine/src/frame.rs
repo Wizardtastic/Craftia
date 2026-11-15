@@ -28,23 +28,38 @@ impl crate::EngineApp {
         out: &mut Vec<voxel_render::ChunkUpload>,
         pos: voxel_core::ChunkPos,
         bundle: &voxel_world::ChunkMeshBundle,
+        lod: u32,
+    ) {
+        Self::extend_uploads_bounded(out, pos, bundle, lod, None);
+    }
+
+    fn extend_uploads_bounded(
+        out: &mut Vec<voxel_render::ChunkUpload>,
+        pos: voxel_core::ChunkPos,
+        bundle: &voxel_world::ChunkMeshBundle,
+        lod: u32,
+        bounds: Option<([f32; 3], [f32; 3])>,
     ) {
         if !bundle.opaque.is_empty() {
             out.push(voxel_render::ChunkUpload {
                 pos,
                 pass: voxel_render::MeshPass::Opaque,
+                lod,
                 vertices: bytemuck::cast_slice(&bundle.opaque.vertices).to_vec(),
                 indices: bytemuck::cast_slice(&bundle.opaque.indices).to_vec(),
                 index_count: bundle.opaque.indices.len() as u32,
+                bounds,
             });
         }
         if !bundle.transparent.is_empty() {
             out.push(voxel_render::ChunkUpload {
                 pos,
                 pass: voxel_render::MeshPass::Transparent,
+                lod,
                 vertices: bytemuck::cast_slice(&bundle.transparent.vertices).to_vec(),
                 indices: bytemuck::cast_slice(&bundle.transparent.indices).to_vec(),
                 index_count: bundle.transparent.indices.len() as u32,
+                bounds,
             });
         }
     }
@@ -57,6 +72,8 @@ impl crate::EngineApp {
         // Non-blocking: we want the frame loop to keep ticking when no event
         // arrives. The watcher thread is the producer; the engine owns the
         // receiver exclusively through `self.hot_reload`.
+        let mut pending_render_radius: Option<i32> = None;
+        let mut pending_lod_radius: Option<i32> = None;
         if let Some(watcher) = self.hot_reload.as_mut() {
             // Drain up to N events per frame so a burst of saves doesn't
             // block the frame loop forever.
@@ -199,6 +216,12 @@ impl crate::EngineApp {
                             self.config.stream.unload_radius = new_settings.world.unload_radius;
                             self.config.day_length = new_settings.world.day_length;
 
+                            // Apply the reloaded radii through the same path
+                            // as the sliders so fog, culling and streaming all
+                            // stay in sync.
+                            pending_render_radius = Some(new_load as i32);
+                            pending_lod_radius = Some(new_settings.world.lod_radius);
+
                             if new_load != old_load {
                                 if let Some(streamer) = &self.world_state.streamer {
                                     streamer.set_load_radius(new_load);
@@ -264,6 +287,15 @@ impl crate::EngineApp {
             }
         }
 
+        // Apply radius changes after the watcher borrow ends so the streamer
+        // and renderer can be updated through `&mut self`.
+        if let Some(base) = pending_render_radius {
+            self.set_render_distance_base(base);
+        }
+        if let Some(lod) = pending_lod_radius {
+            self.set_lod_radius(lod);
+        }
+
         // Process queued audio events.
         self.audio.process_events();
 
@@ -289,7 +321,16 @@ impl crate::EngineApp {
                         // the chunk as a ghost with no streamer state, so drop
                         // stale results instead.
                         if self.world_state.world.is_chunk_loaded(pos) {
-                            Self::extend_uploads(&mut uploads, pos, &bundle);
+                            if bundle.is_empty() {
+                                // Empty/enclosed chunks used to keep their old
+                                // geometry because uploads with zero bytes were
+                                // filtered. Clear any prior mesh explicitly.
+                                if let Some(r) = self.render.renderer.as_mut() {
+                                    r.remove_chunk(pos);
+                                }
+                            } else {
+                                Self::extend_uploads(&mut uploads, pos, &bundle, 0);
+                            }
                             // Keep the ray-tracing voxel grid in sync with
                             // edits: every remesh re-uploads the chunk's IDs.
                             let voxels = self.world_state.world.gpu_light_voxels(pos);
@@ -301,6 +342,31 @@ impl crate::EngineApp {
                                     &voxels,
                                 );
                             }
+                        }
+                    }
+                    ChunkStreamEvent::MeshLodReady { pos, bundle } => {
+                        if self.world_state.world.is_chunk_loaded(pos) {
+                            Self::extend_uploads(&mut uploads, pos, &bundle, 1);
+                        }
+                    }
+                    ChunkStreamEvent::FarLodReady {
+                        key,
+                        bundle,
+                        bounds_min,
+                        bounds_max,
+                    } => {
+                        let pos = voxel_world::far_tile_chunk_pos(key);
+                        Self::extend_uploads_bounded(
+                            &mut uploads,
+                            pos,
+                            &bundle,
+                            1,
+                            Some((bounds_min, bounds_max)),
+                        );
+                    }
+                    ChunkStreamEvent::FarLodUnloaded { key } => {
+                        if let Some(r) = self.render.renderer.as_mut() {
+                            r.remove_chunk(voxel_world::far_tile_chunk_pos(key));
                         }
                     }
                     ChunkStreamEvent::Unloaded(pos) => {
@@ -747,7 +813,10 @@ impl crate::EngineApp {
             };
             let vp = cam.view_projection();
             let frustum = voxel_core::Frustum::from_view_projection(vp);
-            streamer.set_frustum(frustum);
+            streamer.set_frustum(frustum, cam.forward());
+            // Give streaming ~20% of the previous frame's CPU time (clamped),
+            // so a heavy frame doesn't queue another heavy batch.
+            streamer.set_budget(((self.input.frame_time * 1000.0 * 0.20) as f32).clamp(0.5, 4.0));
         }
 
         // --- Minimap update (rate-limited) ---
@@ -1278,6 +1347,10 @@ impl crate::EngineApp {
             .simulation
             .player_pos()
             .unwrap_or(self.gameplay.spawn_pos);
+        let entity_frustum = self
+            .simulation
+            .player_camera()
+            .map(|c| voxel_core::Frustum::from_view_projection(c.view_projection()));
         let (mut entity_data, mut held_item_data): (Vec<_>, Vec<_>) = {
             let ecs = self.simulation.ecs_world();
             let mut opaque = Vec::new();
@@ -1294,6 +1367,17 @@ impl crate::EngineApp {
                         ecs.get::<voxel_game::Mesh>(entity),
                         ecs.get::<voxel_game::Transform>(entity),
                     ) {
+                        // Billboard/entity bounds are cheap spheres; skip
+                        // anything fully outside the view. Held items are
+                        // appended separately below after projection.
+                        if entity_frustum.as_ref().is_some_and(|f| {
+                            !f.intersects_sphere(
+                                transform.pos,
+                                (mesh.half_size * 1.5).max(0.05),
+                            )
+                        }) {
+                            continue;
+                        }
                         let data = voxel_render::entity::EntityRenderData {
                             pos: transform.pos,
                             rot: transform.rot,
@@ -1606,6 +1690,7 @@ impl crate::EngineApp {
                 let gpu = r.latest_timings();
                 let (alloc_bytes, reserved_bytes) = r.allocator_stats();
                 let (chunk_verts, chunk_idxs) = r.chunk_buffer_stats();
+                let cull = r.cull_stats();
                 let streamer_stats = self
                     .world_state
                     .streamer
@@ -1644,6 +1729,10 @@ impl crate::EngineApp {
                     chunks_gpu: r.chunk_count() as u32,
                     chunk_vertices: chunk_verts,
                     chunk_indices: chunk_idxs,
+                    cull_visible: cull.visible,
+                    cull_frustum: cull.frustum_culled,
+                    cull_occlusion: cull.occlusion_culled,
+                    cull_total: cull.total,
                     streamer_gen_queue: streamer_stats.gen_queue,
                     streamer_mesh_queue: streamer_stats.mesh_queue,
                     streamer_pending_remesh: streamer_stats.pending_remesh,

@@ -11,10 +11,13 @@
 //
 // Vertex layout, varyings, and water animation are unchanged from chunk.vert.
 
-layout(location = 0) in vec3 in_pos;
-layout(location = 1) in vec2 in_uv;
+// Packed chunk vertex: fixed-point positions/UVs at 1/256 block.
+layout(location = 0) in uvec3 in_pos_q;
+layout(location = 1) in uvec2 in_uv_q;
 layout(location = 2) in uint in_tile;
 layout(location = 3) in uint in_water;
+
+const float VERTEX_SCALE = 1.0 / 256.0;
 
 layout(location = 0) out vec2 frag_uv;
 layout(location = 1) out float frag_fog;
@@ -42,6 +45,8 @@ layout(set = 1, binding = 1) readonly buffer Origins {
 #include "water_wave.generated.glsl"
 
 void main() {
+    vec3 in_pos = vec3(in_pos_q) * VERTEX_SCALE;
+    vec2 in_uv = vec2(in_uv_q) * VERTEX_SCALE;
     vec3 world = origins[gl_InstanceIndex].xyz + in_pos;
     // y = analytic water clock (shared with CPU buoyancy).
     float water_time = push.time_pad.y;

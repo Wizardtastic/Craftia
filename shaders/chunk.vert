@@ -1,9 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// Chunk vertex shader. Vertex layout (28 bytes):
-//   location 0: vec3  pos   - local block corner in [0, 16]
-//   location 1: vec2  uv    - local tile-repeat UV in [0, w] x [0, h]
+// Chunk vertex shader. Packed layout (20 bytes):
+//   location 0: uvec3 pos   - local block corner in [0, 16], 1/256 units
+//   location 1: uvec2 uv    - local tile-repeat UV, 1/256 units
 //   location 2: uint  tile  - atlas tile index (passed flat)
 //   location 3: uint  water - packed water body / surface animation
 //
@@ -15,10 +15,12 @@
 //   offset 16: mat4 view_proj
 //   offset 80: vec4 time_and_pad (x = game_time seconds)
 
-layout(location = 0) in vec3 in_pos;
-layout(location = 1) in vec2 in_uv;
+layout(location = 0) in uvec3 in_pos_q;
+layout(location = 1) in uvec2 in_uv_q;
 layout(location = 2) in uint in_tile;
 layout(location = 3) in uint in_water;
+
+const float VERTEX_SCALE = 1.0 / 256.0;
 
 layout(location = 0) out vec2 frag_uv;
 layout(location = 1) out float frag_fog;
@@ -43,6 +45,8 @@ layout(set = 0, binding = 0) uniform Camera {
 #include "water_wave.generated.glsl"
 
 void main() {
+    vec3 in_pos = vec3(in_pos_q) * VERTEX_SCALE;
+    vec2 in_uv = vec2(in_uv_q) * VERTEX_SCALE;
     vec3 world = push.origin_pad.xyz + in_pos;
     // The water clock is separate from the day/night clock; it is the same
     // value the CPU uses for buoyancy.

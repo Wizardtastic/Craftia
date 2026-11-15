@@ -86,6 +86,8 @@ fn main() {
         // Phase 1 — GPU-driven rendering: compute frustum cull + indirect vertex.
         ("chunk_cull.comp", "chunk_cull.comp.spv"),
         ("chunk_indirect.vert", "chunk_indirect.vert.spv"),
+        // Flat unlit fragment for the F4 line-mesh view.
+        ("wireframe.frag", "wireframe.frag.spv"),
         // Phase 2 — GPU compute chunk meshing.
         ("chunk_mesh.comp", "chunk_mesh.comp.spv"),
         // Phase 3 — Hi-Z depth pyramid builder.

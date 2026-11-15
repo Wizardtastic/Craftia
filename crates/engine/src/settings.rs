@@ -97,6 +97,11 @@ pub struct WorldSettings {
 
     pub load_radius: i32,
 
+    /// Horizontal LOD render radius in chunks. Must be at least
+    /// `load_radius`; far terrain between the two radii is drawn as coarse
+    /// LOD tiles instead of full chunks.
+    pub lod_radius: i32,
+
     pub unload_radius: i32,
 
     /// Chunks beyond this distance (in chunks) from the focus use the GPU
@@ -143,6 +148,7 @@ pub struct PlayerSettings {
 pub struct KeybindSettings {
     pub debug_overlay: String,
 
+    /// Toggles mesh-mode rendering (chunk geometry drawn as polygon lines).
     pub wireframe: String,
 
     pub fly: String,
@@ -592,7 +598,7 @@ impl Default for GraphicsSettings {
             textures_dir: Some("assets/textures".into()),
             texture_packs_dir: None,
             msaa_samples: 4,
-            occlusion_culling: false,
+            occlusion_culling: true,
             gpu_meshing: false,
             raytrace_quality: 1.0,
             raytrace_softness: 0.0,
@@ -619,6 +625,8 @@ impl Default for WorldSettings {
             seed: 1337,
 
             load_radius: 6,
+
+            lod_radius: 32,
 
             unload_radius: 8,
 
@@ -758,8 +766,21 @@ impl GameSettings {
     pub fn load(path: &std::path::Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(content) => match toml::from_str::<GameSettings>(&content) {
-                Ok(settings) => {
+                Ok(mut settings) => {
                     log::info!("Loaded config from {}", path.display());
+
+                    // Keep the two distances ordered even if the file was
+                    // hand-edited: the LOD ring always starts at the standard
+                    // radius, and the UI exposes 2..64 / 2..128.
+                    settings.world.load_radius = settings.world.load_radius.clamp(2, 64);
+                    settings.world.lod_radius = settings
+                        .world
+                        .lod_radius
+                        .clamp(settings.world.load_radius, 128);
+                    settings.world.unload_radius = settings
+                        .world
+                        .unload_radius
+                        .max(settings.world.load_radius + 2);
 
                     settings
                 }
@@ -801,7 +822,13 @@ impl GameSettings {
 
             fog_color: [0.62, 0.80, 0.96],
 
-            fog_distance: self.graphics.fog_distance,
+            // Far LOD tiles need to remain visible: fog must not fully
+            // obscure the configured LOD radius. The user's fog setting can
+            // still make the view foggier than this floor.
+            fog_distance: self
+                .graphics
+                .fog_distance
+                .max(self.world.lod_radius.max(1) as f32 * 16.0 + 64.0),
 
             textures_dir: self
                 .graphics
@@ -836,6 +863,8 @@ impl GameSettings {
 
             unload_radius: self.world.unload_radius,
 
+            lod_radius: self.world.lod_radius,
+
             vertical_half: 3,
 
             gpu_mesh_distance: self.world.gpu_mesh_distance,
@@ -845,6 +874,10 @@ impl GameSettings {
             mesh_batch: 24,
 
             structure_batch: 8,
+
+            frame_budget_ms: 2.5,
+
+            mesh_cache: true,
         }
     }
 
@@ -936,6 +969,8 @@ mod tests {
         assert_eq!(s.world.seed, 1337);
 
         assert_eq!(s.world.load_radius, 6);
+
+        assert_eq!(s.world.lod_radius, 32);
 
         assert_eq!(s.world.day_length, 1200.0);
 
@@ -1069,7 +1104,8 @@ mod tests {
 
         assert!(rc.vsync);
 
-        assert!((rc.fog_distance - 320.0).abs() < f32::EPSILON);
+        // Fog must reach at least past the default 32-chunk LOD radius.
+        assert!((rc.fog_distance - 576.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1080,6 +1116,8 @@ mod tests {
         let sc = s.to_stream_config();
 
         assert_eq!(sc.load_radius, 6);
+
+        assert_eq!(sc.lod_radius, 32);
 
         assert_eq!(sc.unload_radius, 8);
 

@@ -470,7 +470,7 @@ pub(crate) fn gpu_block_properties(
     reg: &voxel_world::BlockRegistry,
 ) -> Vec<voxel_render::BlockPropertiesGpu> {
     use voxel_render::BlockPropertiesGpu;
-    use voxel_world::registry::BlockKind;
+    use voxel_world::registry::{material_flag, BlockKind};
     (0..reg.count())
         .map(|i| {
             let id = voxel_core::BlockId(i as u16);
@@ -478,7 +478,20 @@ pub(crate) fn gpu_block_properties(
             let opaque = matches!(def.kind, BlockKind::Solid | BlockKind::Cactus);
             let liquid = matches!(def.kind, BlockKind::Liquid);
             let not_air = !matches!(def.kind, BlockKind::Air);
-            BlockPropertiesGpu::pack(def.textures.tiles, opaque, liquid, not_air)
+            // Alpha-cutout cubes (leaves, torches, light blocks) belong to the
+            // opaque pass; only glass-style absorption cubes blend.
+            let translucent = def.kind == BlockKind::Transparent;
+            let blend = translucent
+                && (def.material.flags & material_flag::TRANSLUCENT_ABSORB) != 0;
+            let cutout = translucent && !blend;
+            BlockPropertiesGpu::pack(
+                def.textures.tiles,
+                opaque,
+                liquid,
+                not_air,
+                cutout,
+                blend,
+            )
         })
         .collect()
 }
@@ -1264,6 +1277,21 @@ impl ApplicationHandler for EngineApp {
             ) {
                 Ok(mut r) => {
                     self.render.window_size = (r.extent().width, r.extent().height);
+                    let lod0 = (self.config.world.load_radius.max(2) as f32 * 16.0 * 0.6)
+                        .clamp(48.0, 512.0);
+                    r.set_lod0_distance(lod0);
+                    let fog = self
+                        .config
+                        .render
+                        .fog_distance
+                        .max(self.config.world.lod_radius.max(2) as f32 * 16.0 + 64.0);
+                    self.config.render.fog_distance = fog;
+                    r.set_fog_distance(fog);
+                    if let Some(mut cam) = self.simulation.player_camera() {
+                        cam.far = (self.config.world.lod_radius.max(2) as f32 * 16.0 + 256.0)
+                            .max(1024.0);
+                        self.simulation.set_player_camera(cam);
+                    }
                     // Populate texture pack manager from initial renderer pack info.
                     self.texture_pack_manager.loaded_packs = r
                         .pack_infos()
@@ -1629,8 +1657,16 @@ impl ApplicationHandler for EngineApp {
                                     self.gameplay.debug_overlay = !self.gameplay.debug_overlay;
                                 }
                                 Action::Wireframe => {
+                                    let mut mode = None;
                                     if let Some(r) = self.render.renderer.as_mut() {
                                         r.toggle_wireframe();
+                                        mode = Some(r.is_wireframe());
+                                    }
+                                    if let Some(on) = mode {
+                                        self.gameplay.chat.push_message(format!(
+                                            "Mesh mode: {}",
+                                            if on { "ON" } else { "OFF" }
+                                        ));
                                     }
                                 }
                                 Action::Fly => {
@@ -1670,20 +1706,20 @@ impl ApplicationHandler for EngineApp {
                                     }
                                 }
                                 Action::RenderDistanceUp => {
-                                    let r = (self.config.stream.load_radius + 1).min(16);
-                                    self.config.stream.load_radius = r;
-                                    if let Some(s) = &self.world_state.streamer {
-                                        s.set_load_radius(r as u32);
-                                    }
-                                    self.gameplay.chat.push_message(format!("Render distance: {r}"));
+                                    let r = (self.config.stream.load_radius + 1).min(64);
+                                    self.set_render_distance_base(r);
+                                    self.gameplay.chat.push_message(format!(
+                                        "Render distance: {r} (LOD {})",
+                                        self.config.world.lod_radius
+                                    ));
                                 }
                                 Action::RenderDistanceDown => {
                                     let r = (self.config.stream.load_radius - 1).max(2);
-                                    self.config.stream.load_radius = r;
-                                    if let Some(s) = &self.world_state.streamer {
-                                        s.set_load_radius(r as u32);
-                                    }
-                                    self.gameplay.chat.push_message(format!("Render distance: {r}"));
+                                    self.set_render_distance_base(r);
+                                    self.gameplay.chat.push_message(format!(
+                                        "Render distance: {r} (LOD {})",
+                                        self.config.world.lod_radius
+                                    ));
                                 }
                                 Action::BlockPicker | Action::Inventory => {
                                     if self.gameplay.game_state == GameState::Playing {

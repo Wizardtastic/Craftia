@@ -2779,7 +2779,11 @@ impl crate::EngineApp {
         ui.gradient_v(0.0, 0.0, w, h, [6, 6, 10, 185], [0, 0, 0, 185]);
 
         // Shared layout: the exact rects `handle_settings_click` hit-tests.
-        let lay = crate::screen_layout::SettingsLayout::new(w, h);
+        let lay = crate::screen_layout::SettingsLayout::new_with_lod_min(
+            w,
+            h,
+            self.config.world.load_radius.max(2) as f32,
+        );
         let panel = lay.panel;
         let px = panel.x;
         let py = panel.y;
@@ -2861,7 +2865,11 @@ impl crate::EngineApp {
     }
     pub(crate) fn handle_settings_click(&mut self) {
         let (w, h) = self.render.logical_size();
-        let lay = crate::screen_layout::SettingsLayout::new(w, h);
+        let lay = crate::screen_layout::SettingsLayout::new_with_lod_min(
+            w,
+            h,
+            self.config.world.load_radius.max(2) as f32,
+        );
         let mouse = self.gameplay.mouse_pos;
 
         // Back button.
@@ -3003,10 +3011,75 @@ impl crate::EngineApp {
     }
 
     /// Apply a slider value to the corresponding config field.
+    /// Set the fully-detailed render radius. The LOD radius always stays at
+    /// or beyond it, and both streaming and fog are updated immediately.
+    pub(crate) fn set_render_distance_base(&mut self, base: i32) {
+        let base = base.clamp(2, 64);
+        let lod = self.config.world.lod_radius.max(base).min(128);
+        self.config.world.load_radius = base;
+        self.config.world.lod_radius = lod;
+        self.config.stream.load_radius = base;
+        self.config.stream.lod_radius = lod;
+        self.config.stream.unload_radius =
+            self.config.stream.unload_radius.max(base + 2);
+        self.config.world.unload_radius =
+            self.config.world.unload_radius.max(base + 2);
+        if let Some(s) = &self.world_state.streamer {
+            s.set_load_radius(base as u32);
+            s.set_lod_radius(lod as u32);
+        }
+        self.apply_lod_render_settings(base, lod);
+    }
+
+    /// Set the far-LOD radius without changing the detailed radius.
+    pub(crate) fn set_lod_radius(&mut self, lod: i32) {
+        let base = self.config.world.load_radius.clamp(2, 64);
+        let lod = lod.clamp(base, 128);
+        self.config.world.lod_radius = lod;
+        self.config.stream.lod_radius = lod;
+        if let Some(s) = &self.world_state.streamer {
+            s.set_lod_radius(lod as u32);
+        }
+        self.apply_lod_render_settings(base, lod);
+    }
+
+    /// Keep fog and the full-detail LOD cutoff consistent with the two
+    /// distances. Fog never cuts off terrain before the LOD radius ends.
+    fn apply_lod_render_settings(&mut self, base: i32, lod: i32) {
+        let fog = self
+            .config
+            .render
+            .fog_distance
+            .max(lod as f32 * 16.0 + 64.0);
+        self.config.render.fog_distance = fog;
+        let lod0 = (base as f32 * 16.0 * 0.6).clamp(48.0, 512.0);
+        if let Some(mut cam) = self.simulation.player_camera() {
+            cam.far = (lod as f32 * 16.0 + 256.0).max(1024.0);
+            self.simulation.set_player_camera(cam);
+        }
+        if let Some(r) = self.render.renderer.as_mut() {
+            r.set_fog_distance(fog);
+            r.set_lod0_distance(lod0);
+        }
+    }
+
     fn apply_slider_value(&mut self, label: &str, new_val: f32) {
         match label {
-            "Render Distance" => self.config.stream.load_radius = new_val.round() as i32,
-            "Fog Distance" => self.config.render.fog_distance = new_val,
+            "Render Distance" => {
+                let base = (new_val.round() as i32).clamp(2, 64);
+                self.set_render_distance_base(base);
+            }
+            "LOD Distance" => {
+                let lod = (new_val.round() as i32).clamp(2, 128);
+                self.set_lod_radius(lod);
+            }
+            "Fog Distance" => {
+                let fog = new_val.max(self.config.world.lod_radius as f32 * 16.0 + 64.0);
+                self.config.render.fog_distance = fog;
+                if let Some(r) = self.render.renderer.as_mut() {
+                    r.set_fog_distance(fog);
+                }
+            }
             "Exposure" => self.config.exposure = new_val,
             "Mouse Sensitivity" => self.config.player.mouse_sensitivity = new_val / 1000.0,
             "Walk Speed" => self.config.player.walk_speed = new_val,
@@ -3023,6 +3096,7 @@ impl crate::EngineApp {
     fn slider_value(&self, label: &str) -> f32 {
         match label {
             "Render Distance" => self.config.stream.load_radius as f32,
+            "LOD Distance" => self.config.world.lod_radius as f32,
             "Fog Distance" => self.config.render.fog_distance,
             "Exposure" => self.config.exposure,
             "Mouse Sensitivity" => self.config.player.mouse_sensitivity * 1000.0,
@@ -3072,7 +3146,11 @@ impl crate::EngineApp {
             return;
         };
         let (w, h) = self.render.logical_size();
-        let lay = crate::screen_layout::SettingsLayout::new(w, h);
+        let lay = crate::screen_layout::SettingsLayout::new_with_lod_min(
+            w,
+            h,
+            self.config.world.load_radius.max(2) as f32,
+        );
         let Some(slider) = lay.sliders.get(drag_idx) else {
             self.gameplay.settings_slider_dragging = None;
             return;
@@ -3738,6 +3816,10 @@ impl crate::EngineApp {
                     s.chunk_vertices, s.chunk_indices
                 ),
                 format!(
+                    "Cull: {} visible, {} frustum, {} Hi-Z / {}",
+                    s.cull_visible, s.cull_frustum, s.cull_occlusion, s.cull_total
+                ),
+                format!(
                     "Streamer: {} gen, {} mesh, {} remesh",
                     s.streamer_gen_queue, s.streamer_mesh_queue, s.streamer_pending_remesh
                 ),
@@ -3805,7 +3887,7 @@ impl crate::EngineApp {
             ),
             format!("Fly: {}", if flying { "ON" } else { "OFF" }),
             format!(
-                "Wireframe: {}",
+                "Mesh mode: {}",
                 self.render
                     .renderer
                     .as_ref()
