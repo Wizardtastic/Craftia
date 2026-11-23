@@ -3,7 +3,7 @@
 //! mutation goes through internal `RwLock`s.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 
@@ -138,11 +138,6 @@ pub struct World {
     /// Accumulated time driving the analytic wave/current field. Advanced by
     /// `tick_water` and sampled by both physics and the shader.
     water_time: RwLock<f32>,
-    /// Self-reference for safe cross-thread closure capture. Built once in
-    /// `new_with_path` via `Arc::new_cyclic`; used by `with_chunk_for_mesh`,
-    /// `recompute_lighting_at`, and `set_block` to hand closures an `Arc<World>`
-    /// without using raw `*const Self` pointer aliasing.
-    self_ref: Weak<World>,
     /// Registry of named schematics pasted into this world. Each entry
     /// is the post-paste metadata (origin / rotation / mirror / bounds)
     /// plus a count of distinct blocks actually written. Lives behind a
@@ -159,6 +154,156 @@ pub struct World {
     /// plus any adjacent section/chunk whose border sample changed. The
     /// streamer takes (and clears) this mask when it remeshes a chunk.
     section_dirty: Mutex<HashMap<ChunkPos, u8>>,
+}
+
+/// Immutable snapshot used by the CPU mesher. All hot-path samplers read this
+/// owned data instead of taking chunk/water locks per voxel.
+pub struct ChunkMeshSnapshot {
+    pub chunk: Chunk,
+    neighbours: HashMap<ChunkPos, Chunk>,
+    loaded: HashSet<ChunkPos>,
+    water_columns: HashMap<IVec2, Vec<WaterColumn>>,
+    water_id: Option<BlockId>,
+    seed: i32,
+}
+
+impl ChunkMeshSnapshot {
+    #[inline]
+    pub fn sample(&self, x: i32, y: i32, z: i32) -> BlockId {
+        if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
+            return BlockId::AIR;
+        }
+        let cp = block_to_chunk(IVec3::new(x, y, z));
+        match self.neighbours.get(&cp) {
+            Some(c) => c.get(
+                x.rem_euclid(CHUNK_SIZE),
+                y.rem_euclid(CHUNK_SIZE),
+                z.rem_euclid(CHUNK_SIZE),
+            ),
+            None => BlockId::AIR,
+        }
+    }
+
+    #[inline]
+    pub fn sample_loaded(&self, x: i32, y: i32, z: i32) -> bool {
+        self.loaded
+            .contains(&block_to_chunk(IVec3::new(x, y, z)))
+    }
+
+    /// True if the target chunk contains any water voxel. Computed once per
+    /// mesh snapshot instead of rescanning 4096 blocks for every section.
+    pub fn has_water(&self) -> bool {
+        let Some(water_id) = self.water_id else {
+            return false;
+        };
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    if self.chunk.get(x, y, z) == water_id {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Render-side water description using the snapshot's block IDs and
+    /// 18×18 water-column strip. Mirrors `World::water_vertex_info` without
+    /// any RwLock traffic.
+    pub fn water_vertex_info(&self, x: i32, y: i32, z: i32) -> WaterVertexInfo {
+        let id = self.sample(x, y, z);
+        if id.is_air() {
+            return WaterVertexInfo::default();
+        }
+        let Some(water_id) = self.water_id else {
+            return WaterVertexInfo::default();
+        };
+        if id != water_id {
+            return WaterVertexInfo {
+                fill: 255,
+                surface: true,
+                ..Default::default()
+            };
+        }
+        let bodies = self
+            .water_columns
+            .get(&IVec2::new(x, z))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if self.sample(x, y + 1, z) == water_id {
+            let body = bodies
+                .iter()
+                .find(|c| y as f32 >= c.bed_y - 0.001 && (y as f32) < c.surface_y - 0.001);
+            return WaterVertexInfo {
+                kind: body.map(|c| c.kind.as_u8()).unwrap_or(0),
+                fill: 255,
+                surface: false,
+                ..Default::default()
+            };
+        }
+        if bodies.is_empty() {
+            return WaterVertexInfo {
+                fill: 255,
+                surface: true,
+                ..Default::default()
+            };
+        }
+        let Some(column) = bodies
+            .iter()
+            .find(|c| (c.surface_y - 0.001).floor() as i32 == y)
+        else {
+            return WaterVertexInfo {
+                fill: 255,
+                surface: true,
+                ..Default::default()
+            };
+        };
+        WaterVertexInfo {
+            kind: column.kind.as_u8(),
+            fill: (column.fill * 255.0).round().clamp(0.0, 255.0) as u8,
+            amplitude: (column.wave_amplitude() * 32.0).clamp(0.0, 255.0) as u8,
+            flow_angle: crate::water::pack_angle(column.flow_angle),
+            flow_speed: crate::water::pack_unit(column.flow_speed / MAX_FLOW_SPEED),
+            rapids: crate::water::pack_unit(column.rapids),
+            surface: true,
+        }
+    }
+
+    /// Content hash of a section's meshing input. The old path performed 1000
+    /// lock-taking `World::get_block` calls per section; the snapshot makes it
+    /// a pure array/hash-map read.
+    pub fn section_cache_hash(
+        &self,
+        pos: ChunkPos,
+        section: u8,
+        registry_fp: u64,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.seed.hash(&mut h);
+        pos.x().hash(&mut h);
+        pos.y().hash(&mut h);
+        pos.z().hash(&mut h);
+        section.hash(&mut h);
+        registry_fp.hash(&mut h);
+        let base = IVec3::new(
+            (section as i32 & 1) * 8,
+            ((section as i32 >> 1) & 1) * 8,
+            ((section as i32 >> 2) & 1) * 8,
+        );
+        let origin = chunk_origin(pos);
+        for y in -1..=8 {
+            for z in -1..=8 {
+                for x in -1..=8 {
+                    self.sample(origin.x + base.x + x, origin.y + base.y + y, origin.z + base.z + z)
+                        .0
+                        .hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
 }
 
 impl World {
@@ -190,10 +335,7 @@ impl World {
             None => Arc::new(BlockRegistry::with_builtins()),
         };
         let gen = Arc::new(TerrainGenerator::new(seed));
-        // `Arc::new_cyclic` lets the struct hold a `Weak<Self>` back-reference
-        // without a chicken-and-egg bootstrap. The closure receives the Weak
-        // during construction; we close over it to seed `self_ref`.
-        Arc::new_cyclic(|weak: &Weak<Self>| Self {
+        Arc::new(Self {
             seed,
             reg,
             gen,
@@ -201,7 +343,6 @@ impl World {
             meshes: RwLock::new(HashSet::new()),
             water_columns: RwLock::new(HashMap::new()),
             water_time: RwLock::new(0.0),
-            self_ref: Weak::clone(weak),
             schematic_entities: RwLock::new(HashMap::new()),
             section_dirty: Mutex::new(HashMap::new()),
         })
@@ -222,18 +363,42 @@ impl World {
     pub fn insert_chunk(&self, pos: ChunkPos, mut chunk: Chunk) {
         self.section_dirty.lock().remove(&pos);
         chunk.pos = pos;
-        let columns = self.scan_chunk_water(pos, &chunk);
-        let replaced = self.chunks.write_shard(pos).insert(pos, chunk).is_some();
+        // Replacing a generated chunk (the structure pass) is the common case
+        // after startup. It must not rescan all 256 water columns: compare the
+        // old and new metadata and refresh only columns that actually changed.
+        let old_meta = {
+            let chunks = self.chunks.read_shard(pos);
+            chunks
+                .get(&pos)
+                .map(|old| old.water_meta_data().to_vec())
+        };
+        let replacing = old_meta.is_some();
+        let columns = if replacing {
+            Vec::new()
+        } else {
+            self.scan_chunk_water(pos, &chunk)
+        };
+        let changed_columns: Vec<(i32, i32)> = old_meta
+            .as_ref()
+            .map(|old| {
+                let new = chunk.water_meta_data();
+                old.iter()
+                    .zip(new.iter())
+                    .enumerate()
+                    .filter_map(|(i, (a, b))| (a != b).then_some((i / CHUNK_SIZE as usize, i % CHUNK_SIZE as usize)))
+                    .map(|(lx, lz)| (lx as i32, lz as i32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.chunks.write_shard(pos).insert(pos, chunk);
 
-        if replaced {
-            // A replaced chunk can change any body in these columns. Rescan
-            // every affected column across all loaded vertical chunks instead
-            // of trusting the stale map entry.
+        if replacing {
+            if changed_columns.is_empty() {
+                return;
+            }
             let origin = chunk_origin(pos);
-            for lx in 0..CHUNK_SIZE {
-                for lz in 0..CHUNK_SIZE {
-                    self.refresh_water_column(origin.x + lx, origin.z + lz);
-                }
+            for (lx, lz) in changed_columns {
+                self.refresh_water_column(origin.x + lx, origin.z + lz);
             }
             return;
         }
@@ -289,18 +454,23 @@ impl World {
     }
 
     pub fn remove_chunk(&self, pos: ChunkPos) {
-        self.chunks.write_shard(pos).remove(&pos);
+        let removed = self.chunks.write_shard(pos).remove(&pos);
         self.meshes.write().remove(&pos);
         self.section_dirty.lock().remove(&pos);
 
-        // Removing a slice can expose or shorten any body in these columns
-        // (a cave pool may sit below an ocean surface). Rebuild all 256
-        // horizontal columns; refresh_water_column scans only the loaded
-        // vertical chunks at each x/z.
+        // Removing a slice can expose or shorten a water body only where the
+        // removed chunk actually owned water metadata. Most chunks (air or
+        // deep stone) have none; the old unconditional 256-column refresh was
+        // the source of large unload hitches.
+        let Some(removed) = removed else {
+            return;
+        };
         let origin = chunk_origin(pos);
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
-                self.refresh_water_column(origin.x + lx, origin.z + lz);
+                if removed.water_meta(lx, lz).is_some() {
+                    self.refresh_water_column(origin.x + lx, origin.z + lz);
+                }
             }
         }
     }
@@ -740,30 +910,8 @@ impl World {
     /// one-voxel padding shell, the world seed, and a registry fingerprint.
     /// Used as the validation tag for the on-disk section mesh cache.
     pub fn section_cache_hash(&self, pos: ChunkPos, section: u8, registry_fp: u64) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.seed.hash(&mut h);
-        pos.x().hash(&mut h);
-        pos.y().hash(&mut h);
-        pos.z().hash(&mut h);
-        section.hash(&mut h);
-        registry_fp.hash(&mut h);
-        let base = IVec3::new(
-            (section as i32 & 1) * 8,
-            ((section as i32 >> 1) & 1) * 8,
-            ((section as i32 >> 2) & 1) * 8,
-        );
-        let origin = chunk_origin(pos);
-        for y in -1..=8 {
-            for z in -1..=8 {
-                for x in -1..=8 {
-                    self.get_block(origin.x + base.x + x, origin.y + base.y + y, origin.z + base.z + z)
-                        .0
-                        .hash(&mut h);
-                }
-            }
-        }
-        h.finish()
+        self.mesh_snapshot(pos)
+            .section_cache_hash(pos, section, registry_fp)
     }
 
     /// Convenience: set a block and report the owning chunk position, if any.
@@ -1238,14 +1386,59 @@ impl World {
 
     // --- meshing support ---------------------------------------------------
 
-    /// Run a closure with read access to a chunk and a neighbour-sampling
-    /// function that crosses chunk borders (used by the mesher on worker
-    /// threads). The samplers read through the shared `RwLock`. The water
-    /// sampler returns the continuous surface fill, body kind, wave amplitude
-    /// and flow data for a liquid voxel; the loaded sampler returns true when
-    /// the chunk at the given world coordinate is loaded (the mesher uses it
-    /// to decide whether to apply the chunk-border face-ownership rule without
-    /// leaving holes at the edge of the loaded area).
+    /// Build a lock-free snapshot of a chunk, its 3×3×3 neighbourhood, and
+    /// the water columns that can border its mesh. The old `with_chunk_for_mesh`
+    /// re-cloned this snapshot once per 8³ section (and again for LOD1), which
+    /// was up to ~240 chunk clones per chunk. The caller now builds it once and
+    /// reuses it for every section and LOD level.
+    pub fn mesh_snapshot(&self, pos: ChunkPos) -> ChunkMeshSnapshot {
+        let chunk = {
+            let chunks = self.chunks.read_shard(pos);
+            chunks.get(&pos).cloned()
+        };
+        let mut neighbours: HashMap<ChunkPos, Chunk> = HashMap::with_capacity(27);
+        let mut loaded: HashSet<ChunkPos> = HashSet::with_capacity(27);
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let cp = ChunkPos::new(pos.x() + dx, pos.y() + dy, pos.z() + dz);
+                    let found = {
+                        let chunks = self.chunks.read_shard(cp);
+                        chunks.get(&cp).cloned()
+                    };
+                    if let Some(c) = found {
+                        loaded.insert(cp);
+                        neighbours.insert(cp, c);
+                    }
+                }
+            }
+        }
+        // The mesher only samples water one voxel outside the target chunk.
+        // Snapshot that 18×18 strip instead of the whole 3×3×3 water map.
+        let origin = chunk_origin(pos);
+        let mut water_columns = HashMap::with_capacity(18 * 18);
+        {
+            let columns = self.water_columns.read();
+            for x in origin.x - 1..=origin.x + CHUNK_SIZE {
+                for z in origin.z - 1..=origin.z + CHUNK_SIZE {
+                    let key = IVec2::new(x, z);
+                    if let Some(bodies) = columns.get(&key) {
+                        water_columns.insert(key, bodies.clone());
+                    }
+                }
+            }
+        }
+        ChunkMeshSnapshot {
+            chunk: chunk.unwrap_or_else(|| Chunk::new(pos)),
+            neighbours,
+            loaded,
+            water_columns,
+            water_id: self.reg.id_of("water"),
+            seed: self.seed,
+        }
+    }
+
+    /// Backwards-compatible wrapper used by tests and external meshing code.
     pub fn with_chunk_for_mesh<R>(
         &self,
         pos: ChunkPos,
@@ -1256,65 +1449,11 @@ impl World {
             &dyn Fn(i32, i32, i32) -> bool,
         ) -> R,
     ) -> R {
-        // Clone the target chunk and its 3×3×3 neighbourhood out from under
-        // the locks. The greedy mesher samples thousands of neighbour cells;
-        // taking one lock per sample dominated large remesh bursts. With the
-        // snapshot, the hot block sampler touches no locks at all.
-        let chunk = {
-            let chunks = self.chunks.read_shard(pos);
-            chunks.get(&pos).cloned()
-        };
-        let mut neighbours: HashMap<ChunkPos, Chunk> = HashMap::with_capacity(27);
-        for dy in -1..=1 {
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    let cp = ChunkPos::new(pos.x() + dx, pos.y() + dy, pos.z() + dz);
-                    let loaded = {
-                        let chunks = self.chunks.read_shard(cp);
-                        chunks.get(&cp).cloned()
-                    };
-                    if let Some(c) = loaded {
-                        neighbours.insert(cp, c);
-                    }
-                }
-            }
-        }
-
-        // Upgrade the self-reference once per call; the samplers below all
-        // borrow the resulting `Arc<World>` (shared read access) for the
-        // duration of the synchronous call.
-        let world_arc = self
-            .self_ref
-            .upgrade()
-            .expect("`World` outlives `with_chunk_for_mesh` callers");
-
-        let Some(chunk) = chunk else {
-            // No chunk: produce an empty result by giving the closure an empty
-            // chunk. This path should be rare (mesh requested for unloaded chunk).
-            let empty = Chunk::new(pos);
-            let sample: &dyn Fn(i32, i32, i32) -> BlockId = &|_, _, _| BlockId::AIR;
-            let sample_water: &dyn Fn(i32, i32, i32) -> WaterVertexInfo =
-                &|_, _, _| WaterVertexInfo::default();
-            let sample_loaded: &dyn Fn(i32, i32, i32) -> bool = &|_, _, _| false;
-            return f(&empty, sample, sample_water, sample_loaded);
-        };
-
-        // Plain stack closures borrowing a single shared `Arc<World>` — no
-        // per-mesh heap allocations or `Arc` clones. The call is synchronous,
-        // so the closures don't need to outlive it.
-        let sample = |x: i32, y: i32, z: i32| {
-            if !(0..WORLD_HEIGHT_BLOCKS).contains(&y) {
-                return BlockId::AIR;
-            }
-            let cp = block_to_chunk(IVec3::new(x, y, z));
-            match neighbours.get(&cp) {
-                Some(c) => c.get(x.rem_euclid(CHUNK_SIZE), y.rem_euclid(CHUNK_SIZE), z.rem_euclid(CHUNK_SIZE)),
-                None => BlockId::AIR,
-            }
-        };
-        let sample_water = |x: i32, y: i32, z: i32| world_arc.water_vertex_info(x, y, z);
-        let sample_loaded = |x: i32, y: i32, z: i32| world_arc.is_block_loaded(x, y, z);
-        f(&chunk, &sample, &sample_water, &sample_loaded)
+        let snapshot = self.mesh_snapshot(pos);
+        let sample = |x: i32, y: i32, z: i32| snapshot.sample(x, y, z);
+        let sample_water = |x: i32, y: i32, z: i32| snapshot.water_vertex_info(x, y, z);
+        let sample_loaded = |x: i32, y: i32, z: i32| snapshot.sample_loaded(x, y, z);
+        f(&snapshot.chunk, &sample, &sample_water, &sample_loaded)
     }
 
     /// Snapshot a chunk's 16³ block IDs as one byte per voxel for the

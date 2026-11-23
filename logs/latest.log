@@ -1,69 +1,253 @@
-[2026-11-15T02:23:32Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
-[2026-11-15T02:23:32Z INFO  voxel] ============ voxel sandbox startup ============
-[2026-11-15T02:23:32Z INFO  voxel]   binary:    voxel-app 0.1.0
-[2026-11-15T02:23:32Z INFO  voxel]   git:       7c58fe9 (dirty)
-[2026-11-15T02:23:32Z INFO  voxel]   rustc:     rustc 1.96.0 (ac68faa20 2026-05-25)
-[2026-11-15T02:23:32Z INFO  voxel]   target:    x86_64-pc-windows-msvc
-[2026-11-15T02:23:32Z INFO  voxel]   build unx: 1794705043
-[2026-11-15T02:23:32Z INFO  voxel]   pid:       25252
-[2026-11-15T02:23:32Z INFO  voxel] ===============================================
-[2026-11-15T02:23:32Z INFO  voxel_engine::settings] Loaded config from config.toml
-[2026-11-15T02:23:32Z INFO  voxel] starting voxel engine (seed=5)
-[2026-11-15T02:23:32Z INFO  voxel_engine] spawn search: land column at (4, 65, -7) -> spawn pos [4.5, 67.0, -6.5]
-[2026-11-15T02:23:32Z INFO  voxel_audio::registry] Loaded 0 sounds from assets/audio
-[2026-11-15T02:23:33Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
-[2026-11-15T02:23:33Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
-[2026-11-15T02:23:33Z INFO  voxel_render::renderer] MSAA TYPE_4 enabled
-[2026-11-15T02:23:33Z INFO  voxel_render::renderer::indirect] GPU-driven chunk pipeline ready (VBO 4096 KiB, IBO 1024 KiB, max 262144 slots)
-[2026-11-15T02:23:33Z INFO  voxel_engine] file-watcher: active (config = config.toml)
-[2026-11-15T02:23:33Z INFO  voxel_audio::registry] Loaded 0 sounds from assets/audio
-[2026-11-15T02:23:33Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
-[2026-11-15T02:23:33Z INFO  voxel_engine] Audio system initialized
-[2026-11-15T02:23:33Z INFO  voxel_engine::frame] spawn ready: player at (4.5, 60.9, -6.5), surface_y=59
-[2026-11-15T02:35:03Z INFO  voxel_world::save] Loaded 0 chunks from saves\New_World_4
-[2026-11-15T02:35:03Z INFO  voxel_engine::ui] loaded world from saves\New_World_4 (seed=2, 0 chunks)
-[2026-11-15T02:35:03Z INFO  voxel_engine::frame] spawn ready: player at (1.5, 57.9, -3.5), surface_y=56
-[2026-11-15T02:35:15Z INFO  voxel_engine] fly mode: ON
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 29
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 32
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 29
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 32
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 31
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 32
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 49
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 49
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] load radius changed to 64
-[2026-11-15T02:35:28Z INFO  voxel_world::stream] LOD radius changed to 64
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 114
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 114
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 119
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 124
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 128
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 128
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 128
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 128
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 128
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 128
-[2026-11-15T02:35:32Z INFO  voxel_world::stream] LOD radius changed to 128
-[2026-11-15T02:36:59Z INFO  voxel_engine::ui] exit game requested
-[2026-11-15T02:37:00Z INFO  voxel_render::hot_reload] file-watcher: shut down
+[2026-11-15T03:36:15Z INFO  voxel] [rotation] rotated prior run -> logs/previous.log
+[2026-11-15T03:36:15Z INFO  voxel] ============ voxel sandbox startup ============
+[2026-11-15T03:36:15Z INFO  voxel]   binary:    voxel-app 0.1.0
+[2026-11-15T03:36:15Z INFO  voxel]   git:       4b44314 (dirty)
+[2026-11-15T03:36:15Z INFO  voxel]   rustc:     rustc 1.96.0 (ac68faa20 2026-05-25)
+[2026-11-15T03:36:15Z INFO  voxel]   target:    x86_64-pc-windows-msvc
+[2026-11-15T03:36:15Z INFO  voxel]   build unx: 1794713758
+[2026-11-15T03:36:15Z INFO  voxel]   pid:       21576
+[2026-11-15T03:36:15Z INFO  voxel] ===============================================
+[2026-11-15T03:36:15Z INFO  voxel_engine::settings] Loaded config from config.toml
+[2026-11-15T03:36:15Z INFO  voxel] starting voxel engine (seed=5)
+[2026-11-15T03:36:15Z INFO  voxel_engine] spawn search: land column at (4, 65, -7) -> spawn pos [4.5, 67.0, -6.5]
+[2026-11-15T03:36:15Z INFO  voxel_audio::registry] Loaded 0 sounds from assets/audio
+[2026-11-15T03:36:15Z INFO  voxel_asset_pipeline::cache] asset cache hit (40 tiles)
+[2026-11-15T03:36:15Z INFO  voxel_render::atlas] atlas loaded from cache (9 mip levels)
+[2026-11-15T03:36:15Z INFO  voxel_render::renderer::indirect] GPU-driven chunk pipeline ready (VBO 4096 KiB, IBO 1024 KiB, max 262144 slots)
+[2026-11-15T03:36:15Z INFO  voxel_engine] file-watcher: active (config = config.toml)
+[2026-11-15T03:36:15Z INFO  voxel_audio::registry] Loaded 0 sounds from assets/audio
+[2026-11-15T03:36:15Z INFO  voxel_audio::manager] Audio system initialized (0 sounds)
+[2026-11-15T03:36:15Z INFO  voxel_engine] Audio system initialized
+[2026-11-15T03:36:15Z INFO  voxel_engine::frame] spawn ready: player at (4.5, 60.9, -6.5), surface_y=59
+[2026-11-15T03:36:52Z INFO  voxel_engine::ui] deleted world: New World
+[2026-11-15T03:36:53Z INFO  voxel_engine::ui] deleted world: New World
+[2026-11-15T03:36:54Z INFO  voxel_engine::ui] deleted world: New World
+[2026-11-15T03:36:56Z INFO  voxel_engine::ui] deleted world: New World
+[2026-11-15T03:36:57Z INFO  voxel_engine::ui] deleted world: New World
+[2026-11-15T03:36:58Z INFO  voxel_engine::ui] deleted world: New World
+[2026-11-15T03:37:01Z INFO  voxel_engine] fresh world seed=23567, spawn=Vec3(-3.5, 67.0, -3.5)
+[2026-11-15T03:37:01Z INFO  voxel_world::save] Saved 0 chunks to saves\New_World
+[2026-11-15T03:37:01Z INFO  voxel_engine::ui] created new world 'New World' (seed=23567, mode=survival, cheats=false) at saves\New_World
+[2026-11-15T03:37:01Z INFO  voxel_engine::frame] spawn ready: player at (-3.5, 59.9, -3.5), surface_y=58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:09Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 58
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 59
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 59
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 59
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 59
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 60
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 60
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 60
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 60
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 60
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 60
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 61
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 61
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 61
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 61
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 61
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 61
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 62
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 62
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 62
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 62
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 63
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 63
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] load radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 64
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 118
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 118
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 118
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 118
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 118
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 118
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 120
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 121
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 121
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 122
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 122
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 122
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 123
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 123
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 124
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 125
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 125
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 125
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 126
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 126
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 127
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 127
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:10Z INFO  voxel_world::stream] LOD radius changed to 128
+[2026-11-15T03:37:11Z INFO  voxel_engine::settings] Saved config to config.toml
+[2026-11-15T03:37:19Z INFO  voxel_engine] fly mode: ON
+[2026-11-15T03:37:20Z INFO  voxel_engine] fly mode: OFF
+[2026-11-15T03:37:22Z INFO  voxel_engine] fly mode: ON
+[2026-11-15T03:37:23Z INFO  voxel_engine] fly mode: OFF
+[2026-11-15T03:37:24Z INFO  voxel_engine] fly mode: ON
+[2026-11-15T03:37:25Z INFO  voxel_engine] fly mode: OFF
+[2026-11-15T03:37:31Z INFO  voxel_engine] fly mode: ON
+[2026-11-15T03:37:32Z INFO  voxel_engine] fly mode: OFF
+[2026-11-15T03:38:59Z INFO  voxel_engine::ui] exit game requested
+[2026-11-15T03:39:02Z INFO  voxel_render::hot_reload] file-watcher: shut down

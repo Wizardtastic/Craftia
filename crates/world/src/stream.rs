@@ -4,6 +4,7 @@
 //! generation and meshing.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -126,6 +127,29 @@ enum State {
     Meshed,
 }
 
+/// Per-chunk mesh decisions cached by the streamer. These used to be
+/// recomputed for the entire structured queue on every worker iteration:
+/// `chunk_is_enclosed` alone can scan ~5.6k blocks per chunk.
+#[derive(Clone, Copy, Debug)]
+struct ChunkMeshFlags {
+    non_air: usize,
+    enclosed: bool,
+    has_water: bool,
+    needs_cpu_mesher: bool,
+}
+
+fn compute_mesh_flags(world: &World, pos: ChunkPos, gpu_meshing: bool) -> ChunkMeshFlags {
+    ChunkMeshFlags {
+        non_air: world.chunk_non_air(pos),
+        enclosed: world.chunk_is_enclosed(pos),
+        // Both water scans are only needed to decide whether the GPU compute
+        // mesher can take the chunk. The default CPU-only path avoids two
+        // redundant 4096-block scans per candidate.
+        has_water: gpu_meshing && world.chunk_has_water(pos),
+        needs_cpu_mesher: gpu_meshing && world.chunk_needs_cpu_mesher(pos),
+    }
+}
+
 enum Cmd {
     Focus(Vec3),
     /// Current frustum plus the camera's forward vector (mesh priority).
@@ -134,7 +158,6 @@ enum Cmd {
     LoadRadius(u32),
     LodRadius(u32),
     Remesh(ChunkPos),
-    Stats(std::sync::mpsc::SyncSender<StreamerStats>),
     Shutdown,
 }
 
@@ -152,10 +175,52 @@ pub struct StreamerStats {
     pub mesh_ms: f32,
 }
 
+/// Lock-free snapshot published by the streaming worker. The render thread
+/// used to send a `Cmd::Stats` request and block for up to 5 ms waiting for a
+/// reply every frame; that made the diagnostics path part of the frame-time
+/// hot path. Atomics make stats observation a pure load.
+#[derive(Default)]
+pub(crate) struct StreamerStatsShared {
+    gen_queue: AtomicU32,
+    mesh_queue: AtomicU32,
+    pending_remesh: AtomicU32,
+    total_tracked: AtomicU32,
+    gen_ms_bits: AtomicU32,
+    mesh_ms_bits: AtomicU32,
+}
+
+impl StreamerStatsShared {
+    fn store_counts(&self, stats: &StreamerStats) {
+        self.gen_queue.store(stats.gen_queue, Ordering::Relaxed);
+        self.mesh_queue.store(stats.mesh_queue, Ordering::Relaxed);
+        self.pending_remesh
+            .store(stats.pending_remesh, Ordering::Relaxed);
+        self.total_tracked
+            .store(stats.total_tracked, Ordering::Relaxed);
+    }
+
+    fn store_timings(&self, gen_ms: f32, mesh_ms: f32) {
+        self.gen_ms_bits.store(gen_ms.to_bits(), Ordering::Relaxed);
+        self.mesh_ms_bits.store(mesh_ms.to_bits(), Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> StreamerStats {
+        StreamerStats {
+            gen_queue: self.gen_queue.load(Ordering::Relaxed),
+            mesh_queue: self.mesh_queue.load(Ordering::Relaxed),
+            pending_remesh: self.pending_remesh.load(Ordering::Relaxed),
+            total_tracked: self.total_tracked.load(Ordering::Relaxed),
+            gen_ms: f32::from_bits(self.gen_ms_bits.load(Ordering::Relaxed)),
+            mesh_ms: f32::from_bits(self.mesh_ms_bits.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 /// Owns the worker thread. Drop shuts it down.
 pub struct ChunkStreamer {
     cmd_tx: Sender<Cmd>,
     pub events: Receiver<ChunkStreamEvent>,
+    stats: Arc<StreamerStatsShared>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -165,15 +230,18 @@ impl ChunkStreamer {
     pub fn spawn(world: Arc<World>, config: StreamConfig) -> Result<Self> {
         let (cmd_tx, cmd_rx) = unbounded();
         let (event_tx, event_rx) = unbounded();
+        let stats = Arc::new(StreamerStatsShared::default());
+        let worker_stats = stats.clone();
         let handle = std::thread::Builder::new()
             .name("voxel-stream".into())
             .spawn(move || {
-                run_worker(world, config, cmd_rx, event_tx);
+                run_worker(world, config, cmd_rx, event_tx, worker_stats);
             })
             .context("spawn stream worker thread")?;
         Ok(Self {
             cmd_tx,
             events: event_rx,
+            stats,
             handle: Some(handle),
         })
     }
@@ -208,12 +276,10 @@ impl ChunkStreamer {
         let _ = self.cmd_tx.send(Cmd::Remesh(pos));
     }
 
-    /// Query current streamer stats (queue depths, state counts).
-    /// Returns None if the worker doesn't respond within 5ms.
+    /// Read the last published streamer stats snapshot. This is a pure atomic
+    /// load and never blocks the render thread.
     pub fn stats(&self) -> Option<StreamerStats> {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let _ = self.cmd_tx.send(Cmd::Stats(tx));
-        rx.recv_timeout(std::time::Duration::from_millis(5)).ok()
+        Some(self.stats.snapshot())
     }
 
     /// Drain any pending events without blocking.
@@ -236,6 +302,7 @@ fn run_worker(
     config: StreamConfig,
     cmd_rx: Receiver<Cmd>,
     event_tx: Sender<ChunkStreamEvent>,
+    stats_shared: Arc<StreamerStatsShared>,
 ) {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads())
@@ -260,10 +327,18 @@ fn run_worker(
     let mut unload_radius = config.unload_radius;
     let mut state: HashMap<ChunkPos, State> = HashMap::new();
     let mut far_tiles: HashMap<(i32, i32), ()> = HashMap::new();
-    // Wall-clock ms spent generating / meshing since the last `Cmd::Stats`
-    // read; reported in `StreamerStats` and reset there.
+    // Cached layout work. Rebuilding the desired set and scanning every
+    // state entry for unloads on every worker iteration made large radii
+    // spend more time in bookkeeping than in generation.
+    let mut desired_layout: Option<(ChunkPos, i32, i32)> = None;
+    let mut gen_order: Vec<ChunkPos> = Vec::new();
+    let mut gen_cursor = 0usize;
+    let mut mesh_flags: HashMap<ChunkPos, ChunkMeshFlags> = HashMap::new();
+    // Wall-clock ms spent generating / meshing since the last publish.
     let mut gen_accum_ms: f32 = 0.0;
     let mut mesh_accum_ms: f32 = 0.0;
+    let mut last_stats_publish = Instant::now();
+    stats_shared.store_counts(&StreamerStats::default());
 
     loop {
         // --- drain commands ---
@@ -285,7 +360,10 @@ fn run_worker(
                 }
                 Cmd::LoadRadius(r) => {
                     load_radius = r as i32;
-                    unload_radius = unload_radius.max(load_radius + 2);
+                    // Let the unload ring shrink as well as grow. The old
+                    // `max` made lowering the render-distance slider leave
+                    // every previously loaded outer ring resident forever.
+                    unload_radius = load_radius + 2;
                     log::info!("load radius changed to {load_radius}");
                 }
                 Cmd::LodRadius(r) => {
@@ -293,23 +371,6 @@ fn run_worker(
                     log::info!("LOD radius changed to {lod_radius}");
                 }
                 Cmd::Remesh(pos) => remesh_requests.push(pos),
-                Cmd::Stats(tx) => {
-                    let mut stats = StreamerStats::default();
-                    for s in state.values() {
-                        stats.total_tracked += 1;
-                        match s {
-                            State::Generating => stats.gen_queue += 1,
-                            State::Meshing => stats.mesh_queue += 1,
-                            _ => {}
-                        }
-                    }
-                    stats.pending_remesh = remesh_requests.len() as u32;
-                    stats.gen_ms = gen_accum_ms;
-                    stats.mesh_ms = mesh_accum_ms;
-                    gen_accum_ms = 0.0;
-                    mesh_accum_ms = 0.0;
-                    let _ = tx.try_send(stats);
-                }
                 Cmd::Shutdown => {
                     shutdown = true;
                     break;
@@ -320,28 +381,43 @@ fn run_worker(
             return;
         }
 
-        // Desired loaded set (cylindrical band around focus).
+        // Desired loaded set (cylindrical band around focus). Recompute it
+        // only when the focus chunk or a radius actually changes. Between
+        // crossings, the same 791 (default) or 20k+ (large radius) positions
+        // are reused instead of regenerated and re-sorted every iteration.
         let focus_chunk = block_to_chunk(world_to_block(focus));
-        desired.clear();
-        desired.extend(desired_set(focus_chunk, load_radius, config.vertical_half));
+        let layout = (focus_chunk, load_radius, config.vertical_half);
+        let layout_changed = desired_layout != Some(layout);
+        if layout_changed {
+            desired.clear();
+            desired.extend(desired_set(focus_chunk, load_radius, config.vertical_half));
+            desired_chunks.clear();
+            desired_chunks.extend(desired.iter().copied());
+            gen_order = sort_by_distance(desired.clone(), focus_chunk);
+            gen_cursor = 0;
+            desired_layout = Some(layout);
 
-        // Unload chunks outside the unload radius.
-        let unload_r2 = (unload_radius + 1) as i64 * (unload_radius + 1) as i64;
-        let to_unload: Vec<ChunkPos> = state
-            .keys()
-            .filter(|p| {
-                let dx = (p.x() - focus_chunk.x()) as i64;
-                let dz = (p.z() - focus_chunk.z()) as i64;
-                let dy = (p.y() - focus_chunk.y()) as i64;
-                dx * dx + dz * dz > unload_r2 || dy.abs() > config.vertical_half as i64 + 1
-            })
-            .copied()
-            .collect();
-        for p in to_unload {
-            state.remove(&p);
-            section_cache.lock().remove(&p);
-            world.remove_chunk(p);
-            let _ = event_tx.send(ChunkStreamEvent::Unloaded(p));
+            // Unload chunks outside the unload radius. A chunk crossing is
+            // the only event that can move the unload boundary; doing this
+            // scan every loop was pure overhead during startup.
+            let unload_r2 = (unload_radius + 1) as i64 * (unload_radius + 1) as i64;
+            let to_unload: Vec<ChunkPos> = state
+                .keys()
+                .filter(|p| {
+                    let dx = (p.x() - focus_chunk.x()) as i64;
+                    let dz = (p.z() - focus_chunk.z()) as i64;
+                    let dy = (p.y() - focus_chunk.y()) as i64;
+                    dx * dx + dz * dz > unload_r2 || dy.abs() > config.vertical_half as i64 + 1
+                })
+                .copied()
+                .collect();
+            for p in to_unload {
+                state.remove(&p);
+                mesh_flags.remove(&p);
+                section_cache.lock().remove(&p);
+                world.remove_chunk(p);
+                let _ = event_tx.send(ChunkStreamEvent::Unloaded(p));
+            }
         }
 
         // Honour direct remesh requests (e.g. from player edits).
@@ -350,6 +426,10 @@ fn run_worker(
             std::collections::HashSet::new();
 
         for p in remesh_requests.drain(..) {
+            mesh_flags.remove(&p);
+            for n in neighbours(p) {
+                mesh_flags.remove(&n);
+            }
             if let Some(s) = state.get_mut(&p) {
                 if *s == State::Meshed || *s == State::Meshing {
                     *s = State::Structured; // force re-mesh without re-structuring
@@ -413,20 +493,20 @@ fn run_worker(
         }
 
         // --- generation phase ---
-        let gen_todo: Vec<ChunkPos> = desired
-            .iter()
-            .filter(|p| !state.contains_key(p))
-            .copied()
-            .collect();
-        let gen_todo = sort_by_distance(gen_todo, focus_chunk);
         let gen_cap = adaptive_cap(config.gen_batch, gen_per_chunk_ms, budget_ms);
-        let gen_batch: Vec<ChunkPos> = gen_todo
-            .into_iter()
-            .take(gen_cap)
-            .inspect(|p| {
-                state.insert(*p, State::Generating);
-            })
-            .collect();
+        // Walk a distance-sorted order once. The old path rebuilt and sorted
+        // the remaining desired set every loop, which is O(n log n) per batch
+        // and dominated large radii.
+        let mut gen_batch: Vec<ChunkPos> = Vec::with_capacity(gen_cap.min(64));
+        while gen_batch.len() < gen_cap && gen_cursor < gen_order.len() {
+            let pos = gen_order[gen_cursor];
+            gen_cursor += 1;
+            if state.contains_key(&pos) {
+                continue;
+            }
+            state.insert(pos, State::Generating);
+            gen_batch.push(pos);
+        }
 
         if !gen_batch.is_empty() {
             let gen = gen.clone();
@@ -464,6 +544,10 @@ fn run_worker(
             }
             for (pos, chunk) in generated {
                 world.insert_chunk(pos, chunk);
+                mesh_flags.remove(&pos);
+                for n in neighbours(pos) {
+                    mesh_flags.remove(&n);
+                }
                 state.insert(pos, State::Generated);
                 let _ = event_tx.send(ChunkStreamEvent::Generated(pos));
                 // Remesh loaded neighbours so their border faces update now
@@ -485,8 +569,6 @@ fn run_worker(
         // desired loaded set (edge of load radius). This guarantees the
         // `sample` closure reads real neighbour data when verifying structure
         // placement conditions (e.g. "is the surface block grass?"). ---
-        desired_chunks.clear();
-        desired_chunks.extend(desired.iter().copied());
         let struct_todo: Vec<ChunkPos> = desired
             .iter()
             .filter(|p| matches!(state.get(p), Some(State::Generated)))
@@ -538,6 +620,10 @@ fn run_worker(
             });
             for (pos, chunk) in structured {
                 world.insert_chunk(pos, chunk);
+                mesh_flags.remove(&pos);
+                for n in neighbours(pos) {
+                    mesh_flags.remove(&n);
+                }
                 state.insert(pos, State::Structured);
                 let _ = event_tx.send(ChunkStreamEvent::Generated(pos));
                 // Demote Meshed neighbours so their border faces get rebuilt
@@ -587,58 +673,58 @@ fn run_worker(
             (u8::from(!visible), angle_bucket, dx * dx + dy * dy + dz * dz)
         });
 
-        // Empty chunks (air above the terrain, mostly) have no faces to build.
-        // Mark them meshed and move on: an empty bundle is a no-op upload, so
-        // skipping the build costs nothing but saves a full registry scan.
-        let (empty, mesh_todo): (Vec<ChunkPos>, Vec<ChunkPos>) = mesh_todo
-            .into_iter()
-            .partition(|p| world.chunk_non_air(*p) == 0);
-        // A fully sealed underground chunk (solid itself and opaque on all
-        // six neighbouring border layers) cannot contribute a single face.
-        // Checking it costs ~5.5k block reads versus a full greedy mesh, and
-        // the common deep-terrain case skips thousands of these per session.
-        let (enclosed, mesh_todo): (Vec<ChunkPos>, Vec<ChunkPos>) = mesh_todo
-            .into_iter()
-            .partition(|p| world.chunk_is_enclosed(*p));
-        for pos in empty.into_iter().chain(enclosed) {
-            world.insert_mesh(pos);
-            state.insert(pos, State::Meshed);
-            let _ = event_tx.send(ChunkStreamEvent::MeshReady {
-                pos,
-                bundle: ChunkMeshBundle::default(),
-            });
-        }
-
         let mesh_cap = adaptive_cap(config.mesh_batch, mesh_per_chunk_ms, budget_ms);
-        let mesh_batch: Vec<ChunkPos> = mesh_todo
-            .into_iter()
-            .take(mesh_cap)
-            .inspect(|p| {
-                state.insert(*p, State::Meshing);
-            })
-            .collect();
+        let had_mesh_todo = !mesh_todo.is_empty();
+        let gpu_meshing = config.gpu_mesh_distance > 0;
+        let mut mesh_batch: Vec<ChunkPos> = Vec::with_capacity(mesh_cap.min(64));
+        // Only inspect as many candidates as this batch can actually use.
+        // The old code ran `chunk_is_enclosed` (up to ~5.6k reads) on every
+        // structured chunk before taking the first `mesh_cap` of them.
+        for pos in mesh_todo {
+            if mesh_batch.len() >= mesh_cap {
+                break;
+            }
+            let flags = *mesh_flags
+                .entry(pos)
+                .or_insert_with(|| compute_mesh_flags(&world, pos, gpu_meshing));
+            if flags.non_air == 0 || flags.enclosed {
+                world.insert_mesh(pos);
+                state.insert(pos, State::Meshed);
+                let _ = event_tx.send(ChunkStreamEvent::MeshReady {
+                    pos,
+                    bundle: ChunkMeshBundle::default(),
+                });
+                continue;
+            }
+            state.insert(pos, State::Meshing);
+            mesh_batch.push(pos);
+        }
 
         if !mesh_batch.is_empty() {
             // Split the batch into near (CPU greedy mesher) and far (GPU
             // compute mesher, Phase 2). With `gpu_mesh_distance <= 0` every
             // chunk is "near" and the GPU path never engages.
             let gpu_dist = config.gpu_mesh_distance.max(0) as i64;
-            let (near, far): (Vec<ChunkPos>, Vec<ChunkPos>) =
+            let (near, far): (Vec<ChunkPos>, Vec<ChunkPos>) = if !gpu_meshing {
+                (mesh_batch, Vec::new())
+            } else {
                 mesh_batch.iter().copied().partition(|p| {
                     // The GPU compute mesher emits static geometry and cannot
                     // evaluate the wave field, so any chunk holding water must
                     // stay on the CPU mesher.
-                    if world.chunk_needs_cpu_mesher(*p) {
-                        return true;
-                    }
-                    if config.gpu_mesh_distance <= 0 {
+                    let flags = mesh_flags
+                        .get(p)
+                        .copied()
+                        .unwrap_or_else(|| compute_mesh_flags(&world, *p, true));
+                    if flags.needs_cpu_mesher || flags.has_water {
                         return true;
                     }
                     let dx = (p.x() - focus_chunk.x()) as i64;
                     let dy = (p.y() - focus_chunk.y()) as i64;
                     let dz = (p.z() - focus_chunk.z()) as i64;
                     dx * dx + dy * dy + dz * dz <= gpu_dist * gpu_dist
-                });
+                })
+            };
 
             // --- GPU meshing for distant chunks (Phase 2) ---
             if !far.is_empty() {
@@ -744,13 +830,19 @@ fn run_worker(
             .into_iter()
             .filter(|k| !far_tiles.contains_key(k))
             .collect();
-        if !missing.is_empty() {
+        // Do not compete with the near-field mesh pipeline. Far tiles sample
+        // thousands of columns each; building eight of them while the player
+        // is still waiting for the first detailed chunks makes startup worse.
+        let near_work_pending = !gen_batch.is_empty()
+            || !struct_batch.is_empty()
+            || had_mesh_todo;
+        if !missing.is_empty() && !near_work_pending {
             missing.sort_by_key(|(tx, tz)| {
                 let cx = (*tx * tile_chunks * CHUNK_SIZE) as f32 + tile_blocks * 0.5;
                 let cz = (*tz * tile_chunks * CHUNK_SIZE) as f32 + tile_blocks * 0.5;
                 ((cx - focus.x).powi(2) + (cz - focus.z).powi(2)) as i64
             });
-            missing.truncate(8);
+            missing.truncate(2);
             let gen = gen.clone();
             let reg = reg.clone();
             let built: Vec<((i32, i32), crate::far_lod::FarLodTile)> = pool.install(|| {
@@ -773,13 +865,33 @@ fn run_worker(
             }
         }
 
+        // Publish diagnostics from the worker. Timings are cheap atomics; the
+        // state scan is throttled so it never competes with generation on the
+        // streaming thread.
+        stats_shared.store_timings(gen_accum_ms, mesh_accum_ms);
+        gen_accum_ms = 0.0;
+        mesh_accum_ms = 0.0;
+        if last_stats_publish.elapsed() >= std::time::Duration::from_millis(100) {
+            let mut stats = StreamerStats::default();
+            for s in state.values() {
+                stats.total_tracked += 1;
+                match s {
+                    State::Generating => stats.gen_queue += 1,
+                    State::Meshing => stats.mesh_queue += 1,
+                    _ => {}
+                }
+            }
+            stats_shared.store_counts(&stats);
+            last_stats_publish = Instant::now();
+        }
+
         // If nothing happened this iteration and the focus didn't just move,
         // sleep briefly to avoid a busy polling loop. Commands stay queued in
         // the channel and are handled by the next iteration's drain — there
         // is exactly one command-processing path.
         if gen_batch.is_empty()
             && struct_batch.is_empty()
-            && mesh_batch.is_empty()
+            && !had_mesh_todo
             && !focus_changed
             && cmd_rx.is_empty()
         {
@@ -796,6 +908,14 @@ const MESH_CACHE_MAGIC: &[u8; 4] = b"VXMS";
 /// rejected rather than trusted.
 struct MeshDiskCache {
     root: Option<std::path::PathBuf>,
+    writer: Option<std::sync::mpsc::SyncSender<CacheWrite>>,
+    writer_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+enum CacheWrite {
+    File(std::path::PathBuf, Vec<u8>),
+    #[cfg(test)]
+    Flush(std::sync::mpsc::SyncSender<()>),
 }
 
 impl MeshDiskCache {
@@ -805,7 +925,50 @@ impl MeshDiskCache {
                 .join("voxel-engine-mesh-cache")
                 .join(format!("{seed}"))
         });
-        Self { root }
+        Self::from_root(root)
+    }
+
+    fn from_root(root: Option<std::path::PathBuf>) -> Self {
+        if root.is_none() {
+            return Self {
+                root: None,
+                writer: None,
+                writer_handle: None,
+            };
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel::<CacheWrite>(512);
+        let writer_handle = std::thread::Builder::new()
+            .name("voxel-mesh-cache-writer".into())
+            .spawn(move || {
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        CacheWrite::File(path, data) => {
+                            if let Some(dir) = path.parent() {
+                                let _ = std::fs::create_dir_all(dir);
+                            }
+                            let tmp = path.with_extension(format!(
+                                "tmp{}_{}",
+                                std::process::id(),
+                                CACHE_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            ));
+                            if std::fs::write(&tmp, &data).is_ok() {
+                                let _ = std::fs::remove_file(&path);
+                                let _ = std::fs::rename(&tmp, &path);
+                            }
+                        }
+                        #[cfg(test)]
+                        CacheWrite::Flush(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })
+            .ok();
+        Self {
+            root,
+            writer: Some(tx),
+            writer_handle,
+        }
     }
 
     fn enabled(&self) -> bool {
@@ -883,12 +1046,6 @@ impl MeshDiskCache {
         let Some(path) = self.path(pos, section) else {
             return;
         };
-        let Some(dir) = path.parent() else {
-            return;
-        };
-        if std::fs::create_dir_all(dir).is_err() {
-            return;
-        }
         let ov = bundle.opaque.vertices.len() as u32;
         let oi = bundle.opaque.indices.len() as u32;
         let tv = bundle.transparent.vertices.len() as u32;
@@ -908,14 +1065,33 @@ impl MeshDiskCache {
         data.extend_from_slice(bytemuck::cast_slice(&bundle.opaque.indices));
         data.extend_from_slice(bytemuck::cast_slice(&bundle.transparent.vertices));
         data.extend_from_slice(bytemuck::cast_slice(&bundle.transparent.indices));
-        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = path.with_extension(format!("tmp{}_{}", std::process::id(), seq));
-        if std::fs::write(&tmp, &data).is_err() {
-            return;
+        if let Some(writer) = &self.writer {
+            // Never block a Rayon mesh worker on the filesystem. A full
+            // channel simply drops this cache entry; it can be rebuilt.
+            let _ = writer.try_send(CacheWrite::File(path, data));
         }
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::rename(&tmp, &path);
+    }
+
+    #[cfg(test)]
+    fn flush(&self) {
+        let Some(writer) = &self.writer else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(0);
+        if writer.send(CacheWrite::Flush(tx)).is_ok() {
+            let _ = rx.recv();
+        }
+    }
+}
+
+static CACHE_WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Drop for MeshDiskCache {
+    fn drop(&mut self) {
+        self.writer.take();
+        if let Some(handle) = self.writer_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -964,10 +1140,17 @@ fn mesh_chunk_sections(
     registry_fp: u64,
     pos: ChunkPos,
 ) -> (ChunkMeshBundle, ChunkMeshBundle) {
+    // One snapshot serves all eight sections and LOD1. Building it per
+    // section (the old behaviour) copied the 3×3×3 neighbourhood up to nine
+    // times and took locks for every block/water sample.
+    let snapshot = world.mesh_snapshot(pos);
+    let sample = |x: i32, y: i32, z: i32| snapshot.sample(x, y, z);
+    let sample_water = |x: i32, y: i32, z: i32| snapshot.water_vertex_info(x, y, z);
+    let sample_loaded = |x: i32, y: i32, z: i32| snapshot.sample_loaded(x, y, z);
     let mut dirty = world.take_dirty_sections(pos).unwrap_or(0xFF);
     // Static terrain, foliage and cacti are cacheable; only liquid surfaces
     // depend on dynamic water-column metadata that the block hash misses.
-    let cacheable = disk.enabled() && !world.chunk_has_water(pos);
+    let cacheable = disk.enabled() && !snapshot.has_water();
     // Take only the per-chunk entry lock; the map lock is released first so
     // unrelated chunks can mesh in parallel.
     let entry: SectionEntry = {
@@ -984,7 +1167,7 @@ fn mesh_chunk_sections(
             continue;
         }
         let hash = if cacheable {
-            Some(world.section_cache_hash(pos, section, registry_fp))
+            Some(snapshot.section_cache_hash(pos, section, registry_fp))
         } else {
             None
         };
@@ -996,16 +1179,14 @@ fn mesh_chunk_sections(
                 }
             }
         }
-        let bundle = world.with_chunk_for_mesh(pos, |chunk, sample, sample_water, sample_loaded| {
-            mesher.build_section(
-                section,
-                chunk,
-                reg,
-                &sample,
-                &sample_water,
-                &sample_loaded,
-            )
-        });
+        let bundle = mesher.build_section(
+            section,
+            &snapshot.chunk,
+            reg,
+            &sample,
+            &sample_water,
+            &sample_loaded,
+        );
         if let Some(hash) = hash {
             disk.write(pos, section, hash, &bundle);
         }
@@ -1015,11 +1196,12 @@ fn mesh_chunk_sections(
     // LOD1 covers the whole chunk, so it is refreshed whenever any section
     // changed. It is cheap (8³ cells) compared with the section meshes.
     if dirty != 0 || entry.lod1.is_none() {
-        entry.lod1 = Some(world.with_chunk_for_mesh(
-            pos,
-            |chunk, sample, sample_water, sample_loaded| {
-                mesher.build_lod1(chunk, reg, &sample, &sample_water, &sample_loaded)
-            },
+        entry.lod1 = Some(mesher.build_lod1(
+            &snapshot.chunk,
+            reg,
+            &sample,
+            &sample_water,
+            &sample_loaded,
         ));
     }
     let lod1 = entry.lod1.clone().unwrap_or_default();
@@ -1064,9 +1246,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let disk = MeshDiskCache {
-            root: Some(dir.clone()),
-        };
+        let disk = MeshDiskCache::from_root(Some(dir.clone()));
         let pos = ChunkPos::new(3, 4, 5);
         let mut bundle = ChunkMeshBundle::default();
         bundle
@@ -1075,6 +1255,7 @@ mod tests {
             .push(ChunkVertex::new([1.0, 2.0, 3.0], [0.0, 1.0], 7, 0));
         bundle.opaque.indices.extend_from_slice(&[0, 0, 0]);
         disk.write(pos, 2, 0x1234, &bundle);
+        disk.flush();
         let loaded = disk.read(pos, 2, 0x1234).expect("cache hit");
         assert_eq!(loaded.opaque.vertices.len(), bundle.opaque.vertices.len());
         assert_eq!(
@@ -1100,7 +1281,7 @@ mod tests {
         world.insert_chunk(pos, chunk);
         let cache: SectionCache = Arc::new(Mutex::new(HashMap::new()));
         let reg = world.registry();
-        let disk = MeshDiskCache { root: None };
+        let disk = MeshDiskCache::from_root(None);
         let fp = registry_fingerprint(&reg);
         let (before, _) = mesh_chunk_sections(
             &world, &reg, &ChunkMesher, &cache, &disk, fp, pos,

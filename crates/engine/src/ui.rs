@@ -3020,10 +3020,11 @@ impl crate::EngineApp {
         self.config.world.lod_radius = lod;
         self.config.stream.load_radius = base;
         self.config.stream.lod_radius = lod;
-        self.config.stream.unload_radius =
-            self.config.stream.unload_radius.max(base + 2);
-        self.config.world.unload_radius =
-            self.config.world.unload_radius.max(base + 2);
+        // Follow the slider in both directions. The old `max` kept the
+        // unload ring at its largest historical radius, so lowering render
+        // distance never freed the outer chunks.
+        self.config.stream.unload_radius = base + 2;
+        self.config.world.unload_radius = base + 2;
         if let Some(s) = &self.world_state.streamer {
             s.set_load_radius(base as u32);
             s.set_lod_radius(lod as u32);

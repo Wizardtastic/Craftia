@@ -598,16 +598,31 @@ impl TerrainGenerator {
             return;
         }
 
+        // Ravines descend at most 40 blocks from the local surface. Account
+        // for terrain variation across the 80-block anchor reach with a wide
+        // margin; when the chunk's ceiling is still well below the lowest
+        // corner surface, no anchor can reach it and the 37k-anchor scan can
+        // be skipped entirely.
+        let min_corner_surf = self
+            .base_height(cx0, cz0)
+            .min(self.base_height(cx1, cz0))
+            .min(self.base_height(cx0, cz1))
+            .min(self.base_height(cx1, cz1));
+        if chunk_y_bottom + CHUNK_SIZE < (min_corner_surf - 96.0) as i32 {
+            return;
+        }
+
         for ax in min_ax..=max_ax {
             for az in min_az..=max_az {
-                // Cellular mask: rare ravine anchors (~0.2 % of columns).
-                // Cellular noise returns distance values; high values are rare peaks.
-                let mask = self.ravine_mask.get_noise_2d(ax as f32, az as f32);
-                if mask < 0.85 {
-                    continue;
-                }
                 let h = hash2(self.seed, ax, az);
                 if h >= 0.15 {
+                    continue;
+                }
+                // Cellular mask: rare ravine anchors (~0.2 % of columns).
+                // The cheap hash runs first; the old order evaluated cellular
+                // noise for all 37k anchors before rejecting 85 % of them.
+                let mask = self.ravine_mask.get_noise_2d(ax as f32, az as f32);
+                if mask < 0.85 {
                     continue;
                 }
 
@@ -1028,6 +1043,12 @@ impl TerrainGenerator {
             crate::error::WorldError::Registry("gravel block must be registered".into())
         })?;
 
+        // Generate into one flat buffer, then install it with a single
+        // `restore_flat`. The old path called `chunk.set` for every voxel,
+        // which re-read palette/flat storage and updated the non-air counter
+        // 4,096 times.
+        let mut blocks = vec![BlockId::AIR; (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize];
+
         for lx in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
                 let wx = origin.x + lx;
@@ -1041,7 +1062,6 @@ impl TerrainGenerator {
                 for ly in 0..CHUNK_SIZE {
                     let wy = origin.y + ly;
                     if wy >= WORLD_HEIGHT_BLOCKS {
-                        chunk.set(lx, ly, lz, BlockId::AIR);
                         continue;
                     }
 
@@ -1110,7 +1130,7 @@ impl TerrainGenerator {
                         block = BlockId::AIR;
                     }
 
-                    chunk.set(lx, ly, lz, block);
+                    blocks[voxel_core::math::local_index(lx, ly, lz) as usize] = block;
                 }
 
                 // Store the body type, continuous top-cell fill and flow data
@@ -1135,6 +1155,8 @@ impl TerrainGenerator {
                 }
             }
         }
+
+        chunk.restore_flat(blocks);
 
         // Carve surface ravines after the base terrain and caves are in place.
         self.carve_ravines(chunk, reg);
@@ -1184,25 +1206,35 @@ impl TerrainGenerator {
                 // exactly — without re-running the fractal-noise samplers.
                 let biome = columns.get(lx, lz).biome;
 
-                // ---- Trees (delegated to `tree` module) --------------------
-                if let Some(tree_type) = tree::pick_tree_type(self.seed, wx, wz, biome, n, h) {
-                    // Find a grass surface by scanning down from chunk top.
-                    let mut surface_y = None;
-                    for ly in (0..CHUNK_SIZE).rev() {
-                        let wy = origin.y + ly;
-                        if wy >= WORLD_HEIGHT_BLOCKS {
-                            continue;
-                        }
-                        let b = chunk.get(lx, ly, lz);
-                        if b == grass {
-                            surface_y = Some(ly);
-                            break;
-                        }
-                        if !b.is_air() {
-                            break; // hit non-grass solid before grass -> no tree
-                        }
+                // One top-down surface scan serves both trees and foliage.
+                // The old path scanned all 16 layers twice per column.
+                let mut surface_ly = None;
+                let mut surface_is_grass = false;
+                for ly in (0..CHUNK_SIZE).rev() {
+                    let wy = origin.y + ly;
+                    if wy >= WORLD_HEIGHT_BLOCKS {
+                        continue;
                     }
-                    if let Some(sy) = surface_y {
+                    let b = chunk.get(lx, ly, lz);
+                    if b == grass {
+                        surface_ly = Some(ly);
+                        surface_is_grass = true;
+                        break;
+                    }
+                    if sand.map(|s| b == s).unwrap_or(false) {
+                        surface_ly = Some(ly);
+                        break;
+                    }
+                    if !b.is_air() {
+                        break;
+                    }
+                }
+
+                // ---- Trees (delegated to `tree` module) --------------------
+                if surface_is_grass {
+                    if let (Some(sy), Some(tree_type)) =
+                        (surface_ly, tree::pick_tree_type(self.seed, wx, wz, biome, n, h))
+                    {
                         tree::try_place_tree(
                             chunk,
                             reg,
@@ -1219,27 +1251,7 @@ impl TerrainGenerator {
                 }
 
                 // ---- Surface foliage scatter ------------------------------
-                // Find the surface block (grass, or sand in desert/beach) by
-                // scanning down. Trees above would have caused an early break
-                // here, so foliage naturally avoids tree trunks.
-                let mut foliage_surface = None;
-                for ly in (0..CHUNK_SIZE).rev() {
-                    let wy = origin.y + ly;
-                    if wy >= WORLD_HEIGHT_BLOCKS {
-                        continue;
-                    }
-                    let b = chunk.get(lx, ly, lz);
-                    let is_grass = b == grass;
-                    let is_sand = sand.map(|s| b == s).unwrap_or(false);
-                    if is_grass || is_sand {
-                        foliage_surface = Some(ly);
-                        break;
-                    }
-                    if !b.is_air() {
-                        break;
-                    }
-                }
-                if let Some(sy) = foliage_surface {
+                if let Some(sy) = surface_ly {
                     let fy = sy + 1;
                     if fy < CHUNK_SIZE && chunk.get(lx, fy, lz).is_air() {
                         match biome {

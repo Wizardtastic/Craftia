@@ -149,7 +149,7 @@ impl Default for RendererConfig {
             texture_packs_dir: None,
             shader_dir: None,
             particle_softness: 0.3,
-            msaa_samples: 4,
+            msaa_samples: 1,
             occlusion_culling: true,
             gpu_meshing: false,
         }
@@ -437,6 +437,10 @@ pub struct Renderer {
     pending_light_chunks: Vec<(glam::IVec3, Vec<u8>)>,
     /// Pending re-centre of the grid, cleared + repopulated next frame.
     light_grid_reset: Option<glam::IVec3>,
+    /// Persistent host-visible staging for light-grid uploads. Reusing one
+    /// buffer avoids allocating/destroying a ~128 KiB buffer every refill.
+    light_staging: Option<GpuBuffer>,
+    light_staging_capacity: vk::DeviceSize,
 
     // â”€â”€ Offscreen color (for post-processing) â”€â”€
     offscreen_images: Vec<GpuImage>,
@@ -1985,6 +1989,8 @@ impl Renderer {
             emissive_lights_dirty: true,
             pending_light_chunks: Vec::new(),
             light_grid_reset: None,
+            light_staging: None,
+            light_staging_capacity: 0,
             offscreen_images,
             post_render_pass,
             post_pipeline,
@@ -2575,14 +2581,26 @@ impl Renderer {
         }
         let pending = std::mem::take(&mut self.pending_light_chunks);
         let batch = pending.len().min(128);
-        let staging = if batch > 0 {
-            let mut staging = GpuBuffer::host_visible(
-                &self.device,
-                &self.alloc,
-                (batch * raytrace::CHUNK_BYTES) as vk::DeviceSize,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                "light_grid_staging",
-            )?;
+        if batch > 0 {
+            let needed = (batch * raytrace::CHUNK_BYTES) as vk::DeviceSize;
+            if self.light_staging_capacity < needed {
+                let new_cap = needed.next_power_of_two().max(64 * 1024);
+                if let Some(mut old) = self.light_staging.take() {
+                    old.destroy_in_place(&self.device, &self.alloc);
+                }
+                self.light_staging = Some(GpuBuffer::host_visible(
+                    &self.device,
+                    &self.alloc,
+                    new_cap,
+                    vk::BufferUsageFlags::TRANSFER_SRC,
+                    "light_grid_staging",
+                )?);
+                self.light_staging_capacity = new_cap;
+            }
+            let staging = self
+                .light_staging
+                .as_mut()
+                .expect("light staging allocated above");
             {
                 let slice = staging.mapped_slice_mut()?;
                 for (i, (_, data)) in pending[..batch].iter().enumerate() {
@@ -2591,17 +2609,14 @@ impl Renderer {
                 }
             }
             staging.flush_whole(&self.device)?;
-            Some(staging)
-        } else {
-            None
-        };
+        }
 
         let cmd = begin_one_time(&self.device, self.command_pool)?;
         raytrace::VoxelGrid::begin_writes(&self.device, cmd);
         if reset.is_some() {
             self.voxel_grid.record_clear(&self.device, cmd);
         }
-        if let Some(staging) = staging.as_ref() {
+        if let Some(staging) = self.light_staging.as_ref() {
             for (i, (origin, _)) in pending[..batch].iter().enumerate() {
                 self.voxel_grid.record_upload(
                     &self.device,
@@ -2614,9 +2629,6 @@ impl Renderer {
         }
         raytrace::VoxelGrid::end_writes(&self.device, cmd);
         end_and_submit(&self.device, self.command_pool, self.graphics_queue, cmd)?;
-        if let Some(mut staging) = staging {
-            staging.destroy_in_place(&self.device, &self.alloc);
-        }
 
         if batch < pending.len() {
             self.pending_light_chunks.extend(pending[batch..].iter().cloned());
@@ -2932,12 +2944,25 @@ impl Renderer {
             return;
         }
         self.gpu_driven.upload(
-                &self.device,
-                &self.alloc,
-                self.command_pool,
-                self.graphics_queue,
-                uploads,
-            );
+            &self.device,
+            &self.alloc,
+            self.command_pool,
+            self.graphics_queue,
+            uploads,
+        );
+    }
+
+    /// Drain any stream uploads left over from the previous frame under a
+    /// fixed transfer budget. Prevents a chunk burst from turning into one
+    /// multi-millisecond copy submission on the render thread.
+    pub fn pump_chunk_uploads(&mut self) {
+        self.gpu_driven.pump_uploads(
+            &self.device,
+            &self.alloc,
+            self.command_pool,
+            self.graphics_queue,
+            8 * 1024 * 1024,
+        );
     }
 
     /// Remove a chunk's GPU buffers (called when the streamer unloads it).
@@ -3101,6 +3126,7 @@ impl Renderer {
             show_panorama,
             panorama_rotation,
         } = input;
+        self.pump_chunk_uploads();
         // Resize-check, upload UI, precompute camera matrices. Everything we need
         // before submitting any GPU work.
         let (view_proj, vp_cols, ui_index_count) = self.prepare_frame(&camera, ui)?;
@@ -3537,6 +3563,7 @@ impl Renderer {
             show_panorama,
             panorama_rotation,
         } = input;
+        self.pump_chunk_uploads();
         // Resize-check, upload UI, precompute camera matrices.
         let (view_proj, vp_cols, ui_index_count) = self.prepare_frame(&camera, ui)?;
 
@@ -5401,6 +5428,9 @@ impl Drop for Renderer {
 
         // Ray-traced lighting resources.
         self.voxel_grid.destroy(device, &self.alloc);
+        if let Some(mut staging) = self.light_staging.take() {
+            staging.destroy_in_place(device, &self.alloc);
+        }
         self.raytrace_ubo.destroy_in_place(device, &self.alloc);
         self.block_light_ubo.destroy_in_place(device, &self.alloc);
         self.emissive_lights_ubo.destroy_in_place(device, &self.alloc);

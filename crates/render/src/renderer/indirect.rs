@@ -247,6 +247,14 @@ pub struct GpuDriven {
     chunks: HashMap<ChunkPos, GpuChunk>,
     order: Vec<ChunkPos>,
     dirty: bool,
+    /// Geometry waiting for a transfer slot. Streaming bursts are queued and
+    /// uploaded under a per-frame byte budget instead of blocking the render
+    /// thread on one giant copy submission.
+    pending_uploads: std::collections::VecDeque<crate::ChunkUpload>,
+    pending_upload_bytes: usize,
+    /// One-cull delay before rewriting the whole draw table after new slots
+    /// appear. Coalesces the rebuild across a burst of streaming uploads.
+    rebuild_delay: u8,
     opaque_slots: usize,
     transparent_slots: usize,
     indirect_cmd_buf: GpuBuffer,
@@ -746,6 +754,9 @@ impl GpuDriven {
             chunks: HashMap::new(),
             order: Vec::new(),
             dirty: true,
+            pending_uploads: std::collections::VecDeque::new(),
+            pending_upload_bytes: 0,
+            rebuild_delay: 0,
             opaque_slots: 0,
             transparent_slots: 0,
             indirect_cmd_buf,
@@ -815,11 +826,14 @@ impl GpuDriven {
         self.cancel_inflight(device, command_pool);
         self.chunks.clear();
         self.order.clear();
+        self.pending_uploads.clear();
+        self.pending_upload_bytes = 0;
         self.vbo_ranges.reset();
         self.ibo_ranges.reset();
         self.opaque_slots = 0;
         self.transparent_slots = 0;
         self.dirty = true;
+        self.rebuild_delay = 0;
         self.prev_view_proj = None;
     }
 
@@ -1494,6 +1508,54 @@ impl GpuDriven {
         graphics_queue: vk::Queue,
         uploads: Vec<crate::ChunkUpload>,
     ) {
+        for u in uploads {
+            if u.vertices.is_empty()
+                || u.indices.is_empty()
+                || (u.lod as usize) >= MAX_LODS
+            {
+                continue;
+            }
+            self.pending_upload_bytes += u.vertices.len() + u.indices.len();
+            self.pending_uploads.push_back(u);
+        }
+        self.pump_uploads(device, alloc, command_pool, graphics_queue, 8 * 1024 * 1024);
+    }
+
+    /// Process queued chunk uploads up to a byte budget. Called once per frame
+    /// so a large stream burst is spread across frames rather than stalling a
+    /// single frame in one transfer submission.
+    pub fn pump_uploads(
+        &mut self,
+        device: &ash::Device,
+        alloc: &Alloc,
+        command_pool: vk::CommandPool,
+        graphics_queue: vk::Queue,
+        budget_bytes: usize,
+    ) {
+        let mut batch: Vec<crate::ChunkUpload> = Vec::new();
+        let mut bytes = 0usize;
+        while let Some(front) = self.pending_uploads.front() {
+            let size = front.vertices.len() + front.indices.len();
+            if !batch.is_empty() && bytes + size > budget_bytes {
+                break;
+            }
+            bytes += size;
+            batch.push(self.pending_uploads.pop_front().expect("front exists"));
+        }
+        self.pending_upload_bytes = self.pending_upload_bytes.saturating_sub(bytes);
+        if !batch.is_empty() {
+            self.upload_now(device, alloc, command_pool, graphics_queue, batch);
+        }
+    }
+
+    fn upload_now(
+        &mut self,
+        device: &ash::Device,
+        alloc: &Alloc,
+        command_pool: vk::CommandPool,
+        graphics_queue: vk::Queue,
+        uploads: Vec<crate::ChunkUpload>,
+    ) {
         let uploads: Vec<_> = uploads
             .into_iter()
             .filter(|u| {
@@ -1700,6 +1762,11 @@ impl GpuDriven {
             }
         }
         if needs_rebuild || self.dirty {
+            if !self.dirty {
+                // Let the next cull coalesce more streaming uploads into one
+                // draw-table rebuild instead of rebuilding on every frame.
+                self.rebuild_delay = 1;
+            }
             self.dirty = true;
         } else {
             patched.sort_by_key(|p| (p.0.x, p.0.y, p.0.z));
@@ -1883,6 +1950,7 @@ impl GpuDriven {
             }
         }
         self.dirty = true;
+        self.rebuild_delay = 0;
         Ok(())
     }
 
@@ -1899,6 +1967,7 @@ impl GpuDriven {
                 );
             }
             self.dirty = true;
+            self.rebuild_delay = 0;
         }
     }
 
@@ -2065,7 +2134,7 @@ impl GpuDriven {
     /// tables. Async culling must wait for the previous graphics submission
     /// before touching those tables.
     pub fn needs_rebuild(&self) -> bool {
-        self.dirty
+        self.dirty && self.rebuild_delay == 0
     }
 
     pub fn record_cull(
@@ -2078,7 +2147,11 @@ impl GpuDriven {
             vp_cols, cam_pos, ..
         } = uniforms;
         if self.dirty {
-            self.rebuild(device);
+            if self.rebuild_delay > 0 {
+                self.rebuild_delay -= 1;
+            } else {
+                self.rebuild(device);
+            }
         }
         let total = self.opaque_slots + self.transparent_slots;
         if total == 0 {

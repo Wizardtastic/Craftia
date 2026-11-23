@@ -597,10 +597,10 @@ impl Default for GraphicsSettings {
             vignette_strength: 0.15,
             textures_dir: Some("assets/textures".into()),
             texture_packs_dir: None,
-            msaa_samples: 4,
+            msaa_samples: 1,
             occlusion_culling: true,
             gpu_meshing: false,
-            raytrace_quality: 1.0,
+            raytrace_quality: 0.5,
             raytrace_softness: 0.0,
             // Water + translucency upgrade defaults. Master scalars shipped
             // at modest values so the visual effects show up gently on first

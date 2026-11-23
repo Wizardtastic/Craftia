@@ -337,7 +337,9 @@ fn main() -> anyhow::Result<()> {
         config.world.lod_radius = config.world.lod_radius.clamp(r, 128);
         config.stream.lod_radius = config.world.lod_radius;
         // Keep unload radius strictly larger so the wider band doesn't thrash.
-        config.stream.unload_radius = (r + 2).max(config.stream.unload_radius);
+        // Follow a lower CLI radius too, rather than retaining the config's
+        // old outer unload ring.
+        config.stream.unload_radius = r + 2;
         config.world.unload_radius = config.stream.unload_radius;
     }
     if cli.debug {

@@ -189,6 +189,7 @@ BlockLightGpu block_light(uint id) {
 
 struct LocalWater {
     float caustic_surface;
+    float bed_surface;
     float wet_surface;
     bool actual_water;
     bool wet;
@@ -200,6 +201,7 @@ struct LocalWater {
 LocalWater local_water(vec3 p) {
     LocalWater w;
     w.caustic_surface = 0.0;
+    w.bed_surface = 0.0;
     w.wet_surface = 0.0;
     w.actual_water = false;
     w.wet = false;
@@ -239,6 +241,7 @@ LocalWater local_water(vec3 p) {
             best_caustic = surface;
             w.actual_water = true;
             w.caustic_surface = surface;
+            w.bed_surface = bed;
         }
         float d = abs(p.y - (surface - 0.05));
         if (d < 0.55 && d < best_wet_dist) {
@@ -426,14 +429,15 @@ float soft_visibility(vec3 p, vec3 n, vec3 light_dir, float angular_radius) {
     vec3 helper = abs(light_dir.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     vec3 t1 = normalize(cross(light_dir, helper));
     vec3 t2 = cross(light_dir, t1);
-    int taps = rt.grid_extent.w > 0.66 ? 6 : (rt.grid_extent.w > 0.33 ? 4 : 3);
+    int taps = rt.grid_extent.w > 0.80 ? 5 : (rt.grid_extent.w > 0.55 ? 3 : 2);
+    int steps = rt.grid_extent.w > 0.55 ? 96 : 64;
     vec3 origin = p + n * 0.02;
     float sum = 0.0;
     for (int i = 0; i < 8; i++) {
         if (i >= taps) break;
         vec2 o = SHADOW_TAPS[i] * angular_radius * 1.8;
         vec3 dir = normalize(light_dir + t1 * o.x + t2 * o.y);
-        sum += trace_voxels(origin, dir, 72.0, 96, false).transmittance;
+        sum += trace_voxels(origin, dir, 72.0, steps, false).transmittance;
     }
     return sum / float(taps);
 }
@@ -469,7 +473,8 @@ float point_visibility(vec3 p, vec3 n, vec3 l, float d) {
         if (i >= taps) break;
         vec2 o = SHADOW_TAPS[i] * radius;
         vec3 dir = normalize(l + t1 * o.x + t2 * o.y);
-        TraceHit th = trace_voxels(origin, dir, max(d - 0.30, 0.0), 48, false);
+        int steps = rt.grid_extent.w > 0.55 ? 48 : 32;
+        TraceHit th = trace_voxels(origin, dir, max(d - 0.30, 0.0), steps, false);
         sum += th.hit ? 0.0 : th.transmittance;
     }
     return sum / float(taps);
@@ -532,7 +537,9 @@ vec3 sample_emissive_lights(vec3 p, vec3 n, int shadow_mode) {
         atten *= 1.0 - smoothstep(range * 0.6, range, d);
         float vis = 1.0;
         if (shadow_mode == 1) {
-            vis = point_visibility(p, n, l, d);
+            vis = rt.grid_extent.w > 0.55
+                ? point_visibility(p, n, l, d)
+                : point_visibility_cheap(p, n, l, d);
         } else if (shadow_mode == 2) {
             vis = point_visibility_cheap(p, n, l, d);
         }
@@ -590,7 +597,7 @@ vec3 sky_ambient_raytraced(vec3 p, vec3 n) {
     vec3 up = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     vec3 t = normalize(cross(up, n));
     vec3 b = cross(n, t);
-    int samples = rt.grid_extent.w > 0.66 ? 8 : (rt.grid_extent.w > 0.33 ? 5 : 3);
+    int samples = rt.grid_extent.w > 0.80 ? 6 : (rt.grid_extent.w > 0.55 ? 4 : 2);
     vec3 sum = vec3(0.0);
     for (int i = 0; i < 8; i++) {
         if (i >= samples) break;
@@ -618,9 +625,19 @@ vec3 sky_ambient_raytraced(vec3 p, vec3 n) {
             radiance += sky_radiance(d) * hit.transmittance * end_sky;
         } else {
             vec3 albedo = block_albedo(hit.block);
-            vec3 bounce = surface_direct_light(hit.position, hit.normal);
-            if (rt.grid_extent.w > 0.66) {
-                bounce += second_bounce(hit.position, hit.normal, d) * 0.55;
+            vec3 bounce;
+            if (rt.grid_extent.w > 0.55) {
+                // Full one-bounce: the hit point runs its own sun/sky/emissive
+                // shadow rays. This is the expensive nested path, so only the
+                // high-quality preset pays for it.
+                bounce = surface_direct_light(hit.position, hit.normal);
+                if (rt.grid_extent.w > 0.80) {
+                    bounce += second_bounce(hit.position, hit.normal, d) * 0.55;
+                }
+            } else {
+                // Cheap bounce: no nested shadow marches. Colour bleed and
+                // contact darkening still come from the hit albedo.
+                bounce = sky_radiance(hit.normal) * 0.30;
             }
             radiance += albedo * bounce;
         }
@@ -736,6 +753,7 @@ void main() {
     float water_rapids = float((frag_water >> 4) & 15u) / 15.0;
     float water_flow = float((frag_water >> 24) & 255u) / 255.0 * 2.6;
     float water_time = frag_water_time;
+    bool low_quality = rt.grid_extent.w < 0.55;
 
     ivec2 tile_pos = ivec2(actual_tile % 16u, actual_tile / 16u);
     // River water scrolls downstream. The direction and speed come from the
@@ -812,7 +830,9 @@ void main() {
         sun_shadow = soft_visibility(frag_world_pos, n, sun_dir, sun_ang);
     }
     float moon_shadow = 1.0;
-    if (moon_ndl > 0.0) {
+    // Moonlight is much dimmer than sunlight; at the low preset skip its
+    // soft-visibility march rather than paying a second full shadow trace.
+    if (moon_ndl > 0.0 && !low_quality) {
         moon_shadow = soft_visibility(frag_world_pos, n, moon_dir,
                                       max(rt.moon_color_radius.a, shadow_softness));
     }
@@ -836,8 +856,9 @@ void main() {
         float cos_theta = clamp(dot(v, n), 0.0, 1.0);
         float f0 = (flags & MATERIAL_FLAG_REFLECTIVE) != 0u ? 0.045 : 0.02;
         float fres = fresnel_schlick(cos_theta, f0);
-        vec3 refl = trace_reflection(frag_world_pos, n, v,
-                                     roughness, fract(seed * 3.17));
+        vec3 refl = low_quality
+            ? sky_radiance(reflect(-v, n))
+            : trace_reflection(frag_world_pos, n, v, roughness, fract(seed * 3.17));
         lighting += refl * fres * gloss;
         // Tight sun/moon glints on top of the traced reflection.
         vec3 r = reflect(-v, n);
@@ -864,8 +885,12 @@ void main() {
         float cos_theta = clamp(dot(v, wn), 0.0, 1.0);
         float fres = fresnel_schlick(cos_theta, 0.02) * clamp(rt.params.x, 0.0, 1.0);
 
-        // Reflection: traced through the voxel world, falling back to sky.
-        vec3 reflected = trace_reflection(frag_world_pos, wn, v, 0.08, seed);
+        // Reflection: traced through the voxel world on high quality; the low
+        // preset uses analytic sky reflection (one fewer 64-step ray per
+        // water pixel).
+        vec3 reflected = low_quality
+            ? sky_radiance(reflect(-v, wn))
+            : trace_reflection(frag_world_pos, wn, v, 0.08, seed);
         // A traced reflection can be black when it hits off-screen geometry,
         // and a wave face tilted toward the camera can reflect below the
         // horizon. Both produced thin black slivers across the surface. Keep
@@ -882,7 +907,11 @@ void main() {
         // Refraction: reuse the visible opaque scene, but derive the water
         // column from a ray-traced march through the actual lake bed.
         vec2 scene_uv = gl_FragCoord.xy / vec2(textureSize(scene_opaque, 0));
-        float column = water_column_depth(frag_world_pos);
+        // Low quality derives the optical depth from the local water grid
+        // instead of marching a second ray down to the lake bed.
+        float column = low_quality
+            ? clamp(local.caustic_surface - local.bed_surface, 0.2, 16.0)
+            : water_column_depth(frag_world_pos);
         vec3 absorption = vec3(
             float(mat.absorption_pad & 0xFFu),
             float((mat.absorption_pad >> 8u) & 0xFFu),
@@ -992,10 +1021,19 @@ void main() {
     if (fog_t > 0.001) {
         vec3 mid = mix(frag_world_pos, cam_pos, 0.5);
         float sun_fog = 0.0;
+        float moon_fog = 0.0;
+        float sky_fog = 1.0;
+        if (low_quality) {
+            // Base fog only: skip the three extra shadow/sky marches used for
+            // light shafts. This is a large win on sky-heavy scenes.
+            vec3 haze = fog_col;
+            tinted = mix(tinted, haze, clamp(fog_t * min(rt.fog_density.a, 1.0), 0.0, 1.0));
+            out_color = vec4(max(tinted, vec3(0.0)), out_alpha);
+            return;
+        }
         if (sun_vis > 0.001) {
             sun_fog = soft_visibility(mid, -sun_dir, sun_dir, sun_ang * 3.0);
         }
-        float moon_fog = 0.0;
         if (moon_dir.y > 0.001) {
             moon_fog = soft_visibility(mid, -moon_dir, moon_dir,
                                        max(rt.moon_color_radius.a, shadow_softness) * 3.0);
@@ -1006,7 +1044,7 @@ void main() {
         // point that can be inside a wave produces broken dark fog bands.
         // Water already gets its depth/reflection treatment above, so use the
         // open-sky fog colour instead of the voxel shadow ray here.
-        float sky_fog = is_water_block
+        sky_fog = is_water_block
             ? 1.0
             : trace_voxels(mid, vec3(0.0, 1.0, 0.0), 96.0, 128, false).transmittance;
         vec3 haze = fog_col * sky_fog
